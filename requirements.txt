@@ -1,0 +1,8 @@
+python-telegram-bot>=20.0
+Pillow
+yt-dlp
+mutagen
+beautifulsoup4
+aiohttp
+requests
+python-dotenv
