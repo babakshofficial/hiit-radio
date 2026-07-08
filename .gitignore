@@ -6,3 +6,7 @@ venv
 *test*
 downloads
 __pycache__
+credentials.json
+cookies.txt
+.zotify
+config.json

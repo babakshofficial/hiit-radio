@@ -13,11 +13,92 @@ import io
 
 logger = logging.getLogger(__name__)
 
+# Auth cookie names that indicate a logged-in YouTube session.
+_YT_AUTH_COOKIE_NAMES = (
+    "LOGIN_INFO",
+    "SAPISID",
+    "__Secure-1PSID",
+    "__Secure-3PSID",
+    "SID",
+)
+
+
+def _cookies_look_authenticated(cookies_path):
+    """Return True if cookies.txt appears to contain a logged-in YouTube session."""
+    try:
+        with open(cookies_path, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+        return any(name in text for name in _YT_AUTH_COOKIE_NAMES)
+    except OSError:
+        return False
+
+
 class MusicDownloader:
     def __init__(self, download_dir="downloads"):
         self.download_dir = download_dir
         if not os.path.exists(self.download_dir):
             os.makedirs(self.download_dir)
+        self.cookies_path = os.getenv(
+            "YTDLP_COOKIES",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt"),
+        )
+        self.cookies_from_browser = os.getenv("YTDLP_COOKIES_FROM_BROWSER", "").strip()
+
+    def _build_ydl_opts(self, output_template):
+        """Build yt-dlp options, preferring logged-in browser cookies when available."""
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': output_template,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '256',
+            }],
+            'quiet': True,
+            'no_warnings': True,
+            'http_headers': {
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/131.0.0.0 Safari/537.36'
+                ),
+            },
+            'sleep_interval': 2,
+            'max_sleep_interval': 5,
+            'noplaylist': True,
+            'extractor_args': {
+                'youtube': {
+                    # Prefer Android client — less aggressive bot checks than web.
+                    'player_client': ['android', 'web'],
+                }
+            },
+        }
+
+        if self.cookies_from_browser:
+            # e.g. YTDLP_COOKIES_FROM_BROWSER=chrome  or  chrome:Profile\ 1
+            parts = self.cookies_from_browser.split(":", 1)
+            browser = parts[0].strip()
+            profile = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+            ydl_opts['cookiesfrombrowser'] = (browser, profile, None, None)
+            logger.info(f"Using YouTube cookies from browser: {self.cookies_from_browser}")
+        elif os.path.exists(self.cookies_path):
+            ydl_opts['cookiefile'] = self.cookies_path
+            if _cookies_look_authenticated(self.cookies_path):
+                logger.info(f"Using authenticated YouTube cookies from {self.cookies_path}")
+            else:
+                logger.warning(
+                    f"cookies.txt at {self.cookies_path} has no logged-in YouTube session "
+                    "(missing LOGIN_INFO/SAPISID). YouTube will likely bot-block downloads. "
+                    "Export fresh cookies while signed into youtube.com, or set "
+                    "YTDLP_COOKIES_FROM_BROWSER=chrome in .env"
+                )
+        else:
+            logger.warning(
+                f"No cookies file at {self.cookies_path}. YouTube may bot-block. "
+                "Export cookies.txt or set YTDLP_COOKIES_FROM_BROWSER=chrome"
+            )
+
+        return ydl_opts
 
     async def download_song(self, metadata):
         """Download song with multi-candidate search and multi-layer validation.
@@ -49,7 +130,11 @@ class MusicDownloader:
             title = re.sub(r'\s*\[[^]]*music video[^]]*\]', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\([^)]*lyrics[^)]*\)', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\([^)]*remaster[^)]*\)', '', title, flags=re.IGNORECASE)
+            # Strip soundtrack/feature markers like (From "Hoppers") / (feat. X)
+            title = re.sub(r'\s*\([^)]*(?:from|feat\.?|ft\.?)[^)]*\)', '', title, flags=re.IGNORECASE)
+            title = re.sub(r'\s*\[[^]]*(?:from|feat\.?|ft\.?)[^]]*\]', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\|.*$', '', title)
+            title = title.replace('"', '').replace("'", '')
 
             # Smart artist stripping: If title starts with "Artist -", "Artist |", etc., remove it
             if artist:
@@ -58,6 +143,10 @@ class MusicDownloader:
 
             title = re.sub(r'\s*[-–].*$', '', title)
             return title.strip()
+
+        def search_title(title):
+            """Title cleaned for search queries (no nested quotes / soundtrack tags)."""
+            return clean_title(title or "", "")
 
         def clean_artist(name):
             """Normalise a YouTube uploader/channel into an artist name for comparison."""
@@ -76,40 +165,26 @@ class MusicDownloader:
             combined = (title_sim * 0.7) + (artist_sim * 0.3)
             return combined, title_sim, artist_sim, yt_title, yt_artist
 
+        q_title = search_title(metadata.title)
+        q_artist = (metadata.artist or "").replace('"', '').strip()
+
         # YouTube search strategies ordered from most specific to least specific.
         yt_search_strategies = [
-            f'"{metadata.title}" "{metadata.artist}" audio',
-            f'"{metadata.title}" "{metadata.artist}"',
-            f'{metadata.title} {metadata.artist} official audio',
-            f'{metadata.title} {metadata.artist}',
+            f'"{q_title}" "{q_artist}" audio',
+            f'"{q_title}" "{q_artist}"',
+            f'{q_title} {q_artist} official audio',
+            f'{q_title} {q_artist}',
         ]
 
         # SoundCloud handles plain keyword queries best — no quotes, no
         # "official audio"/"audio" suffixes, which tend to return zero results.
         sc_search_strategies = [
-            f'{metadata.title} {metadata.artist}',
-            f'{metadata.title}',
+            f'{q_title} {q_artist}',
+            f'{q_title}',
         ]
 
         output_template = os.path.join(self.download_dir, f"{metadata.id}.%(ext)s")
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': output_template,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '256',
-            }],
-            'quiet': True,
-            'no_warnings': True,
-            'cookiefile': 'cookies.txt',
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            },
-            'sleep_interval': 2,
-            'max_sleep_interval': 5,
-            'noplaylist': True,
-        }
+        ydl_opts = self._build_ydl_opts(output_template)
 
         expected_title_clean = clean_title(metadata.title, metadata.artist)
         loop = asyncio.get_event_loop()
@@ -120,6 +195,7 @@ class MusicDownloader:
             (combined_score, video) or None."""
             best_local = None
             seen_ids = set()
+            bot_blocked = False
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 for strategy_idx, search_query in enumerate(strategies):
                     try:
@@ -162,8 +238,24 @@ class MusicDownloader:
                         if best_local and best_local[0] >= 85:
                             break
                     except Exception as e:
-                        logger.error(f"[{source_label}] Strategy {strategy_idx + 1} failed: {e}", exc_info=True)
+                        err = str(e)
+                        if "confirm you're not a bot" in err or "Sign in to confirm" in err:
+                            bot_blocked = True
+                            logger.error(
+                                f"[{source_label}] Strategy {strategy_idx + 1} blocked by YouTube bot check. "
+                                "Refresh logged-in cookies (cookies.txt) or set YTDLP_COOKIES_FROM_BROWSER=chrome"
+                            )
+                            # No point retrying more YouTube strategies with the same bad cookies.
+                            if source_label == "YouTube":
+                                break
+                        else:
+                            logger.error(f"[{source_label}] Strategy {strategy_idx + 1} failed: {e}")
                         continue
+            if bot_blocked and source_label == "YouTube" and not best_local:
+                logger.error(
+                    "YouTube bot-check blocked all strategies — falling through to SoundCloud. "
+                    "Fix cookies to restore YouTube downloads."
+                )
             return best_local
 
         # PHASE 1: search YouTube; fall back to SoundCloud before giving up.

@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from metadata import TrackMetadata
 from downloader import MusicDownloader
 from user_manager import UserManager
+from spotify_downloader import SpotifyFullDownloader
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -19,6 +20,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 downloader = MusicDownloader()
+spotify_dl = SpotifyFullDownloader(download_dir=downloader.download_dir)
 user_manager = UserManager()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -56,9 +58,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await status_message.edit_text(f"🎵 {metadata.title} - {metadata.artist or 'Unknown'}\n📥 در حال دانلود...")
-    
-    file_path = await downloader.download_song(metadata)
-    
+
+    file_path = None
+
+    # For Spotify links, download the FULL track directly from Spotify first.
+    if metadata.url and "spotify.com" in metadata.url and spotify_dl.is_configured():
+        await status_message.edit_text(
+            f"🎵 {metadata.title} - {metadata.artist or 'Unknown'}\n📥 دانلود نسخه کامل از اسپاتیفای..."
+        )
+        file_path = await spotify_dl.download(metadata.url, metadata.id)
+        if file_path:
+            downloader._apply_metadata(file_path, metadata)
+
+    # Fallback: search YouTube/SoundCloud for the full track.
+    if not file_path:
+        file_path = await downloader.download_song(metadata)
+
     if file_path and os.path.exists(file_path):
         await status_message.edit_text("📤 در حال ارسال...")
         try:
