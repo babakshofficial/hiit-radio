@@ -26,7 +26,7 @@ async def _get_spotify_token():
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
     
     if not client_id or not client_secret:
-        logger.error("❌ SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET missing in .env")
+        logger.error("SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET missing in .env")
         return None
 
     auth_str = f"{client_id}:{client_secret}"
@@ -48,11 +48,11 @@ async def _get_spotify_token():
                     data = await resp.json()
                     _spotify_token = data["access_token"]
                     _spotify_token_expiry = now + data["expires_in"] - 60
-                    logger.info("✅ Spotify token acquired")
+                    logger.info("Spotify token acquired")
                     return _spotify_token
                 else:
                     error_text = await resp.text()
-                    logger.error(f"❌ Spotify auth failed ({resp.status}): {error_text}")
+                    logger.error(f"Spotify auth failed ({resp.status}): {error_text}")
                     return None
     except Exception as e:
         logger.error(f"Spotify token error: {e}", exc_info=True)
@@ -66,14 +66,13 @@ class SpotifyMetadata:
         self.artist = None
         self.album = None
         self.artwork_url = None
-        self.preview_url = None  # 30s legal preview
+        self.preview_url = None
         self.type = "track"
         self.id = None
 
     async def fetch(self):
         if not self.url:
             return False
-
         try:
             from urllib.parse import urlparse, parse_qs
             parsed = urlparse(self.url)
@@ -91,31 +90,40 @@ class SpotifyMetadata:
                 logger.error(f"Invalid Spotify track ID: '{self.id}'")
                 return False
 
-            logger.info(f"✅ Extracted Spotify ID: {self.id}")
+            logger.info(f"Extracted Spotify ID: {self.id}")
 
-            token = await _get_spotify_token()
-            if not token:
-                return False
+            # Preferred path: official Web API (richest metadata).
+            if await self._fetch_from_api():
+                return True
 
+            # No-auth fallback: scrape the public embed page. This rescues cases
+            # where the API is unavailable — e.g. 403 "premium subscription
+            # required", missing credentials, or rate limiting.
+            logger.warning("Spotify API unavailable — falling back to public embed page")
+            return await self._fetch_from_embed()
+        except Exception as e:
+            logger.error(f"Spotify fetch error: {e}", exc_info=True)
+            return False
+
+    async def _fetch_from_api(self):
+        """Fetch track metadata via the official Spotify Web API. Returns True on success."""
+        token = await _get_spotify_token()
+        if not token:
+            return False
+        try:
             async with aiohttp.ClientSession() as session:
-                # 🔑 CRITICAL: ONLY Authorization header for track requests
+                # CRITICAL: ONLY Authorization header for track requests
                 async with session.get(
                     f"https://api.spotify.com/v1/tracks/{self.id}",
-                    headers={
-                        'Authorization': f'Bearer {token}'  # ONLY THIS HEADER
-                    }
+                    headers={'Authorization': f'Bearer {token}'}
                 ) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
                         logger.error(f"Spotify API {resp.status}: {error_text}")
                         if resp.status == 403:
-                            logger.error(
-                                "→ 403 Forbidden: Spotify app NOT ACTIVATED in dashboard.\n"
-                                "   FIX: https://developer.spotify.com/dashboard → Edit Settings →\n"
-                                "   Add Redirect URI: http://localhost → Save → Wait for 'Activated' status"
-                            )
+                            logger.error("403 Forbidden: app lacks Web API access (activation/premium required).")
                         elif resp.status == 404:
-                            logger.error("→ Track not found. Verify link is for a SONG (not album/playlist).")
+                            logger.error("Track not found. Verify link is for a SONG.")
                         return False
                     data = await resp.json()
 
@@ -124,18 +132,99 @@ class SpotifyMetadata:
             self.artist = ", ".join(a["name"] for a in artists) if artists else "Unknown Artist"
             album = data.get("album", {})
             self.album = album.get("name", "Unknown Album")
-            self.preview_url = data.get("preview_url")  # 30s legal preview
-            
+            self.preview_url = data.get("preview_url")
+
             images = album.get("images", [])
             if images:
                 self.artwork_url = images[0].get("url", "")
                 self.artwork_url = self.artwork_url.replace("640", "2000").replace("300", "2000")
-            
-            logger.info(f"✅ Spotify: '{self.title}' by '{self.artist}'")
+
+            logger.info(f"Spotify (API): '{self.title}' by '{self.artist}'")
             return True
-            
         except Exception as e:
-            logger.error(f"Spotify fetch error: {e}", exc_info=True)
+            logger.error(f"Spotify API fetch error: {e}", exc_info=True)
+            return False
+
+    async def _fetch_from_embed(self):
+        """No-auth fallback: parse metadata from the public Spotify embed page.
+
+        The embed page ships a __NEXT_DATA__ JSON blob containing title,
+        artists, cover art and (usually) a 30s preview URL — no token needed.
+        """
+        try:
+            embed_url = f"https://open.spotify.com/embed/track/{self.id}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.get(embed_url, headers=headers) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Spotify embed fetch failed: {resp.status}")
+                        return False
+                    html = await resp.text()
+
+            match = re.search(
+                r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+                html, re.DOTALL
+            )
+            if not match:
+                logger.error("Spotify embed: __NEXT_DATA__ payload not found")
+                return False
+
+            data = json.loads(match.group(1))
+
+            # Locate the track entity. The canonical path is
+            # props.pageProps.state.data.entity, but be defensive: fall back to a
+            # recursive search for the first dict that looks like a track entity.
+            entity = None
+            try:
+                entity = data["props"]["pageProps"]["state"]["data"]["entity"]
+            except (KeyError, TypeError):
+                entity = None
+
+            if not isinstance(entity, dict) or not (entity.get("title") or entity.get("name")):
+                def find_entity(node):
+                    if isinstance(node, dict):
+                        if (node.get("title") or node.get("name")) and (
+                            "artists" in node or "audioPreview" in node or "coverArt" in node
+                        ):
+                            return node
+                        for v in node.values():
+                            found = find_entity(v)
+                            if found:
+                                return found
+                    elif isinstance(node, list):
+                        for v in node:
+                            found = find_entity(v)
+                            if found:
+                                return found
+                    return None
+                entity = find_entity(data) or {}
+
+            self.title = entity.get("title") or entity.get("name") or self.title or "Unknown Track"
+
+            artists = entity.get("artists") or []
+            names = [a.get("name", "") for a in artists if isinstance(a, dict) and a.get("name")]
+            if names:
+                self.artist = ", ".join(names)
+            elif entity.get("subtitle"):
+                self.artist = entity.get("subtitle")
+            elif not self.artist:
+                self.artist = "Unknown Artist"
+
+            sources = (entity.get("coverArt") or {}).get("sources") or []
+            if sources:
+                best = max(sources, key=lambda s: s.get("width") or 0)
+                self.artwork_url = best.get("url")
+
+            preview = entity.get("audioPreview") or {}
+            if preview.get("url"):
+                self.preview_url = preview["url"]
+
+            logger.info(f"Spotify (embed): '{self.title}' by '{self.artist}'")
+            return bool(self.title and self.title != "Unknown Track")
+        except Exception as e:
+            logger.error(f"Spotify embed fallback error: {e}", exc_info=True)
             return False
 
 class AppleMusicMetadata:
@@ -146,14 +235,13 @@ class AppleMusicMetadata:
         self.artist = None
         self.album = None
         self.artwork_url = None
-        self.preview_url = None  # 30s legal preview
+        self.preview_url = None
         self.type = None
         self.id = None
 
     async def fetch(self):
         if not self.url:
             return False
-            
         try:
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -169,7 +257,7 @@ class AppleMusicMetadata:
                     
                     og_title = soup.find('meta', property='og:title')
                     og_image = soup.find('meta', property='og:image')
-                    og_audio = soup.find('meta', property='og:audio')  # 30s preview
+                    og_audio = soup.find('meta', property='og:audio')
 
                     if og_title:
                         self.title = og_title['content']
@@ -222,17 +310,45 @@ class AppleMusicMetadata:
                                     if artist_elem and 'by' in artist_elem.lower():
                                         self.artist = artist_elem.split('by')[1].strip() if 'by' in artist_elem.lower() else None
                     else:
+                        # Helper to strip "on Apple Music" or "- Apple Music" regardless of hidden Unicode spaces
+                        def clean_apple_text(text):
+                            if not text: return ""
+                            text = re.sub(r'\s*on\s+Apple\s*Music.*$', '', text, flags=re.IGNORECASE)
+                            text = re.sub(r'\s*[-–]\s*Apple\s*Music.*$', '', text, flags=re.IGNORECASE)
+                            return text.strip()
+
                         if self.title and ' by ' in self.title:
                             parts = self.title.split(' by ')
-                            self.title = parts[0]
-                            self.artist = parts[1].replace(' on Apple Music', '').replace(' on Apple\u00a0Music', '').replace(' - Apple Music', '').strip()
+                            self.title = clean_apple_text(parts[0])
+                            self.artist = clean_apple_text(parts[1])
                         elif self.title and ' - ' in self.title:
                             parts = self.title.split(' - ', 1)
                             if len(parts) == 2:
-                                self.artist = parts[0].strip()
-                                self.title = parts[1].replace(' on Apple Music', '').replace(' on Apple\u00a0Music', '').replace(' - Apple Music', '').strip()
-                    
-                    logger.info(f"Fetched meta: {self.title} by {self.artist}, artwork: {self.artwork_url}")
+                                self.artist = clean_apple_text(parts[0])
+                                self.title = clean_apple_text(parts[1])
+
+                    # Robust fallback for preview URL using iTunes Lookup API
+                    if not self.preview_url and self.id:
+                        try:
+                            clean_id = str(self.id).lstrip('-')
+                            if clean_id.isdigit():
+                                lookup_url = f"https://itunes.apple.com/lookup?id={clean_id}"
+                                async with aiohttp.ClientSession() as lookup_session:
+                                    async with lookup_session.get(lookup_url) as lookup_resp:
+                                        if lookup_resp.status == 200:
+                                            text = await lookup_resp.text()
+                                            data = json.loads(text)
+                                            if data.get('resultCount', 0) > 0:
+                                                for result in data['results']:
+                                                    if result.get('wrapperType') == 'track' and result.get('kind') == 'song':
+                                                        if result.get('previewUrl'):
+                                                            self.preview_url = result['previewUrl']
+                                                            logger.info("Got preview URL from iTunes Lookup API fallback")
+                                                            break
+                        except Exception as e:
+                            logger.warning(f"iTunes Lookup fallback failed: {e}")
+
+                    logger.info(f"Fetched meta: {self.title} by {self.artist}, artwork: {self.artwork_url}, preview: {self.preview_url}")
                     return True
         except Exception as e:
             logger.error(f"Error fetching meta: {e}", exc_info=True)
@@ -268,7 +384,7 @@ class AppleMusicMetadata:
                     meta.title = track.get('trackName', query)
                     meta.artist = track.get('artistName', '')
                     meta.album = track.get('collectionName', '')
-                    meta.preview_url = track.get('previewUrl')  # 30s legal preview
+                    meta.preview_url = track.get('previewUrl')
                     
                     artwork = track.get('artworkUrl100', '')
                     if artwork:
@@ -283,6 +399,92 @@ class AppleMusicMetadata:
         except Exception as e:
             logger.error(f"iTunes search failed: {e}", exc_info=True)
             return None
+
+    def __str__(self):
+        return f"Type: {self.type}, Title: {self.title}, Artist: {self.artist}, Album: {self.album}, Artwork: {self.artwork_url}"
+
+
+class TrackMetadata:
+    """Unified entry point for turning any user input (Spotify link, Apple Music
+    link, or a plain search query) into normalised track metadata.
+
+    Always returns a TrackMetadata instance. On failure the instance has
+    ``title = None`` so callers can simply check ``if not metadata.title``.
+    """
+
+    def __init__(self):
+        self.title = None
+        self.artist = None
+        self.album = None
+        self.artwork_url = None
+        self.preview_url = None
+        self.type = None
+        self.id = None
+        self.url = None
+
+    def _copy_from(self, source, url=None):
+        self.title = getattr(source, "title", None)
+        self.artist = getattr(source, "artist", None)
+        self.album = getattr(source, "album", None)
+        self.artwork_url = getattr(source, "artwork_url", None)
+        self.preview_url = getattr(source, "preview_url", None)
+        self.type = getattr(source, "type", None)
+        self.id = getattr(source, "id", None)
+        self.url = url if url is not None else getattr(source, "url", None)
+        return self
+
+    @classmethod
+    async def create(cls, text):
+        meta = cls()
+        if not text:
+            return meta
+        text = text.strip()
+
+        # SPOTIFY LINK
+        if "spotify.com" in text:
+            source = SpotifyMetadata(text)
+            if await source.fetch():
+                meta._copy_from(source, url=text)
+            else:
+                logger.error("Spotify metadata extraction failed")
+            return meta
+
+        # APPLE MUSIC LINK
+        if "music.apple.com" in text:
+            source = AppleMusicMetadata(text)
+            if await source.fetch():
+                meta._copy_from(source, url=text)
+            else:
+                logger.error("Apple Music metadata extraction failed")
+            return meta
+
+        # PLAIN TEXT SEARCH QUERY
+        query = text
+        if len(query) < 3:
+            logger.warning("Search query too short")
+            return meta
+
+        source = await AppleMusicMetadata.search_by_query(query)
+        if source:
+            meta._copy_from(source, url=None)
+            return meta
+
+        # Fallback: parse "Title by Artist" / "Artist - Title" from the raw query
+        title, artist = query, ""
+        if re.search(r'\s+by\s+', query, re.IGNORECASE):
+            parts = re.split(r'\s+by\s+', query, maxsplit=1, flags=re.IGNORECASE)
+            if len(parts) == 2:
+                title, artist = parts[0].strip(), parts[1].strip()
+        elif " - " in query:
+            parts = query.split(" - ", 1)
+            if len(parts) == 2:
+                artist, title = parts[0].strip(), parts[1].strip()
+
+        meta.title = title
+        meta.artist = artist
+        meta.id = str(abs(hash(query)))
+        meta.type = "search"
+        return meta
 
     def __str__(self):
         return f"Type: {self.type}, Title: {self.title}, Artist: {self.artist}, Album: {self.album}, Artwork: {self.artwork_url}"

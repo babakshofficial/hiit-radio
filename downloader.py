@@ -4,6 +4,7 @@ import yt_dlp
 import logging
 import asyncio
 import json
+import difflib
 from mutagen.mp3 import MP3 as MutagenMP3
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC
 import requests
@@ -19,40 +20,78 @@ class MusicDownloader:
             os.makedirs(self.download_dir)
 
     async def download_song(self, metadata):
-        """Download song with enhanced validation and Apple preview fallback."""
-        import difflib
-        
+        """Download song with multi-candidate search and multi-layer validation.
+
+        Instead of trusting only YouTube's #1 hit per query, we collect several
+        candidates from every search strategy, score each one on title + artist
+        similarity, and download the single best match above a safety threshold.
+        If YouTube yields no valid match, SoundCloud is tried as a fallback
+        before giving up.
+        """
+
+        # Minimum combined (title+artist) score required to accept a candidate.
+        MATCH_THRESHOLD = 65.0
+        # The title itself must clear this bar independently, so that a wrong
+        # song by the *right* artist (100% artist boost) can't sneak through.
+        TITLE_THRESHOLD = 70.0
+        # How many results to inspect per search query.
+        RESULTS_PER_QUERY = 5
+
         def title_similarity(a, b):
+            """Calculate similarity between two strings (0-100%)."""
             return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio() * 100
 
-        def clean_title(title):
-            # Remove parenthetical phrases that aren't part of core title
-            title = re.sub(r'\s*\([^)]*remaster[^)]*\)', '', title, flags=re.IGNORECASE)
-            title = re.sub(r'\s*\([^)]*from[^)]*\)', '', title, flags=re.IGNORECASE)  # Handles "(From Hoppers)"
+        def clean_title(title, artist=""):
+            """Remove common junk from YouTube titles and intelligently strip artist names."""
+            if not title: return ""
             title = re.sub(r'\s*\([^)]*official[^)]*\)', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\[[^]]*audio[^]]*\]', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\[[^]]*music video[^]]*\]', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\([^)]*lyrics[^)]*\)', '', title, flags=re.IGNORECASE)
+            title = re.sub(r'\s*\([^)]*remaster[^)]*\)', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\|.*$', '', title)
-            title = re.sub(r'\s*-.*$', '', title)
+
+            # Smart artist stripping: If title starts with "Artist -", "Artist |", etc., remove it
+            if artist:
+                pattern = r'^\s*' + re.escape(artist) + r'\s*[-–|]\s*'
+                title = re.sub(pattern, '', title, flags=re.IGNORECASE)
+
+            title = re.sub(r'\s*[-–].*$', '', title)
             return title.strip()
 
-        # 🔑 IMPROVED: Include artist in similarity check
-        def combined_similarity(yt_title, yt_artist, expected_title, expected_artist):
-            title_sim = title_similarity(yt_title, expected_title)
-            artist_sim = title_similarity(yt_artist or "", expected_artist)
-            # Weight title 70%, artist 30%
-            return (title_sim * 0.7) + (artist_sim * 0.3)
+        def clean_artist(name):
+            """Normalise a YouTube uploader/channel into an artist name for comparison."""
+            if not name: return ""
+            name = re.sub(r'\s*-\s*Topic\s*$', '', name, flags=re.IGNORECASE)
+            name = re.sub(r'VEVO\s*$', '', name, flags=re.IGNORECASE)
+            return name.strip()
 
-        search_strategies = [
+        def score(video):
+            """Combined title(70%) + artist(30%) similarity for a candidate video."""
+            yt_title = clean_title(video.get('title', ''), metadata.artist)
+            yt_artist = clean_artist(video.get('uploader', '') or video.get('channel', ''))
+            expected_title = clean_title(metadata.title, metadata.artist)
+            title_sim = title_similarity(yt_title, expected_title)
+            artist_sim = title_similarity(yt_artist, metadata.artist or "")
+            combined = (title_sim * 0.7) + (artist_sim * 0.3)
+            return combined, title_sim, artist_sim, yt_title, yt_artist
+
+        # YouTube search strategies ordered from most specific to least specific.
+        yt_search_strategies = [
             f'"{metadata.title}" "{metadata.artist}" audio',
             f'"{metadata.title}" "{metadata.artist}"',
             f'{metadata.title} {metadata.artist} official audio',
             f'{metadata.title} {metadata.artist}',
         ]
 
+        # SoundCloud handles plain keyword queries best — no quotes, no
+        # "official audio"/"audio" suffixes, which tend to return zero results.
+        sc_search_strategies = [
+            f'{metadata.title} {metadata.artist}',
+            f'{metadata.title}',
+        ]
+
         output_template = os.path.join(self.download_dir, f"{metadata.id}.%(ext)s")
-        
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': output_template,
@@ -72,81 +111,115 @@ class MusicDownloader:
             'noplaylist': True,
         }
 
-        for strategy_idx, search_query in enumerate(search_strategies):
-            try:
-                loop = asyncio.get_event_loop()
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    logger.info(f"🔍 Search attempt {strategy_idx + 1}/4: {search_query}")
-                    
-                    info = await loop.run_in_executor(
-                        None, 
-                        lambda: ydl.extract_info(f"ytsearch1:{search_query}", download=False)
-                    )
-                    
-                    if 'entries' in info and info['entries']:
-                        video = info['entries'][0]
-                    elif info:
-                        video = info
-                    else:
-                        video = None
+        expected_title_clean = clean_title(metadata.title, metadata.artist)
+        loop = asyncio.get_event_loop()
 
-                    if not video or not video.get('url'):
-                        logger.warning(f"Strategy {strategy_idx + 1} returned no video")
+        async def gather_best(search_prefix, source_label, strategies):
+            """Search one engine (e.g. 'ytsearch' / 'scsearch') across the given
+            strategies and return the best eligible candidate as
+            (combined_score, video) or None."""
+            best_local = None
+            seen_ids = set()
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                for strategy_idx, search_query in enumerate(strategies):
+                    try:
+                        logger.info(
+                            f"[{source_label}] Search attempt {strategy_idx + 1}/{len(strategies)}: {search_query}"
+                        )
+                        info = await loop.run_in_executor(
+                            None,
+                            lambda q=search_query: ydl.extract_info(
+                                f"{search_prefix}{RESULTS_PER_QUERY}:{q}", download=False
+                            )
+                        )
+                        entries = info.get('entries') if info else None
+                        if not entries:
+                            logger.warning(f"[{source_label}] Strategy {strategy_idx + 1} returned no results")
+                            continue
+
+                        for video in entries:
+                            if not video or not video.get('webpage_url'):
+                                continue
+                            vid = video.get('id')
+                            if vid in seen_ids:
+                                continue
+                            seen_ids.add(vid)
+
+                            combined, title_sim, artist_sim, c_title, c_artist = score(video)
+                            logger.info(
+                                f"[{source_label}] Candidate: Title {title_sim:.1f}%, Artist {artist_sim:.1f}%, "
+                                f"Combined {combined:.1f}% | '{c_title}' by '{c_artist}' | "
+                                f"Expected: '{expected_title_clean}' by '{metadata.artist}'"
+                            )
+                            # A candidate is only eligible if its title matches well enough.
+                            # This rejects other songs by the same artist.
+                            if title_sim < TITLE_THRESHOLD:
+                                continue
+                            if best_local is None or combined > best_local[0]:
+                                best_local = (combined, video)
+
+                        # Early exit: a strong match this early is very likely correct.
+                        if best_local and best_local[0] >= 85:
+                            break
+                    except Exception as e:
+                        logger.error(f"[{source_label}] Strategy {strategy_idx + 1} failed: {e}", exc_info=True)
                         continue
+            return best_local
 
-                    # ENHANCED VALIDATION: Combined title + artist similarity
-                    youtube_title = clean_title(video.get('title', ''))
-                    youtube_artist = video.get('uploader', '') or video.get('channel', '')
-                    expected_title = clean_title(metadata.title)
-                    expected_artist = metadata.artist
+        # PHASE 1: search YouTube; fall back to SoundCloud before giving up.
+        best = await gather_best("ytsearch", "YouTube", yt_search_strategies)
+        if not best or best[0] < MATCH_THRESHOLD:
+            yt_txt = f"{best[0]:.1f}%" if best else "n/a"
+            logger.warning(f"No valid YouTube match (best eligible: {yt_txt}) — trying SoundCloud fallback")
+            best = await gather_best("scsearch", "SoundCloud", sc_search_strategies)
 
-                    title_sim = title_similarity(youtube_title, expected_title)
-                    artist_sim = title_similarity(youtube_artist, expected_artist)
-                    # Weight title 70%, artist 30%
-                    similarity = (title_sim * 0.7) + (artist_sim * 0.3)
+        if not best or best[0] < MATCH_THRESHOLD:
+            score_txt = f"{best[0]:.1f}%" if best else "n/a"
+            logger.error(
+                f"No candidate passed validation on any source (title >= {TITLE_THRESHOLD:.0f}% and "
+                f"combined >= {MATCH_THRESHOLD:.0f}%). Best eligible: {score_txt}"
+            )
+            return None
 
-                    logger.info(f"Match: {similarity:.1f}% (YT: '{youtube_title}' by '{youtube_artist}' | Expected: '{expected_title}' by '{expected_artist}')")
-                    
-                    # LOWER THRESHOLD: 50% combined similarity (was 60% title-only)
-                    if similarity < 50:
-                        logger.warning(f"Low similarity ({similarity:.1f}%) — skipping")
-                        continue
+        best_score, best_video = best
+        logger.info(f"Best match {best_score:.1f}% — '{best_video.get('title', '')}' — downloading")
 
-                    await loop.run_in_executor(None, ydl.download, [video['webpage_url']])
+        # PHASE 2: download the chosen candidate and run post-download validation.
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                await loop.run_in_executor(None, ydl.download, [best_video['webpage_url']])
+        except Exception as e:
+            logger.error(f"Download of best match failed: {e}", exc_info=True)
+            return None
 
-                file_path = os.path.join(self.download_dir, f"{metadata.id}.mp3")
-                if not os.path.exists(file_path):
-                    logger.warning(f"Download failed for strategy {strategy_idx + 1}")
-                    continue
+        file_path = os.path.join(self.download_dir, f"{metadata.id}.mp3")
+        if not os.path.exists(file_path):
+            logger.warning("Download completed but output file not found")
+            return None
 
-                # Duration validation (keep existing)
-                try:
-                    audio_file = MutagenMP3(file_path)
-                    duration = audio_file.info.length
-                    if duration < 60 or duration > 600:
-                        logger.warning(f"❌ Invalid duration ({duration:.1f}s)")
-                        os.remove(file_path)
-                        continue
-                except Exception as e:
-                    logger.warning(f"Duration validation skipped: {e}")
+        # VALIDATION: Duration check
+        try:
+            audio_file = MutagenMP3(file_path)
+            duration = audio_file.info.length
+            if duration < 60 or duration > 600:
+                logger.warning(f"Invalid duration ({duration:.1f}s) - likely wrong track")
+                os.remove(file_path)
+                return None
+            if duration < 90 or duration > 420:
+                logger.warning(f"Unusual duration ({duration:.1f}s) - proceeding anyway")
+        except Exception as e:
+            logger.warning(f"Duration validation skipped (error: {e})")
 
-                # File size validation (keep existing)
-                file_size = os.path.getsize(file_path)
-                if file_size < 1_000_000:
-                    logger.warning(f"❌ File too small ({file_size/1024:.0f}KB)")
-                    os.remove(file_path)
-                    continue
+        # VALIDATION: File size check
+        file_size = os.path.getsize(file_path)
+        if file_size < 1_000_000:
+            logger.warning(f"File too small ({file_size/1024:.0f}KB) - likely wrong track")
+            os.remove(file_path)
+            return None
 
-                logger.info(f"✅ Download successful (strategy {strategy_idx + 1})")
-                self._apply_metadata(file_path, metadata)
-                return file_path
-
-            except Exception as e:
-                logger.error(f"Strategy {strategy_idx + 1} failed: {e}", exc_info=True)
-                continue
-
-        logger.error("❌ All YouTube strategies failed — using Apple Music preview")
-        return None  # main.py will handle preview fallback
+        logger.info(f"Download successful (match {best_score:.1f}%)")
+        self._apply_metadata(file_path, metadata)
+        return file_path
 
     def _apply_metadata(self, file_path, metadata):
         try:
@@ -169,7 +242,7 @@ class MusicDownloader:
                     if response.status_code == 200:
                         original_artwork = response.content
                         
-                        # 🔹 ROUTE ARTWORK PROCESSING BY SOURCE
+                        # Route artwork processing by source
                         source = "unknown"
                         if hasattr(metadata, 'url') and metadata.url:
                             if "spotify.com" in metadata.url:
@@ -194,7 +267,7 @@ class MusicDownloader:
                                 desc="Cover",
                                 data=processed_artwork
                             ))
-                            logger.info(f"✅ Embedded {source} artwork with HiiT Radio logo")
+                            logger.info(f"Embedded {source} artwork with HiiT Radio logo")
                         else:
                             logger.warning("Artwork processing returned None")
                     else:
@@ -202,7 +275,7 @@ class MusicDownloader:
                 except Exception as e:
                     logger.error(f"Artwork error: {e}", exc_info=True)
             else:
-                logger.info("No artwork URL — sending audio without cover")
+                logger.info("No artwork URL - sending audio without cover")
 
             audio.save(v2_version=3, v1=1)
             logger.info(f"Metadata applied: '{metadata.title}' by '{metadata.artist}'")
@@ -231,13 +304,13 @@ class MusicDownloader:
             # 3. Paste logo (25% of 600 = 150px)
             logo_path = os.path.join(os.path.dirname(__file__), "hiit-radio.png")
             if not os.path.exists(logo_path):
-                logger.warning("❌ hiit-radio.png NOT FOUND")
+                logger.warning("hiit-radio.png NOT FOUND")
                 out = io.BytesIO()
                 img.save(out, format="JPEG", quality=95)
                 return out.getvalue()
 
             logo = Image.open(logo_path).convert("RGBA")
-            logo_w = int(target_size * 0.25)  # 150px
+            logo_w = int(target_size * 0.25)
             logo_h = int(logo_w * logo.height / logo.width)
             logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
 
@@ -252,7 +325,7 @@ class MusicDownloader:
             return out.getvalue()
 
         except Exception as e:
-            logger.error(f"❌ Apple/Spotify artwork failed: {e}", exc_info=True)
+            logger.error(f"Apple/Spotify artwork failed: {e}", exc_info=True)
             try:
                 img = Image.open(io.BytesIO(original_artwork_bytes))
                 if img.mode != "RGB":
@@ -290,13 +363,13 @@ class MusicDownloader:
             # 4. Paste logo (30% of 600 = 180px)
             logo_path = os.path.join(os.path.dirname(__file__), "hiit-radio.png")
             if not os.path.exists(logo_path):
-                logger.warning("❌ hiit-radio.png NOT FOUND")
+                logger.warning("hiit-radio.png NOT FOUND")
                 out = io.BytesIO()
                 bordered.save(out, format="JPEG", quality=95)
                 return out.getvalue()
 
             logo = Image.open(logo_path).convert("RGBA")
-            logo_w = int(target_size * 0.3)  # 180px
+            logo_w = int(target_size * 0.3)
             logo_h = int(logo_w * logo.height / logo.width)
             logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
 
@@ -311,7 +384,7 @@ class MusicDownloader:
             return out.getvalue()
 
         except Exception as e:
-            logger.error(f"❌ iTunes artwork failed: {e}", exc_info=True)
+            logger.error(f"iTunes artwork failed: {e}", exc_info=True)
             try:
                 img = Image.open(io.BytesIO(original_artwork_bytes))
                 if img.mode != "RGB":
