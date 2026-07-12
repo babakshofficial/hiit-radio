@@ -2,11 +2,14 @@ import asyncio
 import logging
 import os
 import secrets
+import sys
 import time
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+_BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(_BASE_DIR / ".env")
 
 from telegram import (
     Update,
@@ -678,7 +681,13 @@ async def _on_shutdown(application):
 
 def main():
     if not BOT_TOKEN:
-        return
+        env_path = _BASE_DIR / ".env"
+        logger.error(
+            "BOT_TOKEN is not set. Create %s with BOT_TOKEN=your_telegram_bot_token "
+            "or set the variable in the systemd unit (EnvironmentFile=).",
+            env_path,
+        )
+        sys.exit(1)
 
     application = (
         ApplicationBuilder()

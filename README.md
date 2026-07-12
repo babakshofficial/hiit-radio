@@ -137,9 +137,17 @@ Example `/etc/systemd/system/hiit-radio-bot.service`:
 [Service]
 User=babak
 WorkingDirectory=/home/babak/hiit-radio
+EnvironmentFile=/home/babak/hiit-radio/.env
 ExecStart=/home/babak/hiit-radio/.venv/bin/python /home/babak/hiit-radio/main.py
 Restart=on-failure
 RestartSec=10
+```
+
+Ensure `.env` exists on the VPS (it is gitignored — copy it manually):
+
+```bash
+ls -la /home/babak/hiit-radio/.env
+grep BOT_TOKEN /home/babak/hiit-radio/.env   # must show BOT_TOKEN=123456:ABC...
 ```
 
 Then:
