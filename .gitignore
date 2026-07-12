@@ -10,3 +10,8 @@ credentials.json
 cookies.txt
 .zotify
 config.json
+cache/
+*.db
+hiit_radio.db
+*.bak.*
+*cookies.txt*

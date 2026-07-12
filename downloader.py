@@ -6,7 +6,7 @@ import asyncio
 import json
 import difflib
 from mutagen.mp3 import MP3 as MutagenMP3
-from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC
+from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC, USLT, SYLT
 import requests
 from PIL import Image
 import io
@@ -313,7 +313,36 @@ class MusicDownloader:
         self._apply_metadata(file_path, metadata)
         return file_path
 
-    def _apply_metadata(self, file_path, metadata):
+    def _apply_lyrics(self, audio, lyrics):
+        if not lyrics or not lyrics.get("text"):
+            return
+        audio.tags.delall("USLT")
+        audio.tags.delall("SYLT")
+        audio.tags.add(USLT(encoding=3, lang="eng", desc="Lyrics", text=lyrics["text"]))
+        if lyrics.get("synced"):
+            try:
+                audio.tags.add(SYLT(
+                    encoding=3, lang="eng", format=2, type=1, desc="Synced Lyrics",
+                    text=lyrics["synced"],
+                ))
+            except Exception:
+                pass
+
+    def embed_lyrics(self, file_path, lyrics):
+        """Embed USLT/SYLT lyrics into an existing MP3 file."""
+        if not lyrics or not lyrics.get("text"):
+            return
+        try:
+            audio = MutagenMP3(file_path, ID3=ID3)
+            if audio.tags is None:
+                audio.add_tags()
+            self._apply_lyrics(audio, lyrics)
+            audio.save(v2_version=3, v1=1)
+            logger.info(f"Lyrics embedded ({lyrics.get('source', 'unknown')})")
+        except Exception as e:
+            logger.debug(f"Lyrics embed skipped: {e}")
+
+    def _apply_metadata(self, file_path, metadata, lyrics=None):
         try:
             audio = MutagenMP3(file_path, ID3=ID3)
             try:
@@ -327,6 +356,8 @@ class MusicDownloader:
                 audio.tags.add(TPE1(encoding=3, text=metadata.artist))
             if metadata.album:
                 audio.tags.add(TALB(encoding=3, text=metadata.album))
+            if lyrics:
+                self._apply_lyrics(audio, lyrics)
 
             if metadata.artwork_url:
                 try:

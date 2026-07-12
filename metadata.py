@@ -400,8 +400,128 @@ class AppleMusicMetadata:
             logger.error(f"iTunes search failed: {e}", exc_info=True)
             return None
 
+    @classmethod
+    async def search_many(cls, query, limit=5):
+        """Search iTunes and return up to ``limit`` AppleMusicMetadata track objects."""
+        encoded_query = urllib.parse.quote(query)
+        url = f"https://itunes.apple.com/search?term={encoded_query}&media=music&entity=song&limit={limit}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        }
+        results = []
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers) as response:
+                    data = json.loads(await response.text())
+            for track in data.get('results', [])[:limit]:
+                meta = cls(None)
+                meta.title = track.get('trackName', query)
+                meta.artist = track.get('artistName', '')
+                meta.album = track.get('collectionName', '')
+                meta.preview_url = track.get('previewUrl')
+                artwork = track.get('artworkUrl100', '')
+                if artwork:
+                    meta.artwork_url = artwork.replace('100x100bb', '3000x3000bb').replace('100x100', '3000x3000')
+                meta.type = 'search'
+                meta.id = str(track.get('trackId', abs(hash(query))))
+                results.append(meta)
+        except Exception as e:
+            logger.error(f"iTunes multi-search failed: {e}")
+        return results
+
+    @classmethod
+    async def lookup_album_tracks(cls, album_id):
+        """Return list of iTunes track result dicts for an album."""
+        url = f"https://itunes.apple.com/lookup?id={album_id}&entity=song"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    data = json.loads(await resp.text())
+            return [
+                item for item in data.get('results', [])
+                if item.get('wrapperType') == 'track' and item.get('kind') == 'song'
+            ]
+        except Exception as e:
+            logger.error(f"iTunes album lookup failed: {e}")
+            return []
+
     def __str__(self):
         return f"Type: {self.type}, Title: {self.title}, Artist: {self.artist}, Album: {self.album}, Artwork: {self.artwork_url}"
+
+
+class SpotifyCollection:
+    """Expand Spotify album/playlist URLs into track lists."""
+
+    def __init__(self, url):
+        self.url = url
+        self.collection_type = None
+        self.collection_id = None
+        self.name = None
+
+    def _parse_id(self):
+        from urllib.parse import urlparse
+        parsed = urlparse(self.url)
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) >= 2 and parts[0] in ("album", "playlist"):
+            self.collection_type = parts[0]
+            self.collection_id = parts[1].split("?")[0]
+            return True
+        return False
+
+    async def fetch_tracks(self):
+        if not self._parse_id():
+            return []
+        token = await _get_spotify_token()
+        if not token:
+            return []
+        tracks = []
+        offset = 0
+        limit = 50
+        endpoint = (
+            f"https://api.spotify.com/v1/albums/{self.collection_id}/tracks"
+            if self.collection_type == "album"
+            else f"https://api.spotify.com/v1/playlists/{self.collection_id}/tracks"
+        )
+        headers = {'Authorization': f'Bearer {token}'}
+        try:
+            async with aiohttp.ClientSession() as session:
+                while True:
+                    sep = '&' if '?' in endpoint else '?'
+                    url = f"{endpoint}{sep}limit={limit}&offset={offset}"
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status != 200:
+                            logger.error(f"Spotify collection API {resp.status}")
+                            break
+                        data = await resp.json()
+                    items = data.get('items', [])
+                    if not items:
+                        break
+                    for item in items:
+                        t = item.get('track') or item
+                        if not t or t.get('type') != 'track':
+                            continue
+                        meta = TrackMetadata()
+                        meta.title = t.get('name')
+                        artists = t.get('artists', [])
+                        meta.artist = ", ".join(a['name'] for a in artists if a.get('name'))
+                        album = t.get('album') or {}
+                        meta.album = album.get('name')
+                        meta.id = t.get('id') or str(abs(hash(meta.title)))
+                        meta.url = f"https://open.spotify.com/track/{meta.id}"
+                        meta.type = 'track'
+                        images = album.get('images', [])
+                        if images:
+                            meta.artwork_url = images[0].get('url', '')
+                        tracks.append(meta)
+                    if self.collection_type == 'album':
+                        break
+                    if not data.get('next'):
+                        break
+                    offset += limit
+            return tracks
+        except Exception as e:
+            logger.error(f"Spotify collection fetch error: {e}")
+            return []
 
 
 class TrackMetadata:
@@ -485,6 +605,61 @@ class TrackMetadata:
         meta.id = str(abs(hash(query)))
         meta.type = "search"
         return meta
+
+    @classmethod
+    async def create_collection(cls, text):
+        """Return (collection_name, list[TrackMetadata]) for album/playlist URLs, else ([], [])."""
+        text = (text or "").strip()
+        if not text:
+            return None, []
+
+        # Spotify album/playlist
+        if "spotify.com" in text and ("/album/" in text or "/playlist/" in text):
+            coll = SpotifyCollection(text)
+            tracks = await coll.fetch_tracks()
+            name = tracks[0].album if tracks else "Spotify collection"
+            return name, tracks
+
+        # Apple Music album/playlist
+        if "music.apple.com" in text:
+            source = AppleMusicMetadata(text)
+            if not await source.fetch():
+                return None, []
+            if source.type == 'album' and source.id:
+                raw_tracks = await AppleMusicMetadata.lookup_album_tracks(source.id)
+                tracks = []
+                for item in raw_tracks:
+                    meta = cls()
+                    meta.title = item.get('trackName')
+                    meta.artist = item.get('artistName', source.artist)
+                    meta.album = item.get('collectionName', source.album)
+                    meta.id = str(item.get('trackId', abs(hash(meta.title))))
+                    meta.url = text
+                    meta.type = 'song'
+                    artwork = item.get('artworkUrl100', '')
+                    if artwork:
+                        meta.artwork_url = artwork.replace('100x100bb', '3000x3000bb')
+                    tracks.append(meta)
+                return source.title or source.album, tracks
+            if source.type == 'playlist':
+                # iTunes has no public playlist API — search by playlist title
+                if source.title:
+                    results = await AppleMusicMetadata.search_many(source.title, limit=20)
+                    tracks = [cls()._copy_from(r) for r in results]
+                    return source.title, tracks
+
+        return None, []
+
+    @classmethod
+    async def is_collection_url(cls, text):
+        text = (text or "").strip()
+        if "spotify.com" in text and ("/album/" in text or "/playlist/" in text):
+            return True
+        if "music.apple.com" in text and ("/album/" in text or "/playlist/" in text):
+            if "?i=" in text:
+                return False  # single song on album page
+            return True
+        return False
 
     def __str__(self):
         return f"Type: {self.type}, Title: {self.title}, Artist: {self.artist}, Album: {self.album}, Artwork: {self.artwork_url}"
