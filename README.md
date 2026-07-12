@@ -113,6 +113,46 @@ source .venv/bin/activate
 python main.py
 ```
 
+### VPS / systemd deployment
+
+Your service unit must use the **virtualenv interpreter**, and **all** dependencies must be installed **into that venv** — not with system `pip` or `pip3`.
+
+```bash
+cd /home/babak/hiit-radio
+
+# Create venv if missing
+python3 -m venv .venv
+
+# Install into the SAME Python systemd runs
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -r requirements.txt
+
+# Verify (must print a path under .venv and no error)
+.venv/bin/python -c "from dotenv import load_dotenv; print('OK')"
+```
+
+Example `/etc/systemd/system/hiit-radio-bot.service`:
+
+```ini
+[Service]
+User=babak
+WorkingDirectory=/home/babak/hiit-radio
+ExecStart=/home/babak/hiit-radio/.venv/bin/python /home/babak/hiit-radio/main.py
+Restart=on-failure
+RestartSec=10
+```
+
+Then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable hiit-radio-bot.service
+sudo systemctl restart hiit-radio-bot.service
+sudo journalctl -u hiit-radio-bot.service -f
+```
+
+**Common mistake:** running `pip install python-dotenv` or `pip3 install -r requirements.txt` without activating the venv (or without using `.venv/bin/pip`). That installs packages for system Python while systemd runs `.venv/bin/python`, which causes `ModuleNotFoundError: No module named 'dotenv'`.
+
 Production (example systemd unit):
 
 ```bash
