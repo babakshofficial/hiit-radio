@@ -9,3 +9,4 @@ python-dotenv
 # Full Spotify track downloads (requires Spotify Premium + one-time login).
 # Maintained fork; the PyPI "zotify" package's login flow is broken.
 zotify @ git+https://github.com/Googolplexed0/zotify.git
+python-dotenv==1.2.1
