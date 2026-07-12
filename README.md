@@ -1,60 +1,214 @@
-# Apple Music Downloader Telegram Bot
+# HiiT Radio Bot
 
-A fully functional Python Telegram bot that downloads music from Apple Music links using a YouTube Music fallback approach.
+A Telegram bot that downloads full-length music tracks from Apple Music, Spotify, and plain-text searches. It resolves metadata from the source link, fetches audio via YouTube/SoundCloud (with optional direct Spotify downloads), embeds artwork and lyrics, and delivers MP3 files in chat.
+
+The user interface is in **Persian (Farsi)**. Admin tooling and this documentation are in **English**.
 
 ## Features
-- **Metadata Extraction:** Automatically fetches title, artist, album, and high-quality artwork from Apple Music.
-- **High-Quality Audio:** Downloads audio via `yt-dlp` (YouTube Music) and converts it to 256kbps MP3.
-- **ID3 Tagging:** Embeds metadata and album art directly into the MP3 file.
-- **Rate Limiting:** Prevents abuse with a configurable download limit (default: 10 downloads/hour).
-- **Admin Stats:** Monitor bot usage with the `/stats` command.
-- **Cleanup:** Automatically removes temporary files after sending.
+
+### Downloads
+- **Apple Music links** — metadata from the page; audio via YouTube/SoundCloud matching
+- **Spotify track links** — full download via [zotify](https://github.com/Googolplexed0/zotify) when Premium credentials are configured; otherwise YouTube/SoundCloud fallback
+- **Text search** — song or artist name via iTunes lookup + YouTube/SoundCloud
+- **Albums & playlists** — unlimited sequential processing with progress and `/cancel`
+- **256 kbps MP3** — conversion via FFmpeg; ID3 tags, embedded artwork (HiiT Radio branding), and optional synced/plain lyrics (LRCLIB, Genius, Musixmatch)
+
+### User experience
+- Inline mode — search from any chat (`@YourBot song name`)
+- Download history — `/history` with one-tap re-download buttons
+- Recommendations — “More by artist” / “Similar songs” after each track
+- Discovery — `/discover` based on listening history
+- Curated search — `/search genre:lofi mood:chill` (see `search_mappings.json`)
+- Rate limiting — 10 downloads per hour per user (each playlist track counts separately)
+- File cache — repeated requests served from disk without re-downloading
+
+### Access & admin
+- **Channel gate** — users must join a required Telegram channel before using the bot
+- **VIP log channel** — every request, download event, startup/shutdown, and error logged to a private admin channel
+- **SQLite analytics** — users, downloads, cache stats, platform breakdown
+- **Admin broadcast** — `/broadcast` with optional confirmation token
 
 ## Prerequisites
+
 - Python 3.10+
-- FFmpeg installed and added to PATH
-- A Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
+- [FFmpeg](https://ffmpeg.org/) on `PATH`
+- A Telegram bot token from [@BotFather](https://t.me/BotFather)
+- **YouTube login cookies** (required for Apple Music links and most searches) — see [SETUP_CREDENTIALS.md](SETUP_CREDENTIALS.md)
+- **Spotify Premium + zotify credentials** (optional, for direct Spotify full tracks) — see [SETUP_CREDENTIALS.md](SETUP_CREDENTIALS.md)
+
+Enable **inline mode** in BotFather if you want inline search.
+
+For private channels (membership gate or VIP logging), add the bot as a **channel administrator**.
 
 ## Installation
 
-1. **Clone the repository:**
-   ```bash
-   git clone <repository-url>
-   cd apple_music_bot
-   ```
-
-2. **Set up a virtual environment:**
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate
-   ```
-
-3. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Configure environment variables:**
-   Create a `.env` file in the root directory:
-   ```env
-   BOT_TOKEN=your_telegram_bot_token
-   ADMIN_ID=your_telegram_user_id
-   ```
-
-## Usage
-Run the bot:
 ```bash
+git clone <repository-url>
+cd hiit-radio-bot
+
+python3 -m venv .venv
+source .venv/bin/activate
+
+pip install -r requirements.txt
+```
+
+Copy the environment template and fill in your values:
+
+```bash
+cp .env.example .env
+```
+
+## Configuration
+
+All settings live in `.env`. See `.env.example` for the full list.
+
+| Variable | Description |
+|----------|-------------|
+| `BOT_TOKEN` | Telegram bot token (required) |
+| `ADMIN_ID` | Your Telegram user ID (required for admin commands) |
+| `REQUIRED_CHANNEL` | Channel users must join (`@username` or numeric ID) |
+| `VIP_LOG_CHANNEL_ID` | Private channel ID for admin logs (empty = disabled) |
+| `DATABASE_PATH` | SQLite database file (default: `hiit_radio.db`) |
+| `CACHE_DIR` / `CACHE_TTL_HOURS` | On-disk download cache |
+| `YTDLP_COOKIES_FROM_BROWSER` | e.g. `chrome` — read live browser cookies |
+| `YTDLP_COOKIES` | Path to exported `cookies.txt` |
+| `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | Spotify Web API (metadata only) |
+| `SPOTIFY_CREDENTIALS` | Path to zotify `credentials.json` (full Spotify downloads) |
+| `SPOTIFY_USERNAME` | Spotify username for zotify |
+| `GENIUS_API_TOKEN` / `MUSIXMATCH_API_KEY` | Optional lyrics providers |
+
+### Credentials
+
+Full-track downloads depend on two separate credential systems:
+
+1. **YouTube** — logged-in cookies for yt-dlp (Apple Music, search, fallbacks)
+2. **Spotify (zotify)** — one-time OAuth `credentials.json` for Premium full tracks
+
+`SPOTIFY_CLIENT_ID` / `SECRET` alone only resolve metadata; they do not download audio.
+
+Follow **[SETUP_CREDENTIALS.md](SETUP_CREDENTIALS.md)** for step-by-step setup.
+
+Check status anytime (admin):
+
+```text
+/creds
+```
+
+Or from the shell:
+
+```bash
+.venv/bin/python -c "from cred_status import get_credentials_status; print(get_credentials_status()[0])"
+```
+
+### VIP log channel ID
+
+As admin, run `/channelid` in the VIP channel (or forward a channel post to the bot) to get the numeric chat ID for `VIP_LOG_CHANNEL_ID`.
+
+## Running the bot
+
+Development:
+
+```bash
+source .venv/bin/activate
 python main.py
 ```
 
-Send an Apple Music link to the bot, and it will process and send the MP3 file back to you.
+Production (example systemd unit):
 
-## Project Structure
-- `main.py`: Bot entry point and Telegram handlers.
-- `metadata.py`: Apple Music scraping and metadata extraction.
-- `downloader.py`: Audio downloading, conversion, and ID3 tagging.
-- `user_manager.py`: User session and rate limit management.
-- `downloads/`: Temporary directory for processing files.
+```bash
+sudo systemctl start hiit-radio.service
+sudo systemctl restart hiit-radio.service   # after .env or credential changes
+```
+
+Restart the bot whenever you update cookies, Spotify credentials, or environment variables.
+
+## Commands
+
+### User commands
+
+| Command | Description |
+|---------|-------------|
+| `/start` | Welcome message and quick guide |
+| `/help` | Usage, inline mode, rate limits, search syntax |
+| `/history` | Recent downloads with re-download buttons |
+| `/discover` | Personalized suggestions from your history |
+| `/search` | Curated genre/mood/decade search (e.g. `/search genre:lofi`) |
+| `/cancel` | Stop an in-progress playlist download |
+
+Send a track link, album/playlist URL, or plain song name as a normal message to download.
+
+### Admin commands
+
+| Command | Description |
+|---------|-------------|
+| `/stats` | Users, downloads, cache hit rate, top artists/songs |
+| `/analytics` | Alias for `/stats` |
+| `/creds` | YouTube + Spotify credential readiness report |
+| `/channelid` | Resolve chat ID for VIP log channel setup |
+| `/broadcast <message>` | Send a message to all known users (confirmation step) |
+
+## Download flow
+
+```text
+User message (link / search / playlist)
+        │
+        ▼
+  Channel membership gate
+        │
+        ▼
+  Metadata resolution (Apple / Spotify API or embed / iTunes)
+        │
+        ▼
+  Cache lookup ──hit──► send cached MP3
+        │
+       miss
+        │
+        ▼
+  Spotify link + zotify configured? ──yes──► zotify full download
+        │
+        no / failed
+        │
+        ▼
+  YouTube match (yt-dlp + cookies) ──► SoundCloud fallback
+        │
+        ▼
+  Embed lyrics, write cache, send MP3 + recommendation buttons
+```
+
+Users only see simple result messages. Technical details (credential status, backend errors) are written to the VIP log channel, not shown in chat.
+
+## Project structure
+
+| File | Role |
+|------|------|
+| `main.py` | Bot entry point, handlers, startup/shutdown hooks |
+| `metadata.py` | Apple Music, Spotify, iTunes metadata and playlist expansion |
+| `downloader.py` | yt-dlp download, FFmpeg conversion, ID3/artwork/lyrics |
+| `spotify_downloader.py` | Full Spotify tracks via zotify |
+| `download_orchestrator.py` | Cache-aware unified download pipeline |
+| `cache_manager.py` | Disk cache with TTL and Telegram `file_id` reuse |
+| `playlist_handler.py` | Sequential album/playlist downloads |
+| `lyrics_service.py` | LRCLIB / Genius / Musixmatch fetch |
+| `database.py` | SQLite schema, analytics, download history |
+| `user_manager.py` | Users, rate limits, download recording |
+| `gates.py` | Required-channel membership check |
+| `admin_logger.py` | VIP channel activity logging |
+| `progress.py` | Throttled in-chat progress updates |
+| `recommendations.py` | Post-download inline keyboard |
+| `search_parser.py` | `/search` command parsing |
+| `cred_status.py` | Credential health report for `/creds` |
+| `search_mappings.json` | Genre/mood/decade → iTunes query map |
+
+Runtime directories (gitignored): `downloads/`, `cache/`, `hiit_radio.db`, `cookies.txt`, `credentials.json`.
+
+## Migrating from users.json
+
+If you have an older `users.json` deployment:
+
+```bash
+.venv/bin/python migrate_json_to_sqlite.py
+```
 
 ## License
+
 MIT
