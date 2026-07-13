@@ -188,6 +188,7 @@ Send a track link, album/playlist URL, or plain song name as a normal message to
 | `/analytics` | Alias for `/stats` |
 | `/creds` | YouTube credential readiness report |
 | `/channelid` | Resolve chat ID for VIP log channel setup |
+| `/viplogtest` | Test VIP log channel (admin) |
 | `/broadcast <message>` | Send a message to all known users (confirmation step) |
 
 ## Download flow

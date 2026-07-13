@@ -22,7 +22,10 @@ echo
 echo "--- .env ---"
 if [[ -f .env ]]; then
   echo "OK: .env exists"
-  grep -E '^BOT_TOKEN=|^YTDLP_|^SPOTIFY_|^HTTPS_PROXY=|^YTDLP_PROXY=' .env | sed 's/BOT_TOKEN=.*/BOT_TOKEN=***hidden***/' || true
+  grep -E '^BOT_TOKEN=|^VIP_LOG|^YTDLP_|^SPOTIFY_|^HTTPS_PROXY=|^YTDLP_PROXY=' .env | sed 's/BOT_TOKEN=.*/BOT_TOKEN=***hidden***/' || true
+  if ! grep -q '^VIP_LOG_CHANNEL_ID=.\+' .env 2>/dev/null; then
+    echo "WARN: VIP_LOG_CHANNEL_ID not set — admin logs disabled"
+  fi
 else
   echo "FAIL: .env missing"
 fi

@@ -18,6 +18,8 @@ from telegram import (
     InlineQueryResultArticle,
     InlineQueryResultCachedAudio,
     InputTextMessageContent,
+    MessageOriginChannel,
+    MessageOriginChat,
 )
 from telegram.ext import (
     ApplicationBuilder,
@@ -44,7 +46,10 @@ from admin_logger import (
     log_shutdown,
     log_startup,
     log_system,
+    notify_admin_vip_issue,
+    send_test_message,
     validate_vip_log_channel,
+    vip_status_text,
 )
 import admin_logger
 from progress import ProgressReporter
@@ -184,8 +189,18 @@ async def channelid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
 
-    if msg.forward_from_chat:
+    chat = None
+    origin = msg.forward_origin
+    if isinstance(origin, MessageOriginChannel):
+        chat = origin.chat
+    elif isinstance(origin, MessageOriginChat):
+        chat = origin.sender_chat
+    elif msg.forward_from_chat:
         chat = msg.forward_from_chat
+    elif msg.sender_chat:
+        chat = msg.sender_chat
+
+    if chat:
         lines = [
             f"شناسه چت: `{chat.id}`",
             f"نوع: {chat.type}",
@@ -197,17 +212,22 @@ async def channelid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("\nدر .env قرار بده:\nVIP_LOG_CHANNEL_ID=" + str(chat.id))
         await msg.reply_text("\n".join(lines), parse_mode="Markdown")
         return
-    if msg.sender_chat:
-        chat = msg.sender_chat
-        await msg.reply_text(
-            f"شناسه چت: `{chat.id}`\n\nدر .env:\nVIP_LOG_CHANNEL_ID={chat.id}",
-            parse_mode="Markdown",
-        )
-        return
+
     await msg.reply_text(
         "یک پیام از کانال VIP را به این چت **فوروارد** کن (با حفظ نام فرستنده).\n"
         "یا در خود کانال یک پیام بفرست و همانجا /channelid را بزن."
     )
+
+
+async def viplogtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    status = vip_status_text()
+    ok, detail = await send_test_message(context.bot)
+    if ok:
+        await update.message.reply_text(f"✅ {detail}\n\n{status}")
+    else:
+        await update.message.reply_text(f"❌ {detail}\n\n{status}")
 
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -647,6 +667,13 @@ async def _on_startup(application):
     gate_ok = await validate_channel_gate(application.bot)
     vip_ok = await validate_vip_log_channel(application.bot)
     _, yt_ok = get_credentials_status()
+    if not vip_ok:
+        await notify_admin_vip_issue(
+            application.bot,
+            "⚠️ لاگ VIP کار نمی‌کند.\n"
+            "ربات را ادمین کانال خصوصی کن، VIP_LOG_CHANNEL_ID را در .env بگذار، "
+            "و /viplogtest را بزن.",
+        )
     await log_startup(application.bot, gate_ok, vip_ok, yt_ok)
     removed = orchestrator.sweep_cache()
     await log_system(application.bot, "پاکسازی کش (startup)", removed=removed)
@@ -689,7 +716,19 @@ def main():
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("analytics", analytics_command))
     application.add_handler(CommandHandler("creds", creds_command))
-    application.add_handler(CommandHandler("channelid", channelid_command))
+    application.add_handler(
+        CommandHandler(
+            "channelid",
+            channelid_command,
+            filters.COMMAND
+            & (
+                filters.ChatType.PRIVATE
+                | filters.ChatType.GROUPS
+                | filters.ChatType.CHANNEL
+            ),
+        )
+    )
+    application.add_handler(CommandHandler("viplogtest", viplogtest_command))
     application.add_handler(CommandHandler("history", history_command))
     application.add_handler(CommandHandler("discover", discover_command))
     application.add_handler(CommandHandler("aboutme", aboutme_command))
