@@ -468,9 +468,143 @@ class SpotifyCollection:
             return True
         return False
 
-    async def fetch_tracks(self):
-        if not self._parse_id():
+    def _track_from_api_item(self, item, default_album=None, default_artwork=None):
+        """Normalize a track from album or playlist API response."""
+        t = item.get('item') or item.get('track') or item
+        if not t or t.get('type') != 'track':
+            return None
+        meta = TrackMetadata()
+        meta.title = t.get('name')
+        artists = t.get('artists', [])
+        meta.artist = ", ".join(a['name'] for a in artists if a.get('name'))
+        album = t.get('album') or {}
+        meta.album = album.get('name') or default_album
+        meta.id = t.get('id') or str(abs(hash(meta.title or "")))
+        meta.url = f"https://open.spotify.com/track/{meta.id}"
+        meta.type = 'track'
+        images = album.get('images', [])
+        if images:
+            meta.artwork_url = images[0].get('url', '')
+        elif default_artwork:
+            meta.artwork_url = default_artwork
+        return meta
+
+    def _artwork_from_entity(self, entity):
+        """Best-effort cover art URL from an embed entity dict."""
+        cover_art = entity.get("coverArt") or {}
+        sources = cover_art.get("sources") or []
+        if sources:
+            best = max(sources, key=lambda s: s.get("width") or 0)
+            return best.get("url")
+        visual = entity.get("visualIdentity") or {}
+        images = visual.get("image") or []
+        if images:
+            return images[0].get("url")
+        return None
+
+    def _tracks_from_embed_entity(self, entity):
+        """Build TrackMetadata list from embed page entity.trackList."""
+        track_list = entity.get("trackList") or []
+        if not track_list:
             return []
+        collection_name = entity.get("name") or entity.get("title")
+        artwork = self._artwork_from_entity(entity)
+        self.name = collection_name or self.name
+        default_artist = None
+        artists = entity.get("artists") or []
+        if artists:
+            names = [a.get("name", "") for a in artists if isinstance(a, dict) and a.get("name")]
+            if names:
+                default_artist = ", ".join(names)
+        tracks = []
+        for item in track_list:
+            if not isinstance(item, dict):
+                continue
+            uri = item.get("uri") or ""
+            track_id = uri.split(":")[-1] if ":" in uri else None
+            if not track_id:
+                continue
+            meta = TrackMetadata()
+            meta.title = item.get("title") or item.get("name")
+            item_artists = item.get("artists") or []
+            artist_names = [
+                a.get("name", "") for a in item_artists
+                if isinstance(a, dict) and a.get("name")
+            ]
+            if artist_names:
+                meta.artist = ", ".join(artist_names)
+            else:
+                meta.artist = item.get("subtitle") or default_artist or "Unknown Artist"
+            meta.album = collection_name
+            meta.id = track_id
+            meta.url = f"https://open.spotify.com/track/{track_id}"
+            meta.type = "track"
+            meta.artwork_url = artwork
+            if meta.title:
+                tracks.append(meta)
+        return tracks
+
+    async def _fetch_from_embed(self):
+        """No-auth fallback: parse track list from public Spotify embed page."""
+        try:
+            embed_url = f"https://open.spotify.com/embed/{self.collection_type}/{self.collection_id}"
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.get(embed_url, headers=headers) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Spotify collection embed fetch failed: {resp.status}")
+                        return []
+                    html = await resp.text()
+
+            match = re.search(
+                r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>',
+                html, re.DOTALL
+            )
+            if not match:
+                logger.error("Spotify collection embed: __NEXT_DATA__ payload not found")
+                return []
+
+            data = json.loads(match.group(1))
+            entity = None
+            try:
+                entity = data["props"]["pageProps"]["state"]["data"]["entity"]
+            except (KeyError, TypeError):
+                entity = None
+
+            if not isinstance(entity, dict) or not entity.get("trackList"):
+                def find_collection_entity(node):
+                    if isinstance(node, dict):
+                        if node.get("trackList"):
+                            return node
+                        for v in node.values():
+                            found = find_collection_entity(v)
+                            if found:
+                                return found
+                    elif isinstance(node, list):
+                        for v in node:
+                            found = find_collection_entity(v)
+                            if found:
+                                return found
+                    return None
+                entity = find_collection_entity(data) or {}
+
+            tracks = self._tracks_from_embed_entity(entity)
+            if tracks:
+                logger.info(
+                    f"Spotify collection (embed): {len(tracks)} tracks from "
+                    f"{self.collection_type} '{self.name or self.collection_id}'"
+                )
+            else:
+                logger.error("Spotify collection embed: no tracks found in entity")
+            return tracks
+        except Exception as e:
+            logger.error(f"Spotify collection embed fallback error: {e}", exc_info=True)
+            return []
+
+    async def _fetch_from_api(self):
+        """Fetch tracks via official Spotify Web API. Returns [] on failure."""
         token = await _get_spotify_token()
         if not token:
             return []
@@ -480,7 +614,7 @@ class SpotifyCollection:
         endpoint = (
             f"https://api.spotify.com/v1/albums/{self.collection_id}/tracks"
             if self.collection_type == "album"
-            else f"https://api.spotify.com/v1/playlists/{self.collection_id}/tracks"
+            else f"https://api.spotify.com/v1/playlists/{self.collection_id}/items"
         )
         headers = {'Authorization': f'Bearer {token}'}
         try:
@@ -490,38 +624,40 @@ class SpotifyCollection:
                     url = f"{endpoint}{sep}limit={limit}&offset={offset}"
                     async with session.get(url, headers=headers) as resp:
                         if resp.status != 200:
-                            logger.error(f"Spotify collection API {resp.status}")
-                            break
+                            error_text = await resp.text()
+                            logger.error(f"Spotify collection API {resp.status}: {error_text}")
+                            return []
                         data = await resp.json()
                     items = data.get('items', [])
                     if not items:
                         break
                     for item in items:
-                        t = item.get('track') or item
-                        if not t or t.get('type') != 'track':
-                            continue
-                        meta = TrackMetadata()
-                        meta.title = t.get('name')
-                        artists = t.get('artists', [])
-                        meta.artist = ", ".join(a['name'] for a in artists if a.get('name'))
-                        album = t.get('album') or {}
-                        meta.album = album.get('name')
-                        meta.id = t.get('id') or str(abs(hash(meta.title)))
-                        meta.url = f"https://open.spotify.com/track/{meta.id}"
-                        meta.type = 'track'
-                        images = album.get('images', [])
-                        if images:
-                            meta.artwork_url = images[0].get('url', '')
-                        tracks.append(meta)
+                        meta = self._track_from_api_item(item)
+                        if meta:
+                            tracks.append(meta)
                     if self.collection_type == 'album':
                         break
                     if not data.get('next'):
                         break
                     offset += limit
+            if tracks:
+                logger.info(
+                    f"Spotify collection (API): {len(tracks)} tracks from "
+                    f"{self.collection_type} '{self.collection_id}'"
+                )
             return tracks
         except Exception as e:
-            logger.error(f"Spotify collection fetch error: {e}")
+            logger.error(f"Spotify collection API fetch error: {e}", exc_info=True)
             return []
+
+    async def fetch_tracks(self):
+        if not self._parse_id():
+            return []
+        tracks = await self._fetch_from_api()
+        if tracks:
+            return tracks
+        logger.warning("Spotify collection API unavailable — falling back to public embed page")
+        return await self._fetch_from_embed()
 
 
 class TrackMetadata:
@@ -617,7 +753,7 @@ class TrackMetadata:
         if "spotify.com" in text and ("/album/" in text or "/playlist/" in text):
             coll = SpotifyCollection(text)
             tracks = await coll.fetch_tracks()
-            name = tracks[0].album if tracks else "Spotify collection"
+            name = coll.name or (tracks[0].album if tracks else "Spotify collection")
             return name, tracks
 
         # Apple Music album/playlist

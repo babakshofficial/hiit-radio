@@ -46,7 +46,7 @@ def get_credentials_status():
         sp_ok = True
     else:
         lines.append(f"  ✗ credentials.json نیست: {sp.credentials_path}")
-        lines.append("    → یک‌بار با اکانت Premium لاگین کن (دستور در SETUP_CREDENTIALS.md)")
+        lines.append("    → یک‌بار ./setup_spotify_creds.sh اجرا کن (یا SETUP_CREDENTIALS.md §2)")
         sp_ok = False
 
     # --- Spotify API (metadata only) ---
@@ -56,7 +56,8 @@ def get_credentials_status():
     has_secret = bool(os.getenv("SPOTIFY_CLIENT_SECRET"))
     if has_id and has_secret:
         lines.append("  ✓ SPOTIFY_CLIENT_ID / SECRET در .env هستند")
-        lines.append("  (در صورت خطای ۴۰۳، از embed به‌عنوان جایگزین استفاده می‌شود)")
+        lines.append("  (در صورت خطای ۴۰۳، از embed برای ترک/آلبوم/پلی‌لیست استفاده می‌شود)")
+        lines.append("  (برای API رسمی، اکانت Premium روی Developer Dashboard لازم است)")
     else:
         lines.append("  ✗ CLIENT_ID/SECRET ناقص — برای لینک اسپاتیفای از embed استفاده می‌شود")
 

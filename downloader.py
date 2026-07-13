@@ -33,6 +33,24 @@ def _cookies_look_authenticated(cookies_path):
         return False
 
 
+def _primary_artist(artist):
+    """First credited artist for search queries (before feat/comma clutter)."""
+    if not artist:
+        return ""
+    name = re.split(r'[,]|(?:\s+(?:feat\.?|ft\.?)\s+)', artist, maxsplit=1, flags=re.I)[0]
+    return name.strip()
+
+
+def _token_title_similarity(expected, actual):
+    """Fraction of significant title words found in the candidate (0-100)."""
+    words = [w for w in re.findall(r'\w+', (expected or "").lower()) if len(w) > 3]
+    if not words:
+        return 0.0
+    actual_lower = (actual or "").lower()
+    matched = sum(1 for w in words if w in actual_lower)
+    return (matched / len(words)) * 100.0
+
+
 class MusicDownloader:
     def __init__(self, download_dir="downloads"):
         self.download_dir = download_dir
@@ -121,7 +139,7 @@ class MusicDownloader:
         # song by the *right* artist (100% artist boost) can't sneak through.
         TITLE_THRESHOLD = 70.0
         # How many results to inspect per search query.
-        RESULTS_PER_QUERY = 5
+        RESULTS_PER_QUERY = 8
 
         def title_similarity(a, b):
             """Calculate similarity between two strings (0-100%)."""
@@ -165,25 +183,40 @@ class MusicDownloader:
             yt_title = clean_title(video.get('title', ''), metadata.artist)
             yt_artist = clean_artist(video.get('uploader', '') or video.get('channel', ''))
             expected_title = clean_title(metadata.title, metadata.artist)
-            title_sim = title_similarity(yt_title, expected_title)
+            seq_title_sim = title_similarity(yt_title, expected_title)
+            token_sim = _token_title_similarity(expected_title, yt_title)
+            title_sim = max(seq_title_sim, token_sim)
             artist_sim = title_similarity(yt_artist, metadata.artist or "")
+            primary = _primary_artist(metadata.artist or "")
+            if primary:
+                artist_sim = max(artist_sim, title_similarity(yt_artist, primary))
             combined = (title_sim * 0.7) + (artist_sim * 0.3)
-            return combined, title_sim, artist_sim, yt_title, yt_artist
+            return combined, title_sim, artist_sim, token_sim, yt_title, yt_artist, primary
 
         q_title = search_title(metadata.title)
         q_artist = (metadata.artist or "").replace('"', '').strip()
+        q_primary = _primary_artist(q_artist)
 
         # YouTube search strategies ordered from most specific to least specific.
         yt_search_strategies = [
             f'"{q_title}" "{q_artist}" audio',
             f'"{q_title}" "{q_artist}"',
-            f'{q_title} {q_artist} official audio',
+            f'"{q_title}" "{q_primary}" audio' if q_primary and q_primary != q_artist else None,
+            f'{q_title} {q_primary} - Topic',
+            f'{q_title} {q_primary} official audio',
             f'{q_title} {q_artist}',
         ]
+        if metadata.url and "spotify.com" in metadata.url:
+            yt_search_strategies[2:2] = [
+                f'"{q_title}" {q_primary} topic',
+                f'{q_title} {q_primary} topic',
+            ]
+        yt_search_strategies = [s for s in yt_search_strategies if s]
 
         # SoundCloud handles plain keyword queries best — no quotes, no
         # "official audio"/"audio" suffixes, which tend to return zero results.
         sc_search_strategies = [
+            f'{q_title} {q_primary}' if q_primary else f'{q_title} {q_artist}',
             f'{q_title} {q_artist}',
             f'{q_title}',
         ]
@@ -226,16 +259,24 @@ class MusicDownloader:
                                 continue
                             seen_ids.add(vid)
 
-                            combined, title_sim, artist_sim, c_title, c_artist = score(video)
+                            combined, title_sim, artist_sim, token_sim, c_title, c_artist, primary = score(video)
                             logger.info(
                                 f"[{source_label}] Candidate: Title {title_sim:.1f}%, Artist {artist_sim:.1f}%, "
                                 f"Combined {combined:.1f}% | '{c_title}' by '{c_artist}' | "
                                 f"Expected: '{expected_title_clean}' by '{metadata.artist}'"
                             )
+                            uploader_raw = (video.get('uploader', '') or video.get('channel', '')).lower()
+                            is_topic = uploader_raw.endswith('topic') or ' - topic' in uploader_raw
                             # A candidate is only eligible if its title matches well enough.
-                            # This rejects other songs by the same artist.
+                            # Topic auto-uploads may use shortened titles — allow high token overlap.
                             if title_sim < TITLE_THRESHOLD:
-                                continue
+                                topic_ok = (
+                                    is_topic
+                                    and token_sim >= 85.0
+                                    and artist_sim >= 80.0
+                                )
+                                if not topic_ok:
+                                    continue
                             if best_local is None or combined > best_local[0]:
                                 best_local = (combined, video)
 

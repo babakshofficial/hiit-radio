@@ -70,6 +70,17 @@ Anonymous-only cookies (`PREF`, `SOCS`, `YSC`, …) will still get **“Sign in 
 
 Do this once. Requires a **Spotify Premium** account.
 
+**Quick setup (recommended):**
+
+```bash
+cd /home/babak/Desktop/Projects/hiit-radio-bot
+./setup_spotify_creds.sh
+```
+
+The script opens zotify's browser login, writes `credentials.json`, and prints what to add to `.env`.
+
+**Manual setup** (same result):
+
 ```bash
 cd /home/babak/Desktop/Projects/hiit-radio-bot
 .venv/bin/zotify "https://open.spotify.com/track/0pwcqlr371jm1u0WCPtbx5" \
@@ -114,8 +125,9 @@ SPOTIFY_CLIENT_SECRET=...
 ```
 
 - Used only to resolve track title/artist/artwork when possible.
-- If Spotify returns **403**, the bot falls back to the public embed page (no token).
-- This never downloads the full song.
+- **Premium required** on the Developer Dashboard account (since Feb 2026) for Web API access in Development Mode. Without Premium, API calls return **403** even when the token is acquired successfully.
+- If Spotify returns **403** (or API is otherwise unavailable), the bot falls back to the public embed page for **tracks, albums, and playlists** — no token needed.
+- This never downloads the full song. Full Spotify downloads still require zotify Premium credentials (section 2), separate from the Web API.
 
 ---
 

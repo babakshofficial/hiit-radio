@@ -583,6 +583,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         await update.message.reply_text("❌ آلبوم/پلی‌لیست شناسایی نشد.")
+        return
 
     allowed, wait_time = user_manager.check_rate_limit(user_id)
     if not allowed:
