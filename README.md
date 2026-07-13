@@ -72,6 +72,7 @@ All settings live in `.env`. See `.env.example` for the full list.
 | `YTDLP_COOKIES` | Path to exported `cookies.txt` |
 | `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | Spotify Web API (metadata only) |
 | `LLM_API_BASE` / `LLM_API_KEY` / `LLM_MODEL` | LLM for `/discover` recommendations |
+| `DEVELOPER_NAME` / `DEVELOPER_USERNAME` | Developer info shown by `/aboutme` |
 | `GENIUS_API_TOKEN` / `MUSIXMATCH_API_KEY` | Optional lyrics providers |
 
 ### Credentials
@@ -174,6 +175,7 @@ Restart the bot whenever you update cookies or environment variables.
 | `/help` | Usage, inline mode, rate limits |
 | `/history` | Recent downloads with re-download buttons |
 | `/discover` | Personalized song recommendations (LLM + download history) |
+| `/aboutme` | About the bot and developer (Persian) |
 | `/cancel` | Stop an in-progress playlist download |
 
 Send a track link, album/playlist URL, or plain song name as a normal message to download.
@@ -231,6 +233,7 @@ Users only see simple result messages. Technical details (credential status, bac
 | `progress.py` | Throttled in-chat progress updates |
 | `recommendations.py` | Post-download inline keyboard |
 | `llm_service.py` | LLM recommendations for `/discover` |
+| `messages.py` | User-facing Persian copy and `/aboutme` text |
 | `cred_status.py` | Credential health report for `/creds` |
 
 Runtime directories (gitignored): `downloads/`, `cache/`, `hiit_radio.db`, `cookies.txt`.

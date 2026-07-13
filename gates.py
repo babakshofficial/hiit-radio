@@ -6,6 +6,8 @@ import time
 
 from telegram.error import BadRequest, Forbidden
 
+from messages import gate_alert, gate_denied
+
 logger = logging.getLogger(__name__)
 
 REQUIRED_CHANNEL_RAW = os.getenv("REQUIRED_CHANNEL", "@HiiTRadio").strip()
@@ -100,13 +102,9 @@ async def ensure_access(update, context, allow_start=False):
         await admin_logger.log_gate_denied(context.bot, user, f"@{channel}")
     except Exception:
         pass
-    text = (
-        f"برای استفاده از ربات، ابتدا عضو کانال @{channel} شوید.\n\n"
-        f"https://t.me/{channel}\n\n"
-        "بعد از عضویت دوباره امتحان کنید."
-    )
+    text = gate_denied(channel)
     if update.callback_query:
-        await update.callback_query.answer("ابتدا عضو کانال شوید.", show_alert=True)
+        await update.callback_query.answer(gate_alert(), show_alert=True)
         if update.callback_query.message:
             await update.callback_query.message.reply_text(text)
     elif update.inline_query:

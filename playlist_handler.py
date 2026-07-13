@@ -3,6 +3,14 @@
 import logging
 import os
 
+from messages import (
+    playlist_cancelled,
+    playlist_empty,
+    playlist_rate_limited,
+    playlist_start,
+    playlist_summary,
+    unknown_artist,
+)
 from progress import ProgressReporter
 from recommendations import recommendation_keyboard
 
@@ -17,14 +25,11 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
     bot = context.bot
     total = len(tracks)
     if total == 0:
-        await update.message.reply_text("❌ هیچ آهنگی در این مجموعه پیدا نشد.")
+        await update.message.reply_text(playlist_empty())
         return
 
     context.user_data["active_job"] = {"cancel": False, "type": "playlist"}
-    status = await update.message.reply_text(
-        f"📋 شروع دانلود: {collection_name or 'پلی‌لیست'}\n"
-        f"تعداد: {total} آهنگ\n\n/cancel برای توقف"
-    )
+    status = await update.message.reply_text(playlist_start(collection_name, total))
     await admin_logger.log_playlist_start(bot, user, collection_name, total)
 
     reporter = ProgressReporter(
@@ -40,7 +45,7 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
         if context.user_data.get("active_job", {}).get("cancel"):
             cancelled = True
             stop_reason = "لغو توسط کاربر"
-            await reporter.fail(f"متوقف شد. ارسال شده: {sent}/{total}")
+            await reporter.fail(playlist_cancelled(sent, total))
             break
 
         allowed, wait_time = user_manager.check_rate_limit(user_id)
@@ -49,11 +54,11 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
             stop_reason = f"محدودیت نرخ ({wait_time // 60} دقیقه)"
             await admin_logger.log_rate_limit(bot, user, wait_time // 60)
             await reporter.fail(
-                f"محدودیت نرخ ({wait_time // 60} دقیقه). ارسال شده: {sent}/{total}"
+                playlist_rate_limited(wait_time // 60, sent, total)
             )
             break
 
-        await reporter.update(i, f"{track.title} — {track.artist or 'نامشخص'}")
+        await reporter.update(i, f"{track.title} — {unknown_artist(track.artist)}")
         await admin_logger.log_playlist_track(
             bot, user, i, total, track.title, track.artist, "در حال دانلود",
         )
@@ -117,10 +122,7 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
             bot, user, collection_name, sent, total, failed, reason=stop_reason,
         )
     elif not rate_limited and not cancelled:
-        summary = f"ارسال شده: {sent}/{total}"
-        if failed:
-            summary += f" | ناموفق: {failed}"
-        await reporter.done(summary)
+        await reporter.done(playlist_summary(sent, total, failed))
         await admin_logger.log_playlist_done(
             bot, user, collection_name, sent, total, failed,
         )

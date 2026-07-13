@@ -57,6 +57,7 @@ from llm_service import (
     get_cached_recommendations,
     set_cached_recommendations,
 )
+import messages as msg
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
@@ -79,24 +80,11 @@ def _is_admin(user_id):
 
 
 def _platform_fa(platform):
-    if not platform:
-        return "نامشخص"
-    p = platform.lower()
-    if "spotify" in p:
-        return "اسپاتیفای"
-    if "apple" in p:
-        return "اپل موزیک"
-    if "youtube" in p:
-        return "یوتیوب"
-    if "soundcloud" in p:
-        return "ساندکلاود"
-    if "cache" in p:
-        return "کش"
-    return platform
+    return msg.platform_fa(platform)
 
 
 def _unknown_artist(artist):
-    return artist or "نامشخص"
+    return msg.unknown_artist(artist)
 
 
 def _vip_failure_detail(context=""):
@@ -110,15 +98,11 @@ def _vip_failure_detail(context=""):
 
 
 def _btn_redownload(title):
-    label = (title or "نامشخص")[:26]
-    return f"🔄 دانلود مجدد: {label}"
+    return msg.btn_redownload(title)
 
 
 def _btn_download(title, index=None):
-    label = (title or "نامشخص")[:24]
-    if index is not None:
-        return f"{index}. دانلود «{label}»"
-    return f"دانلود «{label}»"
+    return msg.btn_download(title, index)
 
 
 async def _touch_user(update):
@@ -129,23 +113,20 @@ async def _touch_user(update):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _touch_user(update)
-    await update.message.reply_text(
-        "سلام! من ربات دانلودر موزیک HiiT Radio هستم.\n\n"
-        "لینک اپل موزیک، اسپاتیفای، آلبوم/پلی‌لیست، یا نام آهنگ بفرست.\n\n"
-        "/help — راهنما\n/history — دانلودهای اخیر\n/discover — پیشنهاد شخصی\n"
-        "/cancel — توقف پلی‌لیست"
-    )
+    await update.message.reply_text(msg.start_text())
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_access(update, context):
         return
-    await update.message.reply_text(
-        "لینک آهنگ، آلبوم، پلی‌لیست یا نام آهنگ را ارسال کن.\n"
-        "اینلاین: @HiiTRadioBot نام آهنگ در هر چتی\n"
-        "/discover — پیشنهاد شخصی بر اساس تاریخچه دانلود\n"
-        "محدودیت: ۱۰ دانلود در ساعت (هر آهنگ در پلی‌لیست جداگانه)."
-    )
+    await update.message.reply_text(msg.help_text())
+
+
+async def aboutme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    await _touch_user(update)
+    await update.message.reply_text(msg.aboutme_text())
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -235,9 +216,9 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _touch_user(update)
     rows = user_manager.get_user_history(update.effective_user.id, limit=10)
     if not rows:
-        await update.message.reply_text("هنوز دانلودی ثبت نشده.")
+        await update.message.reply_text(msg.history_empty())
         return
-    lines = ["📜 دانلودهای اخیر:\n"]
+    lines = [msg.history_header()]
     buttons = []
     for row in rows:
         ts = time.strftime("%m/%d %H:%M", time.localtime(row["created_at"]))
@@ -264,23 +245,20 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = user_manager.database
     history = db.get_user_history(user_id, limit=40)
     if not history:
-        await update.message.reply_text("هنوز دانلودی ثبت نشده.")
+        await update.message.reply_text(msg.discover_empty_history())
         return
 
     if not llm_configured():
-        await update.message.reply_text(
-            "پیشنهاد هوشمند فعال نیست.\n"
-            "در .env مقداردهی کن: LLM_API_BASE، LLM_API_KEY، LLM_MODEL"
-        )
+        await update.message.reply_text(msg.discover_not_configured())
         return
 
-    status = await update.message.reply_text("در حال آماده‌سازی پیشنهادها...")
+    status = await update.message.reply_text(msg.discover_preparing())
 
     recs = get_cached_recommendations(user_id)
     if recs is None:
         recs = await recommend_songs(history, limit=10)
         if recs is None:
-            await status.edit_text("خطا در دریافت پیشنهاد از LLM. بعداً دوباره تلاش کنید.")
+            await status.edit_text(msg.discover_llm_error())
             return
         set_cached_recommendations(user_id, recs)
 
@@ -316,10 +294,10 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             break
 
     if not suggestions:
-        await status.edit_text("پیشنهادی یافت نشد.")
+        await status.edit_text(msg.discover_no_results())
         return
 
-    lines = ["🎧 پیشنهاد برای شما:\n"]
+    lines = [msg.discover_header()]
     buttons = []
     for i, s in enumerate(suggestions[:10], 1):
         lines.append(f"{i}. {s.title} — {_unknown_artist(s.artist)}")
@@ -377,9 +355,9 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if job:
         job["cancel"] = True
         await log_system(context.bot, "لغو پلی‌لیست", user=update.effective_user)
-        await update.message.reply_text("⏹ درخواست توقف ثبت شد...")
+        await update.message.reply_text(msg.cancel_ok())
     else:
-        await update.message.reply_text("کار فعالی در حال اجرا نیست.")
+        await update.message.reply_text(msg.cancel_no_job())
 
 
 def _source_label(metadata):
@@ -424,7 +402,7 @@ async def inline_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             )
             continue
-        desc = f"{meta.artist} — برای دانلود لمس کنید"
+        desc = msg.inline_description(meta.artist)
         inline_results.append(
             InlineQueryResultArticle(
                 id=f"{meta.id}_{i}",
@@ -449,7 +427,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hist_id = int(data.split(":", 1)[1])
         row = user_manager.get_history_by_id(hist_id)
         if not row:
-            await query.message.reply_text("رکورد یافت نشد.")
+            await query.message.reply_text(msg.record_not_found())
             return
         meta = TrackMetadata()
         meta.title = row["title"]
@@ -463,9 +441,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         artist = data.split(":", 2)[2]
         results = await AppleMusicMetadata.search_many(artist, limit=5)
         if not results:
-            await query.message.reply_text("آهنگی یافت نشد.")
+            await query.message.reply_text(msg.songs_not_found())
             return
-        lines = [f"🎵 آهنگ‌های بیشتر از {artist}:\n"]
+        lines = [msg.more_by_artist(artist)]
         buttons = []
         context.user_data["reco_cache"] = {}
         for i, r in enumerate(results, 1):
@@ -484,9 +462,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         artist = data.split(":", 2)[2]
         results = await AppleMusicMetadata.search_many(f"{artist} similar", limit=5)
         if not results:
-            await query.message.reply_text("آهنگ مشابه یافت نشد.")
+            await query.message.reply_text(msg.similar_not_found())
             return
-        lines = [f"🎵 مشابه {artist}:\n"]
+        lines = [msg.similar_to_artist(artist)]
         buttons = []
         context.user_data["reco_cache"] = {}
         for i, r in enumerate(results, 1):
@@ -507,7 +485,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.get("reco_cache", {}).get(idx)
         )
         if not meta:
-            await query.message.reply_text("انتخاب منقضی شده. دوباره جستجو کنید.")
+            await query.message.reply_text(msg.pick_expired())
             return
         await _download_and_send(query.message, update.effective_user, meta, context)
         return
@@ -518,7 +496,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if meta:
             await _download_and_send(query.message, update.effective_user, meta, context)
         else:
-            await query.message.reply_text("انتخاب منقضی شده.")
+            await query.message.reply_text(msg.pick_expired_short())
         return
 
 
@@ -527,10 +505,10 @@ async def _download_and_send(message, user, metadata, context):
     allowed, wait_time = user_manager.check_rate_limit(user_id)
     if not allowed:
         await log_rate_limit(context.bot, user, wait_time // 60)
-        await message.reply_text(f"محدودیت دانلود. {wait_time // 60} دقیقه صبر کنید.")
+        await message.reply_text(msg.rate_limit(wait_time // 60))
         return
 
-    status = await message.reply_text("🔍 در حال دانلود...")
+    status = await message.reply_text(msg.downloading())
     reporter = ProgressReporter(status, 1, "آهنگ", bot=context.bot, user=user)
     await reporter.update(1, f"{metadata.title} — {_unknown_artist(metadata.artist)}")
 
@@ -538,7 +516,7 @@ async def _download_and_send(message, user, metadata, context):
         metadata, reporter, bot=context.bot, user=user,
     )
     if not file_path or not os.path.exists(file_path):
-        await reporter.fail("نسخه کامل پیدا نشد.")
+        await reporter.fail(msg.download_not_found())
         await log_error(
             context.bot, user, "Download failed",
             _vip_failure_detail(metadata.title),
@@ -565,7 +543,7 @@ async def _download_and_send(message, user, metadata, context):
         await status.delete()
     except Exception as e:
         logger.error(f"Send failed: {e}")
-        await status.edit_text("❌ ارسال آهنگ ممکن نشد. لطفاً دوباره تلاش کنید.")
+        await status.edit_text(msg.send_failed())
     finally:
         await orchestrator.cleanup(file_path)
 
@@ -588,20 +566,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_manager, admin_logger,
             )
             return
-        await update.message.reply_text("❌ آلبوم/پلی‌لیست شناسایی نشد.")
+        await update.message.reply_text(msg.collection_not_found())
         return
 
     allowed, wait_time = user_manager.check_rate_limit(user_id)
     if not allowed:
         await log_rate_limit(context.bot, user, wait_time // 60)
-        await update.message.reply_text(f"محدودیت دانلود. {wait_time // 60} دقیقه صبر کنید.")
+        await update.message.reply_text(msg.rate_limit(wait_time // 60))
         return
 
-    status_message = await update.message.reply_text("🔍 در حال بررسی...")
+    status_message = await update.message.reply_text(msg.searching())
     metadata = await TrackMetadata.create(text)
 
     if not metadata.title:
-        await status_message.edit_text("❌ اطلاعات آهنگ یافت نشد.")
+        await status_message.edit_text(msg.metadata_not_found())
         await log_error(context.bot, user, "Metadata not found", text)
         return
 
@@ -635,11 +613,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await status_message.delete()
         except Exception as e:
             logger.error(f"Send failed: {e}")
-            await status_message.edit_text("❌ ارسال آهنگ ممکن نشد. لطفاً دوباره تلاش کنید.")
+            await status_message.edit_text(msg.send_failed())
             await log_error(context.bot, user, "Send failed", str(e))
         await orchestrator.cleanup(file_path)
     else:
-        await reporter.fail("نسخه کامل پیدا نشد.")
+        await reporter.fail(msg.download_not_found())
         await log_error(
             context.bot, user, "No full track found",
             _vip_failure_detail(text),
@@ -714,6 +692,7 @@ def main():
     application.add_handler(CommandHandler("channelid", channelid_command))
     application.add_handler(CommandHandler("history", history_command))
     application.add_handler(CommandHandler("discover", discover_command))
+    application.add_handler(CommandHandler("aboutme", aboutme_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CallbackQueryHandler(callback_handler))

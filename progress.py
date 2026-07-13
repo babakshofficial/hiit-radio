@@ -3,6 +3,8 @@
 import logging
 import time
 
+from messages import progress_done, progress_fail, progress_update
+
 logger = logging.getLogger(__name__)
 
 
@@ -32,8 +34,7 @@ class ProgressReporter:
         if now - self._last_edit < self._min_interval and current < self.total:
             return
         self._last_edit = now
-        detail_line = f"\n{detail}" if detail else ""
-        text = f"📥 {self.label} — آهنگ {current} از {self.total}{detail_line}"
+        text = progress_update(self.label, current, self.total, detail)
         status_text = f"{current}/{self.total}"
         if detail:
             status_text += f" — {detail}"
@@ -44,9 +45,7 @@ class ProgressReporter:
             logger.debug(f"Progress edit skipped: {e}")
 
     async def done(self, summary=""):
-        text = f"✅ {self.label} تمام شد."
-        if summary:
-            text += f"\n{summary}"
+        text = progress_done(self.label, summary)
         await self._vip_status(summary or "تمام شد")
         try:
             await self.status_message.edit_text(text)
@@ -54,9 +53,7 @@ class ProgressReporter:
             pass
 
     async def fail(self, reason=""):
-        text = f"❌ {self.label} ناموفق بود."
-        if reason:
-            text += f"\n{reason}"
+        text = progress_fail(self.label, reason)
         await self._vip_status(reason or "ناموفق")
         try:
             await self.status_message.edit_text(text)
