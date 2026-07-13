@@ -114,14 +114,13 @@ async def log_incoming_update(bot, update):
     await log_vip(bot, event_type, user=update.effective_user, **fields)
 
 
-async def log_startup(bot, gate_ok, vip_ok, yt_ok, sp_ok):
+async def log_startup(bot, gate_ok, vip_ok, yt_ok):
     await log_vip(
         bot,
         "راه‌اندازی ربات",
         gate="OK" if gate_ok else "FAIL",
         vip_log="OK" if vip_ok else "FAIL",
         youtube="OK" if yt_ok else "FAIL",
-        spotify_full="OK" if sp_ok else "FAIL",
     )
 
 

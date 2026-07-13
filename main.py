@@ -33,7 +33,6 @@ from telegram.ext import (
 from metadata import TrackMetadata, AppleMusicMetadata
 from downloader import MusicDownloader
 from user_manager import UserManager
-from spotify_downloader import SpotifyFullDownloader
 from cred_status import get_credentials_status
 from gates import ensure_access, validate_channel_gate
 from admin_logger import (
@@ -64,10 +63,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 downloader = MusicDownloader()
-spotify_dl = SpotifyFullDownloader(download_dir=downloader.download_dir)
 user_manager = UserManager()
 orchestrator = DownloadOrchestrator(
-    downloader, spotify_dl, user_manager.database, download_dir=downloader.download_dir
+    downloader, user_manager.database, download_dir=downloader.download_dir
 )
 
 
@@ -98,12 +96,11 @@ def _unknown_artist(artist):
 
 def _vip_failure_detail(context=""):
     """Technical detail for VIP admin logs only — never show to users."""
-    _, yt_ok, sp_ok = get_credentials_status()
+    _, yt_ok = get_credentials_status()
     parts = []
     if context:
         parts.append(str(context)[:300])
     parts.append(f"youtube={'OK' if yt_ok else 'FAIL'}")
-    parts.append(f"spotify={'OK' if sp_ok else 'FAIL'}")
     return " | ".join(parts)
 
 
@@ -181,7 +178,7 @@ async def analytics_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def creds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
-    status_text, _, _ = get_credentials_status()
+    status_text, _ = get_credentials_status()
     await update.message.reply_text(status_text)
 
 
@@ -662,8 +659,8 @@ async def _cache_sweep_fallback_loop(bot):
 async def _on_startup(application):
     gate_ok = await validate_channel_gate(application.bot)
     vip_ok = await validate_vip_log_channel(application.bot)
-    _, yt_ok, sp_ok = get_credentials_status()
-    await log_startup(application.bot, gate_ok, vip_ok, yt_ok, sp_ok)
+    _, yt_ok = get_credentials_status()
+    await log_startup(application.bot, gate_ok, vip_ok, yt_ok)
     removed = orchestrator.sweep_cache()
     await log_system(application.bot, "پاکسازی کش (startup)", removed=removed)
     if application.job_queue:
@@ -715,13 +712,11 @@ def main():
     application.add_handler(InlineQueryHandler(inline_search))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    status_text, yt_ok, sp_ok = get_credentials_status()
+    status_text, yt_ok = get_credentials_status()
     for line in status_text.splitlines():
         logger.info(line)
     if not yt_ok:
         logger.warning("YouTube full downloads unavailable until logged-in cookies are configured")
-    if not sp_ok:
-        logger.warning("Spotify full downloads unavailable until credentials.json is created")
 
     application.run_polling()
 

@@ -55,14 +55,6 @@ if grep -q '^YTDLP_COOKIES_FROM_BROWSER=' .env 2>/dev/null; then
 fi
 echo
 
-echo "--- Spotify credentials ---"
-if [[ -f credentials.json ]]; then
-  echo "OK: credentials.json exists"
-else
-  echo "WARN: credentials.json missing — Spotify full downloads won't work (YouTube fallback only)"
-fi
-echo
-
 echo "--- Credential status (bot /creds) ---"
 "$PY" -c "from cred_status import get_credentials_status; print(get_credentials_status()[0])"
 echo

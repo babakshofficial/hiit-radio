@@ -9,6 +9,5 @@ echo "========== credential status =========="
 echo
 echo "========== next steps =========="
 echo "YouTube: see SETUP_CREDENTIALS.md §1 (export cookies or YTDLP_COOKIES_FROM_BROWSER=chrome)"
-echo "Spotify: ./setup_spotify_creds.sh  (or SETUP_CREDENTIALS.md §2)"
 echo
 echo "After changes: sudo systemctl restart hiit-radio.service"

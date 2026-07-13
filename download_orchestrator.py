@@ -12,9 +12,8 @@ logger = logging.getLogger(__name__)
 
 
 class DownloadOrchestrator:
-    def __init__(self, music_downloader, spotify_downloader, db, download_dir="downloads"):
+    def __init__(self, music_downloader, db, download_dir="downloads"):
         self.music_downloader = music_downloader
-        self.spotify_downloader = spotify_downloader
         self.db = db
         self.download_dir = download_dir
         self.cache = CacheManager(db)
@@ -60,27 +59,12 @@ class DownloadOrchestrator:
                     )
                 return send_copy, f"{source}_cache", True
 
-        file_path = None
-        platform = source
-
-        if metadata.url and "spotify.com" in metadata.url and self.spotify_downloader.is_configured():
-            if progress_reporter:
-                await progress_reporter.update(
-                    1, f"{metadata.title} — {metadata.artist}\nدر حال دانلود...",
-                )
-            file_path = await self.spotify_downloader.download(metadata.url, metadata.id)
-            if file_path:
-                platform = "spotify"
-                self.music_downloader._apply_metadata(file_path, metadata)
-
-        if not file_path:
-            if progress_reporter:
-                await progress_reporter.update(
-                    1, f"{metadata.title} — {metadata.artist}\nدر حال جستجو و دانلود...",
-                )
-            file_path = await self.music_downloader.download_song(metadata)
-            if file_path:
-                platform = "youtube"  # or soundcloud — downloader doesn't expose which; good enough
+        if progress_reporter:
+            await progress_reporter.update(
+                1, f"{metadata.title} — {metadata.artist}\nدر حال جستجو و دانلود...",
+            )
+        file_path = await self.music_downloader.download_song(metadata)
+        platform = "youtube" if file_path else source
 
         if not file_path or not os.path.exists(file_path):
             self.db.log_event("download_fail", payload={
@@ -89,12 +73,8 @@ class DownloadOrchestrator:
             if bot:
                 import admin_logger
                 from cred_status import get_credentials_status
-                _, yt_ok, sp_ok = get_credentials_status()
-                fail_reason = None
-                if source == "spotify" and not sp_ok:
-                    fail_reason = "spotify credentials unavailable"
-                elif not yt_ok:
-                    fail_reason = "youtube cookies unavailable"
+                _, yt_ok = get_credentials_status()
+                fail_reason = "youtube cookies unavailable" if not yt_ok else None
                 await admin_logger.log_download_fail(
                     bot, user, metadata.title, metadata.artist, source,
                     reason=fail_reason,

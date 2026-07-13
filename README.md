@@ -1,6 +1,6 @@
 # HiiT Radio Bot
 
-A Telegram bot that downloads full-length music tracks from Apple Music, Spotify, and plain-text searches. It resolves metadata from the source link, fetches audio via YouTube/SoundCloud (with optional direct Spotify downloads), embeds artwork and lyrics, and delivers MP3 files in chat.
+A Telegram bot that downloads full-length music tracks from Apple Music, Spotify, and plain-text searches. It resolves metadata from the source link, fetches audio via YouTube/SoundCloud, embeds artwork and lyrics, and delivers MP3 files in chat.
 
 The user interface is in **Persian (Farsi)**. Admin tooling and this documentation are in **English**.
 
@@ -8,7 +8,7 @@ The user interface is in **Persian (Farsi)**. Admin tooling and this documentati
 
 ### Downloads
 - **Apple Music links** — metadata from the page; audio via YouTube/SoundCloud matching
-- **Spotify track links** — full download via [zotify](https://github.com/Googolplexed0/zotify) when Premium credentials are configured; otherwise YouTube/SoundCloud fallback
+- **Spotify track links** — metadata from Spotify API/embed; audio via YouTube/SoundCloud
 - **Text search** — song or artist name via iTunes lookup + YouTube/SoundCloud
 - **Albums & playlists** — unlimited sequential processing with progress and `/cancel`
 - **256 kbps MP3** — conversion via FFmpeg; ID3 tags, embedded artwork (HiiT Radio branding), and optional synced/plain lyrics (LRCLIB, Genius, Musixmatch)
@@ -33,8 +33,7 @@ The user interface is in **Persian (Farsi)**. Admin tooling and this documentati
 - Python 3.10+
 - [FFmpeg](https://ffmpeg.org/) on `PATH`
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- **YouTube login cookies** (required for Apple Music links and most searches) — see [SETUP_CREDENTIALS.md](SETUP_CREDENTIALS.md)
-- **Spotify Premium + zotify credentials** (optional, for direct Spotify full tracks) — see [SETUP_CREDENTIALS.md](SETUP_CREDENTIALS.md)
+- **YouTube login cookies** (required for all downloads) — see [SETUP_CREDENTIALS.md](SETUP_CREDENTIALS.md)
 
 Enable **inline mode** in BotFather if you want inline search.
 
@@ -73,18 +72,13 @@ All settings live in `.env`. See `.env.example` for the full list.
 | `YTDLP_COOKIES_FROM_BROWSER` | e.g. `chrome` — read live browser cookies |
 | `YTDLP_COOKIES` | Path to exported `cookies.txt` |
 | `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | Spotify Web API (metadata only) |
-| `SPOTIFY_CREDENTIALS` | Path to zotify `credentials.json` (full Spotify downloads) |
-| `SPOTIFY_USERNAME` | Spotify username for zotify |
 | `GENIUS_API_TOKEN` / `MUSIXMATCH_API_KEY` | Optional lyrics providers |
 
 ### Credentials
 
-Full-track downloads depend on two separate credential systems:
+Full-track downloads require **YouTube** logged-in cookies for yt-dlp.
 
-1. **YouTube** — logged-in cookies for yt-dlp (Apple Music, search, fallbacks)
-2. **Spotify (zotify)** — one-time OAuth `credentials.json` for Premium full tracks
-
-`SPOTIFY_CLIENT_ID` / `SECRET` alone only resolve metadata; they do not download audio.
+`SPOTIFY_CLIENT_ID` / `SECRET` are optional and only improve metadata on Spotify links; they do not download audio.
 
 Follow **[SETUP_CREDENTIALS.md](SETUP_CREDENTIALS.md)** for step-by-step setup.
 
@@ -168,7 +162,7 @@ sudo systemctl start hiit-radio.service
 sudo systemctl restart hiit-radio.service   # after .env or credential changes
 ```
 
-Restart the bot whenever you update cookies, Spotify credentials, or environment variables.
+Restart the bot whenever you update cookies or environment variables.
 
 ## Commands
 
@@ -191,7 +185,7 @@ Send a track link, album/playlist URL, or plain song name as a normal message to
 |---------|-------------|
 | `/stats` | Users, downloads, cache hit rate, top artists/songs |
 | `/analytics` | Alias for `/stats` |
-| `/creds` | YouTube + Spotify credential readiness report |
+| `/creds` | YouTube credential readiness report |
 | `/channelid` | Resolve chat ID for VIP log channel setup |
 | `/broadcast <message>` | Send a message to all known users (confirmation step) |
 
@@ -212,11 +206,6 @@ User message (link / search / playlist)
        miss
         │
         ▼
-  Spotify link + zotify configured? ──yes──► zotify full download
-        │
-        no / failed
-        │
-        ▼
   YouTube match (yt-dlp + cookies) ──► SoundCloud fallback
         │
         ▼
@@ -232,7 +221,6 @@ Users only see simple result messages. Technical details (credential status, bac
 | `main.py` | Bot entry point, handlers, startup/shutdown hooks |
 | `metadata.py` | Apple Music, Spotify, iTunes metadata and playlist expansion |
 | `downloader.py` | yt-dlp download, FFmpeg conversion, ID3/artwork/lyrics |
-| `spotify_downloader.py` | Full Spotify tracks via zotify |
 | `download_orchestrator.py` | Cache-aware unified download pipeline |
 | `cache_manager.py` | Disk cache with TTL and Telegram `file_id` reuse |
 | `playlist_handler.py` | Sequential album/playlist downloads |
@@ -247,7 +235,7 @@ Users only see simple result messages. Technical details (credential status, bac
 | `cred_status.py` | Credential health report for `/creds` |
 | `search_mappings.json` | Genre/mood/decade → iTunes query map |
 
-Runtime directories (gitignored): `downloads/`, `cache/`, `hiit_radio.db`, `cookies.txt`, `credentials.json`.
+Runtime directories (gitignored): `downloads/`, `cache/`, `hiit_radio.db`, `cookies.txt`.
 
 ## Migrating from users.json
 

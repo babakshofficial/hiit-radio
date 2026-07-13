@@ -1,20 +1,18 @@
-"""Report readiness of YouTube + Spotify full-download credentials."""
+"""Report readiness of YouTube download credentials and Spotify metadata API."""
 
 import os
 
 from downloader import MusicDownloader, _cookies_look_authenticated
-from spotify_downloader import SpotifyFullDownloader
 
 
 def get_credentials_status():
-    """Return a human-readable multi-line status for YouTube + Spotify full downloads."""
+    """Return (human-readable status text, yt_ok)."""
     dl = MusicDownloader()
-    sp = SpotifyFullDownloader(download_dir=dl.download_dir)
 
-    lines = ["وضعیت اعتبارنامه‌ها برای دانلود نسخه کامل:", ""]
+    lines = ["وضعیت اعتبارنامه‌ها:", ""]
 
-    # --- YouTube ---
-    lines.append("▶ یوتیوب (Apple Music / جستجو / بیشتر لینک‌ها)")
+    # --- YouTube (all audio downloads) ---
+    lines.append("▶ یوتیوب (دانلود صدا — همه لینک‌ها)")
     has_auth_cookies = os.path.exists(dl.cookies_path) and _cookies_look_authenticated(dl.cookies_path)
     if has_auth_cookies:
         lines.append(f"  ✓ cookies.txt لاگین‌شده: {dl.cookies_path}")
@@ -36,39 +34,21 @@ def get_credentials_status():
         lines.append("    → فایل را از PC کپی کن یا در مرورگر export کن")
         yt_ok = False
 
-    # --- Spotify full (zotify) ---
-    lines.append("")
-    lines.append("▶ اسپاتیفای نسخه کامل (zotify / Premium)")
-    if sp.is_configured():
-        lines.append(f"  ✓ credentials.json: {sp.credentials_path}")
-        if sp.username:
-            lines.append(f"  ✓ SPOTIFY_USERNAME تنظیم شده")
-        sp_ok = True
-    else:
-        lines.append(f"  ✗ credentials.json نیست: {sp.credentials_path}")
-        lines.append("    → یک‌بار ./setup_spotify_creds.sh اجرا کن (یا SETUP_CREDENTIALS.md §2)")
-        sp_ok = False
-
     # --- Spotify API (metadata only) ---
     lines.append("")
-    lines.append("▶ اسپاتیفای API (فقط متادیتا — دانلود صدا نیست)")
+    lines.append("▶ اسپاتیفای API (فقط متادیتا — دانلود از یوتیوب)")
     has_id = bool(os.getenv("SPOTIFY_CLIENT_ID"))
     has_secret = bool(os.getenv("SPOTIFY_CLIENT_SECRET"))
     if has_id and has_secret:
         lines.append("  ✓ SPOTIFY_CLIENT_ID / SECRET در .env هستند")
         lines.append("  (در صورت خطای ۴۰۳، از embed برای ترک/آلبوم/پلی‌لیست استفاده می‌شود)")
-        lines.append("  (برای API رسمی، اکانت Premium روی Developer Dashboard لازم است)")
     else:
         lines.append("  ✗ CLIENT_ID/SECRET ناقص — برای لینک اسپاتیفای از embed استفاده می‌شود")
 
     lines.append("")
-    if yt_ok and sp_ok:
-        lines.append("نتیجه: هر دو مسیر آمادهٔ دانلود نسخه کامل هستند.")
-    elif yt_ok:
-        lines.append("نتیجه: فقط یوتیوب آماده است. اسپاتیفای کامل هنوز نه.")
-    elif sp_ok:
-        lines.append("نتیجه: فقط اسپاتیفای کامل آماده است. یوتیوب هنوز نه.")
+    if yt_ok:
+        lines.append("نتیجه: یوتیوب آمادهٔ دانلود است.")
     else:
-        lines.append("نتیجه: هیچ‌کدام برای نسخه کامل آماده نیست.")
+        lines.append("نتیجه: یوتیوب هنوز آماده نیست — cookies.txt را تنظیم کن.")
 
-    return "\n".join(lines), yt_ok, sp_ok
+    return "\n".join(lines), yt_ok
