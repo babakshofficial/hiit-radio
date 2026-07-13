@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import secrets
@@ -63,9 +64,15 @@ from llm_service import (
     set_cached_recommendations,
 )
 import messages as msg
+import reporting as rpt
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
+
+_ADMIN_COMMANDS = {
+    "/stats", "/analytics", "/creds", "/channelid", "/viplogtest",
+    "/broadcast", "/report", "/users", "/user", "/export",
+}
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -158,6 +165,8 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append("پلتفرم‌ها:")
     for row in db.platform_breakdown():
         lines.append(f"  • {_platform_fa(row['platform'])}: {row['cnt']}")
+    lines.append("")
+    lines.append("گزارش کامل: /report")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -275,8 +284,26 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = await update.message.reply_text(msg.discover_preparing())
 
     recs = get_cached_recommendations(user_id)
-    if recs is None:
-        recs = await recommend_songs(history, limit=10)
+    if recs is not None:
+        db.log_llm_usage(
+            user_id,
+            model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
+            cached=True,
+            success=True,
+            recommendations_count=len(recs),
+        )
+    else:
+        recs, usage = await recommend_songs(history, user_id=user_id, limit=10)
+        db.log_llm_usage(
+            user_id,
+            model=usage.get("model"),
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+            cached=False,
+            success=bool(usage.get("success") and recs is not None),
+            recommendations_count=usage.get("recommendations_count", 0),
+        )
         if recs is None:
             await status.edit_text(msg.discover_llm_error())
             return
@@ -649,9 +676,230 @@ async def _cache_sweep_job(context: ContextTypes.DEFAULT_TYPE):
     await log_system(context.bot, "پاکسازی کش", removed=removed)
 
 
+async def _send_report(message, text, reply_markup=None, edit=False):
+    if edit and hasattr(message, "edit_text"):
+        await message.edit_text(text, reply_markup=reply_markup)
+    else:
+        await message.reply_text(text, reply_markup=reply_markup)
+
+
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    db = user_manager.database
+    summary = db.global_report_summary()
+    text = rpt.format_global_summary(summary, _platform_fa)
+    await update.message.reply_text(text, reply_markup=rpt.build_global_menu_keyboard())
+
+
+async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    page = 0
+    if context.args:
+        try:
+            page = max(int(context.args[0]) - 1, 0)
+        except ValueError:
+            pass
+    await _show_users_page(update.message, page)
+
+
+async def user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("نحوه استفاده: /user <شناسه کاربر>")
+        return
+    await _show_user_detail(update.message, context.args[0])
+
+
+async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    status = await update.message.reply_text("در حال آماده‌سازی خروجی...")
+    db = user_manager.database
+    payload = db.export_all()
+    filename = f"hiit_radio_export_{int(time.time())}.json"
+    path = _BASE_DIR / filename
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        with open(path, "rb") as f:
+            await context.bot.send_document(
+                chat_id=update.effective_chat.id,
+                document=f,
+                filename=filename,
+                caption="خروجی کامل پایگاه داده",
+            )
+        await status.delete()
+    finally:
+        if path.exists():
+            path.unlink()
+
+
+async def _show_users_page(message, page, edit=False):
+    db = user_manager.database
+    rows, total, total_pages = db.list_users(page, rpt.PER_PAGE)
+    text = rpt.format_user_list(rows, page, total_pages, total)
+    kb = rpt.build_pagination_keyboard("users", page, total_pages)
+    await _send_report(message, text, kb, edit=edit)
+
+
+async def _show_user_detail(message, user_id, edit=False):
+    db = user_manager.database
+    summary = db.get_user_summary(user_id)
+    if not summary:
+        text = f"کاربر {user_id} یافت نشد."
+        await _send_report(message, text, edit=edit)
+        return
+    artists = db.user_top_artists(user_id, limit=5)
+    text = rpt.format_user_detail(summary, artists)
+    await _send_report(message, text, rpt.build_user_menu_keyboard(user_id), edit=edit)
+
+
+async def _show_global_section(message, section, page, edit=False):
+    db = user_manager.database
+    if section == "dl":
+        rows, total, total_pages = db.list_recent_downloads(page, rpt.PER_PAGE)
+        text = rpt.format_download_page(rows, page, total_pages, total, "دانلودهای اخیر")
+    elif section == "req":
+        rows, total, total_pages = db.list_recent_requests(page, rpt.PER_PAGE)
+        text = rpt.format_request_page(rows, page, total_pages, total, "درخواست‌های اخیر")
+    elif section == "evt":
+        rows, total, total_pages = db.list_recent_analytics(page, rpt.PER_PAGE)
+        text = rpt.format_analytics_page(rows, page, total_pages, total, "رویدادهای تحلیلی")
+    elif section == "llm":
+        rows, total, total_pages = db.list_recent_llm_usage(page, rpt.PER_PAGE)
+        text = rpt.format_llm_page(rows, page, total_pages, total, "استفاده LLM")
+    elif section == "cache":
+        rows, total, total_pages = db.list_cache_entries(page, rpt.PER_PAGE)
+        text = rpt.format_cache_page(rows, page, total_pages, total)
+    else:
+        return
+    scope = f"global:{section}"
+    await _send_report(
+        message, text, rpt.build_pagination_keyboard(scope, page, total_pages), edit=edit,
+    )
+
+
+async def _show_user_section(message, user_id, section, page, edit=False):
+    db = user_manager.database
+    uid = str(user_id)
+    if section == "artists":
+        artists = db.user_top_artists(uid, limit=10)
+        lines = [f"هنرمندان کاربر {uid}\n"]
+        if artists:
+            for row in artists:
+                lines.append(f"• {row['artist']} ({row['download_count']})")
+        else:
+            lines.append("موردی نیست.")
+        await _send_report(
+            message, "\n".join(lines), rpt.build_user_menu_keyboard(uid), edit=edit,
+        )
+        return
+    if section == "dl":
+        rows, total, total_pages = db.list_user_downloads(uid, page, rpt.PER_PAGE)
+        text = rpt.format_download_page(rows, page, total_pages, total, f"دانلودهای {uid}")
+    elif section == "req":
+        rows, total, total_pages = db.list_user_requests(uid, page, rpt.PER_PAGE)
+        text = rpt.format_request_page(rows, page, total_pages, total, f"درخواست‌های {uid}")
+    elif section == "evt":
+        rows, total, total_pages = db.list_user_analytics(uid, page, rpt.PER_PAGE)
+        text = rpt.format_analytics_page(rows, page, total_pages, total, f"رویدادهای {uid}")
+    elif section == "llm":
+        rows, total, total_pages = db.list_user_llm_usage(uid, page, rpt.PER_PAGE)
+        text = rpt.format_llm_page(rows, page, total_pages, total, f"LLM کاربر {uid}")
+    else:
+        return
+    scope = f"user:{uid}:{section}"
+    extra = [InlineKeyboardButton("پروفایل", callback_data=f"rpt:user:{uid}:profile")]
+    await _send_report(
+        message,
+        text,
+        rpt.build_pagination_keyboard(scope, page, total_pages, extra=extra),
+        edit=edit,
+    )
+
+
+async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if not _is_admin(update.effective_user.id):
+        return
+    data = (query.data or "").split(":")
+    if len(data) < 2:
+        return
+    message = query.message
+    if data[1] == "menu":
+        db = user_manager.database
+        summary = db.global_report_summary()
+        text = rpt.format_global_summary(summary, _platform_fa)
+        await message.edit_text(text, reply_markup=rpt.build_global_menu_keyboard())
+        return
+    if data[1] == "users":
+        page = int(data[2]) if len(data) > 2 else 0
+        await _show_users_page(message, page, edit=True)
+        return
+    if data[1] == "global" and len(data) >= 4:
+        section, page = data[2], int(data[3])
+        await _show_global_section(message, section, page, edit=True)
+        return
+    if data[1] == "user" and len(data) >= 4:
+        uid = data[2]
+        if data[3] == "profile":
+            await _show_user_detail(message, uid, edit=True)
+            return
+        if data[3] == "artists":
+            await _show_user_section(message, uid, "artists", 0, edit=True)
+            return
+        if len(data) >= 5:
+            section, page = data[3], int(data[4])
+            await _show_user_section(message, uid, section, page, edit=True)
+            return
+        await _show_user_detail(message, uid, edit=True)
+
+
+def _describe_user_request(update):
+    if update.channel_post:
+        return None
+    chat = update.effective_chat
+    if chat and chat.type == "channel":
+        return None
+    user = update.effective_user
+    if not user:
+        return None
+    if update.callback_query:
+        data = update.callback_query.data or ""
+        if data.startswith("rpt:"):
+            return None
+        return "callback", data[:500]
+    if update.inline_query:
+        return "inline", (update.inline_query.query or "")[:500]
+    msg_obj = update.effective_message
+    if not msg_obj:
+        return None
+    text = msg_obj.text or msg_obj.caption or ""
+    if text.startswith("/"):
+        cmd = text.split()[0].split("@")[0].lower()
+        if cmd in _ADMIN_COMMANDS:
+            return None
+        if cmd == "/discover":
+            return "discover", text[:500]
+        return "command", text[:500]
+    if text:
+        return "message", text[:500]
+    return "message", (msg_obj.content_type or "unknown")[:500]
+
+
 async def vip_update_logger(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Log every incoming Telegram update to the VIP channel."""
+    """Log every incoming Telegram update to the VIP channel and DB."""
     await log_incoming_update(context.bot, update)
+    req = _describe_user_request(update)
+    if req and update.effective_user:
+        req_type, req_text = req
+        user_manager.database.log_user_request(
+            update.effective_user.id, req_type, req_text,
+        )
 
 
 async def _cache_sweep_fallback_loop(bot):
@@ -729,11 +977,16 @@ def main():
         )
     )
     application.add_handler(CommandHandler("viplogtest", viplogtest_command))
+    application.add_handler(CommandHandler("report", report_command))
+    application.add_handler(CommandHandler("users", users_command))
+    application.add_handler(CommandHandler("user", user_command))
+    application.add_handler(CommandHandler("export", export_command))
     application.add_handler(CommandHandler("history", history_command))
     application.add_handler(CommandHandler("discover", discover_command))
     application.add_handler(CommandHandler("aboutme", aboutme_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(CallbackQueryHandler(report_callback, pattern=r"^rpt:"))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(InlineQueryHandler(inline_search))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

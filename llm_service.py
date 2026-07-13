@@ -107,18 +107,27 @@ def set_cached_recommendations(user_id, recs):
     _discover_cache[str(user_id)] = {"ts": time.time(), "recs": recs}
 
 
-async def recommend_songs(history, limit=10):
-    """Return list of {title, artist} dicts from LLM, or None on failure."""
+async def recommend_songs(history, user_id=None, limit=10):
+    """Return (list of {title, artist} dicts, usage_meta) or (None, usage_meta) on failure."""
+    model = os.getenv("LLM_MODEL", "gpt-4o-mini").strip()
+    usage = {
+        "model": model,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "success": False,
+        "recommendations_count": 0,
+    }
     if not is_configured():
-        return None
+        return None, usage
 
     api_base = os.getenv("LLM_API_BASE", "").rstrip("/")
     api_key = os.getenv("LLM_API_KEY", "").strip()
-    model = os.getenv("LLM_MODEL", "gpt-4o-mini").strip()
 
     history_text = _format_history(history)
     if not history_text:
-        return []
+        usage["success"] = True
+        return [], usage
 
     system_prompt = (
         "You are a music recommendation assistant. "
@@ -154,22 +163,29 @@ async def recommend_songs(history, limit=10):
                 body = await resp.text()
                 if resp.status != 200:
                     logger.error(f"LLM API {resp.status}: {body[:500]}")
-                    return None
+                    return None, usage
                 data = json.loads(body)
     except Exception as e:
         logger.error(f"LLM request failed: {e}", exc_info=True)
-        return None
+        return None, usage
+
+    api_usage = data.get("usage") or {}
+    usage["prompt_tokens"] = api_usage.get("prompt_tokens", 0) or 0
+    usage["completion_tokens"] = api_usage.get("completion_tokens", 0) or 0
+    usage["total_tokens"] = api_usage.get("total_tokens", 0) or (
+        usage["prompt_tokens"] + usage["completion_tokens"]
+    )
 
     try:
         content = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
         logger.error("LLM response missing choices/message")
-        return None
+        return None, usage
 
     recs = _parse_recommendations(content, limit)
     if not recs:
         logger.error(f"LLM returned no parseable recommendations: {content[:300]}")
-        return None
+        return None, usage
 
     known = _history_keys(history)
     filtered = []
@@ -180,4 +196,7 @@ async def recommend_songs(history, limit=10):
             continue
         seen.add(key)
         filtered.append(rec)
-    return filtered[:limit]
+    result = filtered[:limit]
+    usage["success"] = True
+    usage["recommendations_count"] = len(result)
+    return result, usage

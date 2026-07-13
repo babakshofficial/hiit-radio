@@ -186,6 +186,10 @@ Send a track link, album/playlist URL, or plain song name as a normal message to
 |---------|-------------|
 | `/stats` | Users, downloads, cache hit rate, top artists/songs |
 | `/analytics` | Alias for `/stats` |
+| `/report` | Full admin dashboard with inline drill-down menus |
+| `/users [page]` | Paginated user list |
+| `/user <id>` | User profile, downloads, requests, LLM usage |
+| `/export` | Download full database export as JSON |
 | `/creds` | YouTube credential readiness report |
 | `/channelid` | Resolve chat ID for VIP log channel setup |
 | `/viplogtest` | Test VIP log channel (admin) |
@@ -234,6 +238,7 @@ Users only see simple result messages. Technical details (credential status, bac
 | `progress.py` | Throttled in-chat progress updates |
 | `recommendations.py` | Post-download inline keyboard |
 | `llm_service.py` | LLM recommendations for `/discover` |
+| `reporting.py` | Admin report formatters and pagination keyboards |
 | `messages.py` | User-facing Persian copy and `/aboutme` text |
 | `cred_status.py` | Credential health report for `/creds` |
 
