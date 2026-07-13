@@ -130,3 +130,58 @@ Restart after any credential change:
 ```bash
 sudo systemctl restart hiit-radio.service
 ```
+
+---
+
+## VPS migration (PC works, server does not)
+
+Git does **not** copy `cookies.txt`, `credentials.json`, or `.env`. You must deploy them manually.
+
+### Checklist
+
+1. **Copy secrets to the VPS**
+   ```bash
+   scp .env cookies.txt credentials.json babak@your-vps:/home/babak/hiit-radio/
+   ```
+
+2. **Use `cookies.txt`, not browser cookies**
+   - `YTDLP_COOKIES_FROM_BROWSER=chrome` only works on your PC (Chrome installed + logged in).
+   - On the VPS, set:
+     ```env
+     YTDLP_COOKIES=/home/babak/hiit-radio/cookies.txt
+     ```
+   - Comment out or remove `YTDLP_COOKIES_FROM_BROWSER` in `.env`.
+   - The bot now prefers authenticated `cookies.txt` over the browser setting when both exist.
+
+3. **Install FFmpeg on the VPS**
+   ```bash
+   sudo apt update && sudo apt install -y ffmpeg
+   ```
+
+4. **Proxy (if your PC uses proxychains)**
+   - If the bot on your PC runs behind `proxychains4`, the VPS needs the same reachability.
+   - Either add to `.env`:
+     ```env
+     YTDLP_PROXY=socks5://127.0.0.1:1080
+     ```
+   - Or change systemd `ExecStart` to use proxychains like on your desktop.
+
+5. **Run the diagnostic script on the VPS**
+   ```bash
+   cd /home/babak/hiit-radio
+   chmod +x vps_diagnose.sh
+   ./vps_diagnose.sh
+   ```
+
+6. **Re-run Spotify login on VPS** (if `credentials.json` was never copied)
+   - See section 2 above; zotify OAuth must be done once per server.
+
+7. **Verify in Telegram (admin)**
+   ```text
+   /creds
+   ```
+   YouTube must show ✓ for `cookies.txt`, not only browser.
+
+### Refresh cookies periodically
+
+YouTube cookies expire. When downloads start failing everywhere, re-export `cookies.txt` on your PC and `scp` it to the VPS again.

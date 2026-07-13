@@ -15,19 +15,25 @@ def get_credentials_status():
 
     # --- YouTube ---
     lines.append("▶ یوتیوب (Apple Music / جستجو / بیشتر لینک‌ها)")
-    if dl.cookies_from_browser:
-        lines.append(f"  ✓ YTDLP_COOKIES_FROM_BROWSER={dl.cookies_from_browser}")
-        yt_ok = True
-    elif os.path.exists(dl.cookies_path) and _cookies_look_authenticated(dl.cookies_path):
+    has_auth_cookies = os.path.exists(dl.cookies_path) and _cookies_look_authenticated(dl.cookies_path)
+    if has_auth_cookies:
         lines.append(f"  ✓ cookies.txt لاگین‌شده: {dl.cookies_path}")
         yt_ok = True
+        if dl.cookies_from_browser:
+            lines.append(
+                f"  (فایل cookies.txt اولویت دارد؛ YTDLP_COOKIES_FROM_BROWSER={dl.cookies_from_browser} نادیده گرفته می‌شود)"
+            )
+    elif dl.cookies_from_browser:
+        lines.append(f"  ⚠ YTDLP_COOKIES_FROM_BROWSER={dl.cookies_from_browser}")
+        lines.append("    → روی VPS معمولاً کار نمی‌کند؛ cookies.txt را از PC کپی کن")
+        yt_ok = False
     elif os.path.exists(dl.cookies_path):
         lines.append(f"  ✗ cookies.txt هست ولی بدون LOGIN_INFO/SAPISID (مهمان)")
         lines.append("    → در مرورگر وارد youtube.com شو و کوکی را دوباره export کن")
         yt_ok = False
     else:
         lines.append(f"  ✗ cookies.txt پیدا نشد: {dl.cookies_path}")
-        lines.append("    → یا فایل را بگذار، یا در .env: YTDLP_COOKIES_FROM_BROWSER=chrome")
+        lines.append("    → فایل را از PC کپی کن یا در مرورگر export کن")
         yt_ok = False
 
     # --- Spotify full (zotify) ---

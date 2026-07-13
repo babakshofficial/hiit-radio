@@ -45,7 +45,7 @@ class MusicDownloader:
         self.cookies_from_browser = os.getenv("YTDLP_COOKIES_FROM_BROWSER", "").strip()
 
     def _build_ydl_opts(self, output_template):
-        """Build yt-dlp options, preferring logged-in browser cookies when available."""
+        """Build yt-dlp options. Authenticated cookies.txt wins on VPS; browser is desktop fallback."""
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': output_template,
@@ -74,7 +74,11 @@ class MusicDownloader:
             },
         }
 
-        if self.cookies_from_browser:
+        if os.path.exists(self.cookies_path) and _cookies_look_authenticated(self.cookies_path):
+            # Prefer exported cookies.txt (works on VPS/headless). Browser import is desktop-only.
+            ydl_opts['cookiefile'] = self.cookies_path
+            logger.info(f"Using authenticated YouTube cookies from {self.cookies_path}")
+        elif self.cookies_from_browser:
             # e.g. YTDLP_COOKIES_FROM_BROWSER=chrome  or  chrome:Profile\ 1
             parts = self.cookies_from_browser.split(":", 1)
             browser = parts[0].strip()
@@ -83,20 +87,21 @@ class MusicDownloader:
             logger.info(f"Using YouTube cookies from browser: {self.cookies_from_browser}")
         elif os.path.exists(self.cookies_path):
             ydl_opts['cookiefile'] = self.cookies_path
-            if _cookies_look_authenticated(self.cookies_path):
-                logger.info(f"Using authenticated YouTube cookies from {self.cookies_path}")
-            else:
-                logger.warning(
-                    f"cookies.txt at {self.cookies_path} has no logged-in YouTube session "
-                    "(missing LOGIN_INFO/SAPISID). YouTube will likely bot-block downloads. "
-                    "Export fresh cookies while signed into youtube.com, or set "
-                    "YTDLP_COOKIES_FROM_BROWSER=chrome in .env"
-                )
+            logger.warning(
+                f"cookies.txt at {self.cookies_path} has no logged-in YouTube session "
+                "(missing LOGIN_INFO/SAPISID). YouTube will likely bot-block downloads. "
+                "Export fresh cookies while signed into youtube.com."
+            )
         else:
             logger.warning(
-                f"No cookies file at {self.cookies_path}. YouTube may bot-block. "
-                "Export cookies.txt or set YTDLP_COOKIES_FROM_BROWSER=chrome"
+                f"No authenticated cookies at {self.cookies_path}. YouTube may bot-block. "
+                "Copy cookies.txt from your PC or export fresh cookies on desktop."
             )
+
+        proxy = os.getenv("YTDLP_PROXY", "").strip() or os.getenv("HTTPS_PROXY", "").strip()
+        if proxy:
+            ydl_opts['proxy'] = proxy
+            logger.info(f"Using proxy for yt-dlp: {proxy}")
 
         return ydl_opts
 
