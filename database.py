@@ -216,7 +216,7 @@ class Database:
         user_id = str(user_id)
         with self._conn() as conn:
             rows = conn.execute(
-                """SELECT id, title, artist, platform, created_at
+                """SELECT id, title, artist, album, platform, created_at
                    FROM download_history WHERE user_id=? ORDER BY created_at DESC LIMIT ?""",
                 (user_id, limit),
             ).fetchall()

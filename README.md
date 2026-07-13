@@ -17,8 +17,7 @@ The user interface is in **Persian (Farsi)**. Admin tooling and this documentati
 - Inline mode — search from any chat (`@YourBot song name`)
 - Download history — `/history` with one-tap re-download buttons
 - Recommendations — “More by artist” / “Similar songs” after each track
-- Discovery — `/discover` based on listening history
-- Curated search — `/search genre:lofi mood:chill` (see `search_mappings.json`)
+- Discovery — `/discover` personalized picks via LLM from your download history
 - Rate limiting — 10 downloads per hour per user (each playlist track counts separately)
 - File cache — repeated requests served from disk without re-downloading
 
@@ -72,6 +71,7 @@ All settings live in `.env`. See `.env.example` for the full list.
 | `YTDLP_COOKIES_FROM_BROWSER` | e.g. `chrome` — read live browser cookies |
 | `YTDLP_COOKIES` | Path to exported `cookies.txt` |
 | `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | Spotify Web API (metadata only) |
+| `LLM_API_BASE` / `LLM_API_KEY` / `LLM_MODEL` | LLM for `/discover` recommendations |
 | `GENIUS_API_TOKEN` / `MUSIXMATCH_API_KEY` | Optional lyrics providers |
 
 ### Credentials
@@ -171,10 +171,9 @@ Restart the bot whenever you update cookies or environment variables.
 | Command | Description |
 |---------|-------------|
 | `/start` | Welcome message and quick guide |
-| `/help` | Usage, inline mode, rate limits, search syntax |
+| `/help` | Usage, inline mode, rate limits |
 | `/history` | Recent downloads with re-download buttons |
-| `/discover` | Personalized suggestions from your history |
-| `/search` | Curated genre/mood/decade search (e.g. `/search genre:lofi`) |
+| `/discover` | Personalized song recommendations (LLM + download history) |
 | `/cancel` | Stop an in-progress playlist download |
 
 Send a track link, album/playlist URL, or plain song name as a normal message to download.
@@ -231,9 +230,8 @@ Users only see simple result messages. Technical details (credential status, bac
 | `admin_logger.py` | VIP channel activity logging |
 | `progress.py` | Throttled in-chat progress updates |
 | `recommendations.py` | Post-download inline keyboard |
-| `search_parser.py` | `/search` command parsing |
+| `llm_service.py` | LLM recommendations for `/discover` |
 | `cred_status.py` | Credential health report for `/creds` |
-| `search_mappings.json` | Genre/mood/decade → iTunes query map |
 
 Runtime directories (gitignored): `downloads/`, `cache/`, `hiit_radio.db`, `cookies.txt`.
 

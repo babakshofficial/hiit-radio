@@ -51,7 +51,12 @@ from progress import ProgressReporter
 from download_orchestrator import DownloadOrchestrator
 from playlist_handler import process_playlist
 from recommendations import recommendation_keyboard
-from search_parser import parse_search_command, format_search_help
+from llm_service import (
+    is_configured as llm_configured,
+    recommend_songs,
+    get_cached_recommendations,
+    set_cached_recommendations,
+)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
@@ -128,7 +133,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "سلام! من ربات دانلودر موزیک HiiT Radio هستم.\n\n"
         "لینک اپل موزیک، اسپاتیفای، آلبوم/پلی‌لیست، یا نام آهنگ بفرست.\n\n"
         "/help — راهنما\n/history — دانلودهای اخیر\n/discover — پیشنهاد شخصی\n"
-        "/search genre:lofi — جستجوی ژانر/مود\n/cancel — توقف پلی‌لیست"
+        "/cancel — توقف پلی‌لیست"
     )
 
 
@@ -138,8 +143,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "لینک آهنگ، آلبوم، پلی‌لیست یا نام آهنگ را ارسال کن.\n"
         "اینلاین: @HiiTRadioBot نام آهنگ در هر چتی\n"
-        "محدودیت: ۱۰ دانلود در ساعت (هر آهنگ در پلی‌لیست جداگانه).\n\n"
-        + format_search_help()
+        "/discover — پیشنهاد شخصی بر اساس تاریخچه دانلود\n"
+        "محدودیت: ۱۰ دانلود در ساعت (هر آهنگ در پلی‌لیست جداگانه)."
     )
 
 
@@ -255,74 +260,79 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_access(update, context):
         return
     await _touch_user(update)
+    user_id = update.effective_user.id
     db = user_manager.database
-    artists = db.user_top_artists(update.effective_user.id, limit=3)
-    if not artists:
-        artists = db.global_top_artists(limit=3)
-    if not artists:
-        await update.message.reply_text("هنوز داده کافی برای پیشنهاد نیست.")
+    history = db.get_user_history(user_id, limit=40)
+    if not history:
+        await update.message.reply_text("هنوز دانلودی ثبت نشده.")
         return
+
+    if not llm_configured():
+        await update.message.reply_text(
+            "پیشنهاد هوشمند فعال نیست.\n"
+            "در .env مقداردهی کن: LLM_API_BASE، LLM_API_KEY، LLM_MODEL"
+        )
+        return
+
+    status = await update.message.reply_text("در حال آماده‌سازی پیشنهادها...")
+
+    recs = get_cached_recommendations(user_id)
+    if recs is None:
+        recs = await recommend_songs(history, limit=10)
+        if recs is None:
+            await status.edit_text("خطا در دریافت پیشنهاد از LLM. بعداً دوباره تلاش کنید.")
+            return
+        set_cached_recommendations(user_id, recs)
 
     suggestions = []
     seen = set()
-    for row in artists:
-        name = row["artist"]
-        results = await AppleMusicMetadata.search_many(f"{name} new", limit=3)
-        for r in results:
-            key = (r.title, r.artist)
-            if key in seen:
-                continue
-            seen.add(key)
-            meta = TrackMetadata()._copy_from(r)
-            suggestions.append(meta)
-            if len(suggestions) >= 9:
-                break
-        if len(suggestions) >= 9:
+    history_keys = {
+        ((r.get("title") or "").strip().lower(), (r.get("artist") or "").strip().lower())
+        for r in history if r.get("title")
+    }
+
+    for rec in recs:
+        title = rec.get("title", "").strip()
+        artist = rec.get("artist", "").strip()
+        if not title:
+            continue
+        key = (title.lower(), artist.lower())
+        if key in seen or key in history_keys:
+            continue
+
+        query = f"{title} {artist}".strip() if artist else title
+        resolved = await AppleMusicMetadata.search_by_query(query)
+        if not resolved or not resolved.title:
+            resolved = await AppleMusicMetadata.search_by_query(title)
+        if not resolved or not resolved.title:
+            continue
+
+        res_key = (resolved.title.strip().lower(), (resolved.artist or "").strip().lower())
+        if res_key in seen or res_key in history_keys:
+            continue
+        seen.add(res_key)
+        suggestions.append(TrackMetadata()._copy_from(resolved))
+        if len(suggestions) >= 10:
             break
 
     if not suggestions:
-        await update.message.reply_text("پیشنهادی یافت نشد.")
+        await status.edit_text("پیشنهادی یافت نشد.")
         return
 
     lines = ["🎧 پیشنهاد برای شما:\n"]
     buttons = []
-    for i, s in enumerate(suggestions[:9], 1):
-        lines.append(f"{i}. {s.title} — {s.artist}")
+    for i, s in enumerate(suggestions[:10], 1):
+        lines.append(f"{i}. {s.title} — {_unknown_artist(s.artist)}")
         buttons.append([
             InlineKeyboardButton(
                 _btn_download(s.title, i),
                 callback_data=f"discoverpick:{i}",
             )
         ])
-    context.user_data["discover_cache"] = {str(i): s for i, s in enumerate(suggestions[:9], 1)}
-    await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
-
-
-async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await ensure_access(update, context):
-        return
-    parsed = parse_search_command(update.message.text)
-    if not parsed:
-        await update.message.reply_text(format_search_help())
-        return
-    _, _, query = parsed[0]
-    results = await AppleMusicMetadata.search_many(query, limit=5)
-    if not results:
-        await update.message.reply_text("نتیجه‌ای یافت نشد.")
-        return
-    lines = [f"🔍 نتایج برای «{query}»:\n"]
-    buttons = []
-    context.user_data["search_cache"] = {}
-    for i, r in enumerate(results, 1):
-        lines.append(f"{i}. {r.title} — {r.artist}")
-        context.user_data["search_cache"][str(i)] = TrackMetadata()._copy_from(r)
-        buttons.append([
-            InlineKeyboardButton(
-                _btn_download(r.title, i),
-                callback_data=f"searchpick:{i}",
-            )
-        ])
-    await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+    context.user_data["discover_cache"] = {
+        str(i): s for i, s in enumerate(suggestions[:10], 1)
+    }
+    await status.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
 
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -494,8 +504,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("searchpick:"):
         idx = data.split(":", 1)[1]
         meta = (
-            context.user_data.get("search_cache", {}).get(idx)
-            or context.user_data.get("reco_cache", {}).get(idx)
+            context.user_data.get("reco_cache", {}).get(idx)
         )
         if not meta:
             await query.message.reply_text("انتخاب منقضی شده. دوباره جستجو کنید.")
@@ -705,7 +714,6 @@ def main():
     application.add_handler(CommandHandler("channelid", channelid_command))
     application.add_handler(CommandHandler("history", history_command))
     application.add_handler(CommandHandler("discover", discover_command))
-    application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
