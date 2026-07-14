@@ -17,6 +17,65 @@ _STOPWORDS = frozenset({
     "and", "the", "of", "a", "an", "feat", "ft", "featuring", "vs", "with",
 })
 
+_TITLE_HOOKS = frozenset({
+    "dont", "don't", "wanna", "want", "love", "hate", "need", "feel", "know",
+    "baby", "girl", "boy", "heart", "night", "never", "always", "still",
+    "take", "make", "let", "get", "got", "gonna", "ain't", "wont", "won't",
+    "cant", "can't", "here", "there", "away", "back", "again", "alone",
+})
+
+
+def score_query_coverage(query, title, artist):
+    """Symmetric coverage of query tokens in title+artist (0-100).
+
+    Used to gate YouTube/SoundCloud candidates when the query orientation
+    (title-last vs artist-last) is ambiguous.
+    """
+    q_tokens = _query_tokens(query)
+    if not q_tokens:
+        return 0.0
+    hay_tokens = _query_tokens(f"{title or ''} {artist or ''}")
+    hay_text = f"{title or ''} {artist or ''}".lower()
+    hits = sum(1 for t in q_tokens if _token_in_haystack(t, hay_tokens, hay_text))
+    return 100.0 * hits / len(q_tokens)
+
+
+def guess_title_artist(query):
+    """Split free-text into (title, artist) without trusting a single orientation.
+
+    Patterns:
+    - "Oscar and the Wolf Breathe" → title=Breathe, artist=Oscar and the Wolf
+    - "dont wanna be here naits" → title=dont wanna be here, artist=naits
+    """
+    q = (query or "").strip()
+    if not q:
+        return "", ""
+    if re.search(r'\s+by\s+', q, re.I):
+        parts = re.split(r'\s+by\s+', q, maxsplit=1, flags=re.I)
+        if len(parts) == 2:
+            return parts[0].strip(), parts[1].strip()
+    if " - " in q:
+        left, right = q.split(" - ", 1)
+        return left.strip(), right.strip()
+
+    words = q.split()
+    if len(words) < 2:
+        return q, ""
+    if len(words) == 2:
+        # Ambiguous — prefer Title Artist (song then artist)
+        return words[0], words[1]
+
+    last = words[-1]
+    rest = words[:-1]
+    rest_l = " ".join(rest).lower()
+
+    # Band-name cue: "X and the Y Title" → last word is the song title
+    if re.search(r'\band\s+the\b', rest_l) or re.search(r'\b&\b', rest_l):
+        return last, " ".join(rest)
+
+    # Default chat pattern: "song title words … artist"
+    return " ".join(rest), last
+
 
 def _query_tokens(text):
     return [
@@ -869,6 +928,7 @@ class TrackMetadata:
         self.type = None
         self.id = None
         self.url = None
+        self.search_query = None  # original free-text query when iTunes is skipped
 
     def _copy_from(self, source, url=None):
         self.title = getattr(source, "title", None)
@@ -880,6 +940,7 @@ class TrackMetadata:
         self.type = getattr(source, "type", None)
         self.id = getattr(source, "id", None)
         self.url = url if url is not None else getattr(source, "url", None)
+        self.search_query = getattr(source, "search_query", None)
         return self
 
     @classmethod
@@ -916,31 +977,35 @@ class TrackMetadata:
         source = await AppleMusicMetadata.search_by_query(query)
         if source:
             meta._copy_from(source, url=None)
+            meta.search_query = query
             return meta
 
-        # iTunes had no relevant hit — derive title/artist from the query so
-        # YouTube search still uses sensible terms (never invent a wrong track).
-        title, artist = query, ""
-        if re.search(r'\s+by\s+', query, re.IGNORECASE):
-            parts = re.split(r'\s+by\s+', query, maxsplit=1, flags=re.IGNORECASE)
-            if len(parts) == 2:
-                title, artist = parts[0].strip(), parts[1].strip()
-        elif " - " in query:
-            parts = query.split(" - ", 1)
-            if len(parts) == 2:
-                artist, title = parts[0].strip(), parts[1].strip()
-        else:
-            words = query.split()
-            if len(words) >= 3:
-                # Assume "Artist … Title" (last word = title) — common chat input.
-                artist = " ".join(words[:-1])
-                title = words[-1]
+        # Smart title/artist guess, then retry iTunes with both orientations.
+        title, artist = guess_title_artist(query)
+        for variant in (
+            f"{title} {artist}".strip(),
+            f"{artist} {title}".strip(),
+            query,
+        ):
+            if not variant:
+                continue
+            source = await AppleMusicMetadata.search_by_query(variant)
+            if source:
+                # Keep only if still relevant to the *original* query.
+                if score_query_coverage(query, source.title, source.artist) >= 55:
+                    meta._copy_from(source, url=None)
+                    meta.search_query = query
+                    return meta
 
-        meta.title = title
+        meta.title = title or query
         meta.artist = artist
+        meta.search_query = query
         meta.id = str(abs(hash(query)))
         meta.type = "search"
-        logger.info(f"Plain-query fallback metadata: '{meta.title}' by '{meta.artist}'")
+        logger.info(
+            f"Plain-query fallback metadata: '{meta.title}' by '{meta.artist}' "
+            f"(from {query!r})"
+        )
         return meta
 
     @classmethod

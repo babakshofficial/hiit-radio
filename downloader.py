@@ -11,6 +11,8 @@ import requests
 from PIL import Image
 import io
 
+from metadata import score_query_coverage
+
 logger = logging.getLogger(__name__)
 
 # Auth cookie names that indicate a logged-in YouTube session.
@@ -181,7 +183,13 @@ class MusicDownloader:
         MATCH_THRESHOLD = 65.0
         TITLE_THRESHOLD = 70.0
         EARLY_ACCEPT = 80.0
+        QUERY_COVERAGE_MIN = 55.0
         RESULTS_PER_QUERY = 8
+
+        original_query = (
+            (getattr(metadata, "search_query", None) or "")
+            or f"{metadata.title or ''} {metadata.artist or ''}".strip()
+        )
 
         def title_similarity(a, b):
             return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio() * 100
@@ -214,6 +222,27 @@ class MusicDownloader:
             name = re.sub(r'VEVO\s*$', '', name, flags=re.IGNORECASE)
             return name.strip()
 
+        def query_coverage(video):
+            """How well this candidate matches the user's original search text."""
+            if not original_query:
+                return 100.0
+            raw = video.get("title") or ""
+            uploader = clean_artist(video.get("uploader") or video.get("channel") or "")
+            scores = [score_query_coverage(original_query, raw, uploader)]
+            if " - " in raw:
+                left, right = raw.split(" - ", 1)
+                scores.append(score_query_coverage(original_query, left, right))
+                scores.append(score_query_coverage(original_query, right, left))
+            # Also compare against cleaned title + expected artist
+            scores.append(
+                score_query_coverage(
+                    original_query,
+                    clean_title(raw, metadata.artist),
+                    metadata.artist or uploader,
+                )
+            )
+            return max(scores)
+
         expected_duration = getattr(metadata, "duration", None)
         try:
             expected_duration = float(expected_duration) if expected_duration else None
@@ -227,12 +256,26 @@ class MusicDownloader:
             expected_title = clean_title(metadata.title, metadata.artist)
             seq_title_sim = title_similarity(yt_title, expected_title)
             token_sim = _token_title_similarity(expected_title, yt_title)
+            # Also score against the original free-text query title guess
+            if original_query:
+                token_sim = max(
+                    token_sim,
+                    _token_title_similarity(original_query, raw_title),
+                    _token_title_similarity(original_query, f"{raw_title} {yt_artist}"),
+                )
             title_sim = max(seq_title_sim, token_sim)
             artist_sim = title_similarity(yt_artist, metadata.artist or "")
             primary = _primary_artist(metadata.artist or "")
             if primary:
                 artist_sim = max(artist_sim, title_similarity(yt_artist, primary))
             combined = (title_sim * 0.7) + (artist_sim * 0.3)
+
+            coverage = query_coverage(video)
+            if coverage < QUERY_COVERAGE_MIN:
+                return None
+
+            # Blend in query coverage so strong original-query matches win.
+            combined = (combined * 0.75) + (coverage * 0.25)
 
             uploader_raw = (video.get('uploader', '') or video.get('channel', '') or '').lower()
             is_topic = uploader_raw.endswith('topic') or ' - topic' in uploader_raw
@@ -255,37 +298,45 @@ class MusicDownloader:
                     elif ratio > 0.35:
                         combined -= 12.0
 
-            if _has_noise(raw_title, metadata.title or ""):
+            if _has_noise(raw_title, metadata.title or original_query or ""):
                 combined -= 25.0
 
-            return combined, title_sim, artist_sim, token_sim, yt_title, yt_artist, primary, is_topic
+            return combined, title_sim, artist_sim, token_sim, yt_title, yt_artist, primary, is_topic, coverage
 
         q_title = search_title(metadata.title)
         q_artist = (metadata.artist or "").replace('"', '').strip()
         q_primary = _primary_artist(q_artist) or q_artist
 
-        # Trimmed strategy list — most specific first.
+        # Prefer the exact user query first — avoids swapped title/artist traps.
         yt_search_strategies = []
+        if original_query:
+            yt_search_strategies.append(original_query)
+            yt_search_strategies.append(f'{original_query} audio')
         if q_title and q_artist:
             yt_search_strategies.append(f'"{q_title}" "{q_artist}" audio')
+            yt_search_strategies.append(f'{q_title} {q_artist}')
         if q_title and q_primary:
             yt_search_strategies.append(f'{q_title} {q_primary} - Topic')
             yt_search_strategies.append(f'{q_title} {q_primary} official audio')
-            yt_search_strategies.append(f'{q_title} {q_primary}')
-        if q_title and q_artist and q_artist != q_primary:
-            yt_search_strategies.append(f'{q_title} {q_artist}')
-        # Deduplicate while preserving order
         seen_q = set()
         yt_search_strategies = [
             s for s in yt_search_strategies
             if s and not (s in seen_q or seen_q.add(s))
         ][:5]
 
-        sc_search_strategies = [
+        sc_search_strategies = []
+        if original_query:
+            sc_search_strategies.append(original_query)
+        sc_search_strategies.extend([
             f'{q_title} {q_primary}' if q_primary else f'{q_title} {q_artist}',
             f'{q_title}',
-        ]
+        ])
         sc_search_strategies = [s for s in sc_search_strategies if s and s.strip()]
+        seen_sc = set()
+        sc_search_strategies = [
+            s for s in sc_search_strategies
+            if s and not (s in seen_sc or seen_sc.add(s))
+        ]
 
         output_template = os.path.join(self.download_dir, f"{metadata.id}.%(ext)s")
         search_opts = self._build_search_opts()
@@ -328,13 +379,17 @@ class MusicDownloader:
                             scored = score(video)
                             if scored is None:
                                 continue
-                            combined, title_sim, artist_sim, token_sim, c_title, c_artist, primary, is_topic = scored
+                            (
+                                combined, title_sim, artist_sim, token_sim,
+                                c_title, c_artist, primary, is_topic, coverage,
+                            ) = scored
                             logger.info(
                                 f"[{source_label}] Candidate: Title {title_sim:.1f}%, Artist {artist_sim:.1f}%, "
-                                f"Combined {combined:.1f}% | '{c_title}' by '{c_artist}' | "
+                                f"Coverage {coverage:.1f}%, Combined {combined:.1f}% | "
+                                f"'{c_title}' by '{c_artist}' | "
                                 f"Expected: '{expected_title_clean}' by '{metadata.artist}'"
                             )
-                            if title_sim < TITLE_THRESHOLD:
+                            if title_sim < TITLE_THRESHOLD and coverage < 75.0:
                                 topic_ok = (
                                     is_topic
                                     and token_sim >= 85.0
