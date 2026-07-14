@@ -56,7 +56,8 @@ import admin_logger
 from progress import ProgressReporter
 from download_orchestrator import DownloadOrchestrator
 from playlist_handler import process_playlist
-from recommendations import recommendation_keyboard
+from recommendations import recommendation_keyboard, resolve_lyrics_ref
+from lyrics_service import fetch_lyrics
 from llm_service import (
     is_configured as llm_configured,
     recommend_songs,
@@ -97,6 +98,43 @@ def _platform_fa(platform):
 
 def _unknown_artist(artist):
     return msg.unknown_artist(artist)
+
+
+def _lyrics_from_cache(title, artist):
+    """Prefer lyrics already embedded in a cached MP3."""
+    try:
+        from mutagen.mp3 import MP3
+        from mutagen.id3 import ID3
+        for source in ("youtube", "spotify", "apple"):
+            path = orchestrator.cache.get(title, artist, source)
+            if not path:
+                continue
+            audio = MP3(path, ID3=ID3)
+            if not audio.tags:
+                continue
+            for frame in audio.tags.getall("USLT"):
+                text = str(getattr(frame, "text", "") or "").strip()
+                if text:
+                    return text
+    except Exception:
+        return None
+    return None
+
+
+async def _reply_lyrics(message, title, artist, text):
+    header = msg.lyrics_header(title, artist)
+    body = (text or "").strip()
+    # Telegram message limit is 4096 characters.
+    limit = 4000
+    first = header + body
+    if len(first) <= limit:
+        await message.reply_text(first)
+        return
+    await message.reply_text(header + body[: limit - len(header)])
+    rest = body[limit - len(header) :]
+    while rest:
+        chunk, rest = rest[:limit], rest[limit:]
+        await message.reply_text(chunk)
 
 
 def _vip_failure_detail(context=""):
@@ -505,25 +543,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
         return
 
-    if data.startswith("reco:similar:"):
-        artist = data.split(":", 2)[2]
-        results = await AppleMusicMetadata.search_many(f"{artist} similar", limit=5)
-        if not results:
-            await query.message.reply_text(msg.similar_not_found())
+    if data.startswith("reco:lyrics:"):
+        token = data.split(":", 2)[2]
+        ref = resolve_lyrics_ref(token)
+        if not ref:
+            await query.message.reply_text(msg.pick_expired_short())
             return
-        lines = [msg.similar_to_artist(artist)]
-        buttons = []
-        context.user_data["reco_cache"] = {}
-        for i, r in enumerate(results, 1):
-            lines.append(f"{i}. {r.title} — {r.artist}")
-            context.user_data["reco_cache"][str(i)] = TrackMetadata()._copy_from(r)
-            buttons.append([
-                InlineKeyboardButton(
-                    _btn_download(r.title, i),
-                    callback_data=f"searchpick:{i}",
-                )
-            ])
-        await query.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+        title, artist = ref
+        status = await query.message.reply_text(msg.searching())
+        text = _lyrics_from_cache(title, artist)
+        if not text:
+            result = await fetch_lyrics(title, artist)
+            text = (result or {}).get("text") if result else None
+        if not text:
+            await status.edit_text(msg.lyrics_not_found())
+            return
+        await status.delete()
+        await _reply_lyrics(query.message, title, artist, text)
         return
 
     if data.startswith("searchpick:"):

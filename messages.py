@@ -187,8 +187,13 @@ def songs_not_found():
     return "آهنگی پیدا نشد — یه اسم دیگه امتحان کن."
 
 
-def similar_not_found():
-    return "آهنگ مشابهی پیدا نشد — هنرمند دیگه‌ای رو امتحان کن."
+def lyrics_not_found():
+    return "متن این آهنگ پیدا نشد."
+
+
+def lyrics_header(title, artist):
+    who = f" — {artist}" if artist else ""
+    return f"📝 {title}{who}\n\n"
 
 
 def pick_expired():
@@ -201,10 +206,6 @@ def pick_expired_short():
 
 def more_by_artist(artist):
     return f"🎵 آهنگ‌های بیشتر از {artist}:\n"
-
-
-def similar_to_artist(artist):
-    return f"🎵 مشابه {artist}:\n"
 
 
 def inline_description(artist):
@@ -272,4 +273,4 @@ def progress_fail(label, reason=""):
 
 
 BTN_MORE_BY_ARTIST = "آهنگ‌های بیشتر"
-BTN_SIMILAR_ARTISTS = "هنرمندان مشابه"
+BTN_LYRICS = "متن آهنگ"
