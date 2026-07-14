@@ -13,9 +13,80 @@ logger = logging.getLogger(__name__)
 DISCOVER_CACHE_TTL = 3600
 _discover_cache = {}
 
+_OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+
+
+def _api_key():
+    return (
+        os.getenv("LLM_API_KEY", "").strip()
+        or os.getenv("OPENROUTER_API_KEY", "").strip()
+    )
+
+
+def _api_base():
+    raw = (os.getenv("LLM_API_BASE", "") or "").strip()
+    if not raw:
+        # If only an OpenRouter key is set, default the base URL.
+        if os.getenv("OPENROUTER_API_KEY", "").strip() or "openrouter" in (
+            os.getenv("LLM_API_KEY", "") or ""
+        ).lower():
+            return _OPENROUTER_BASE
+        return ""
+    return raw.rstrip("/")
+
 
 def is_configured():
-    return bool(os.getenv("LLM_API_KEY", "").strip() and os.getenv("LLM_API_BASE", "").strip())
+    return bool(_api_key() and _api_base())
+
+
+def _completions_url(api_base):
+    """Build .../chat/completions from common OpenAI-compatible base variants."""
+    base = (api_base or "").strip().rstrip("/")
+    if not base:
+        return ""
+    if base.endswith("/chat/completions"):
+        return base
+
+    lowered = base.lower()
+    # Allow paste shortcuts for OpenRouter.
+    if lowered in {
+        "https://openrouter.ai",
+        "http://openrouter.ai",
+        "https://openrouter.ai/api",
+        "http://openrouter.ai/api",
+    }:
+        return f"{_OPENROUTER_BASE}/chat/completions"
+    if lowered.rstrip("/") == _OPENROUTER_BASE:
+        return f"{_OPENROUTER_BASE}/chat/completions"
+
+    return f"{base}/chat/completions"
+
+
+def _message_text(message):
+    """Extract assistant text; some reasoning models put the answer only in reasoning."""
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str) and content.strip():
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") in ("text", "output_text"):
+                parts.append(block.get("text") or "")
+            elif isinstance(block, str):
+                parts.append(block)
+        joined = "\n".join(p for p in parts if p).strip()
+        if joined:
+            return joined
+    reasoning = message.get("reasoning")
+    if isinstance(reasoning, str) and reasoning.strip():
+        return reasoning
+    return ""
+
+
+def _truthy_env(name):
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _normalize_key(title, artist):
@@ -121,8 +192,9 @@ async def recommend_songs(history, user_id=None, limit=10):
     if not is_configured():
         return None, usage
 
-    api_base = os.getenv("LLM_API_BASE", "").rstrip("/")
-    api_key = os.getenv("LLM_API_KEY", "").strip()
+    api_base = _api_base()
+    api_key = _api_key()
+    url = _completions_url(api_base)
 
     history_text = _format_history(history)
     if not history_text:
@@ -143,11 +215,19 @@ async def recommend_songs(history, user_id=None, limit=10):
         f"Recommend {limit} songs as JSON."
     )
 
-    url = f"{api_base}/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+    # OpenRouter rankings / attribution (optional).
+    if "openrouter.ai" in url:
+        referer = os.getenv("LLM_HTTP_REFERER", "https://t.me/hiit_radio_bot").strip()
+        title = os.getenv("LLM_APP_TITLE", "HiiT Radio Bot").strip()
+        if referer:
+            headers["HTTP-Referer"] = referer
+        if title:
+            headers["X-Title"] = title
+
     payload = {
         "model": model,
         "messages": [
@@ -156,17 +236,26 @@ async def recommend_songs(history, user_id=None, limit=10):
         ],
         "temperature": 0.8,
     }
+    # Some OpenRouter free models (e.g. tencent/hy3:free) expect this.
+    if _truthy_env("LLM_REASONING") or ":free" in model or model.startswith("tencent/"):
+        payload["reasoning"] = {"enabled": True}
 
+    timeout_sec = int(os.getenv("LLM_TIMEOUT", "90") or 90)
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
+            async with session.post(
+                url, headers=headers, json=payload,
+                timeout=aiohttp.ClientTimeout(total=timeout_sec),
+            ) as resp:
                 body = await resp.text()
                 if resp.status != 200:
-                    logger.error(f"LLM API {resp.status}: {body[:500]}")
+                    logger.error(
+                        f"LLM API {resp.status} model={model!r} url={url}: {body[:500]}"
+                    )
                     return None, usage
                 data = json.loads(body)
     except Exception as e:
-        logger.error(f"LLM request failed: {e}", exc_info=True)
+        logger.error(f"LLM request failed ({url}): {e}", exc_info=True)
         return None, usage
 
     api_usage = data.get("usage") or {}
@@ -177,7 +266,7 @@ async def recommend_songs(history, user_id=None, limit=10):
     )
 
     try:
-        content = data["choices"][0]["message"]["content"]
+        content = _message_text(data["choices"][0]["message"])
     except (KeyError, IndexError, TypeError):
         logger.error("LLM response missing choices/message")
         return None, usage
