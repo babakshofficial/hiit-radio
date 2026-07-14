@@ -82,6 +82,76 @@ def _candidate_url(video, source_label="YouTube"):
     return f"https://www.youtube.com/watch?v={vid}"
 
 
+def _strip_track_noise(title):
+    """Remove common YouTube junk from a track title for clean tags."""
+    if not title:
+        return ""
+    cleaned = title
+    cleaned = re.sub(
+        r'\s*[\(\[][^)\]]*(?:official|audio|lyrics|video|hd|hq|4k|visuali[sz]er|'
+        r'topic|music\s*video|lyric\s*video|audio\s*only)[^)\]]*[\)\]]',
+        '',
+        cleaned,
+        flags=re.I,
+    )
+    cleaned = re.sub(r'\s*\|\s*.*$', '', cleaned)
+    cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip(" -\u2013\u2014|")
+    return cleaned.strip()
+
+
+def _parse_source_track_name(video):
+    """Parse YouTube/SoundCloud result into clean (title, artist).
+
+    Prefer ``Title - Artist`` / ``Artist - Title`` in the video title, fall back
+    to cleaned title + uploader/channel.
+    """
+    raw = (video.get("title") or "").strip()
+    uploader = (video.get("uploader") or video.get("channel") or "").strip()
+    uploader = re.sub(r'\s*-\s*Topic\s*$', '', uploader, flags=re.I)
+    uploader = re.sub(r'VEVO\s*$', '', uploader, flags=re.I).strip()
+
+    title, artist = raw, uploader
+    for sep in (" - ", " – ", " — ", " | "):
+        if sep in raw:
+            left, right = raw.split(sep, 1)
+            left, right = left.strip(), right.strip()
+            if left and right:
+                # Prefer the side that looks like the song when uploader matches one side.
+                up_l = uploader.lower()
+                if up_l and up_l in right.lower():
+                    title, artist = left, right
+                elif up_l and up_l in left.lower():
+                    title, artist = right, left
+                else:
+                    # Default chat/YouTube pattern: Title - Artist
+                    title, artist = left, right
+                break
+
+    title = _strip_track_noise(title) or _strip_track_noise(raw) or raw
+    artist = _strip_track_noise(artist) or uploader
+    # If artist still empty/generic, keep uploader
+    if not artist or artist.lower() in {"various artists", "topic"}:
+        artist = uploader or artist
+    return title, artist
+
+
+def _video_thumbnail_url(video):
+    """Best available thumbnail URL from a yt-dlp flat or full result."""
+    thumb = video.get("thumbnail")
+    if thumb:
+        return thumb
+    thumbs = video.get("thumbnails") or []
+    if thumbs:
+        best = max(thumbs, key=lambda t: (t.get("height") or 0) * (t.get("width") or 0))
+        url = best.get("url")
+        if url:
+            return url
+    vid = video.get("id")
+    if vid and not str(vid).startswith("http"):
+        return f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+    return None
+
+
 class MusicDownloader:
     def __init__(self, download_dir="downloads"):
         self.download_dir = download_dir
@@ -490,8 +560,44 @@ class MusicDownloader:
             return None
 
         logger.info(f"Download successful (match {best_score:.1f}%)")
+        self._enrich_metadata_from_source(metadata, best_video)
         self._apply_metadata(file_path, metadata)
         return file_path
+
+    def _enrich_metadata_from_source(self, metadata, video):
+        """Upgrade title/artist/artwork from the actual downloaded source.
+
+        Keeps Apple/Spotify names when they already look complete; always fills
+        missing artwork from the video thumbnail so watermarking still runs.
+        """
+        if not video:
+            return
+        src_title, src_artist = _parse_source_track_name(video)
+        had_catalog = bool(getattr(metadata, "url", None)) and (
+            "spotify.com" in (metadata.url or "") or "music.apple.com" in (metadata.url or "")
+        )
+
+        # Prefer source's fuller name for plain-text searches / weak guesses.
+        if not had_catalog:
+            if src_title:
+                metadata.title = src_title
+            if src_artist:
+                metadata.artist = src_artist
+            logger.info(f"Enriched tags from source: '{metadata.title}' by '{metadata.artist}'")
+        else:
+            # Catalog metadata is authoritative for title/artist; still note source.
+            logger.info(
+                f"Keeping catalog tags '{metadata.title}' by '{metadata.artist}' "
+                f"(source was '{src_title}' by '{src_artist}')"
+            )
+
+        if not getattr(metadata, "artwork_url", None):
+            thumb = _video_thumbnail_url(video)
+            if thumb:
+                metadata.artwork_url = thumb
+                # Mark as youtube-sourced art so watermark uses search style.
+                metadata._artwork_from_youtube = True
+                logger.info("Using video thumbnail for watermarked cover art")
 
     def _apply_lyrics(self, audio, lyrics):
         if not lyrics or not lyrics.get("text"):
@@ -546,7 +652,12 @@ class MusicDownloader:
                         original_artwork = response.content
 
                         source = "unknown"
-                        if hasattr(metadata, 'url') and metadata.url:
+                        from_yt = getattr(metadata, "_artwork_from_youtube", False)
+                        if from_yt:
+                            # YouTube thumbnail: same watermark as text-search (border + logo)
+                            processed_artwork = self._process_itunes_query_artwork(original_artwork)
+                            source = "youtube"
+                        elif hasattr(metadata, 'url') and metadata.url:
                             if "spotify.com" in metadata.url:
                                 processed_artwork = self._process_apple_music_artwork(original_artwork)
                                 source = "spotify"
