@@ -1,5 +1,6 @@
 import aiohttp
 import re
+import difflib
 from bs4 import BeautifulSoup
 import logging
 import urllib.parse
@@ -11,6 +12,134 @@ from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
+
+_STOPWORDS = frozenset({
+    "and", "the", "of", "a", "an", "feat", "ft", "featuring", "vs", "with",
+})
+
+
+def _query_tokens(text):
+    return [
+        t for t in re.findall(r"\w+", (text or "").lower())
+        if len(t) > 1 and t not in _STOPWORDS
+    ]
+
+
+def _token_in_haystack(token, haystack_tokens, haystack_text):
+    """Exact or fuzzy (breathe≈breathing) presence of a query token."""
+    if token in haystack_text:
+        return True
+    for w in haystack_tokens:
+        if token == w:
+            return True
+        if len(token) >= 4 and len(w) >= 4:
+            if token in w or w in token:
+                return True
+            # Shared stem "breath" in breathe/breathing
+            prefix = min(len(token), len(w), 5)
+            if token[:prefix] == w[:prefix] and prefix >= 5:
+                return True
+            if difflib.SequenceMatcher(None, token, w).ratio() >= 0.72:
+                return True
+    return False
+
+
+def score_query_match(query, title, artist):
+    """How well an iTunes hit matches a free-text user query (0-100).
+
+    Requires title overlap so popular artist tracks don't win when the song
+    name in the query is different. Prefers contiguous artist-phrase matches
+    so 'Oscar and the Wolf' beats '… Oscar … Rad Wolf'.
+    """
+    q = (query or "").strip()
+    if not q:
+        return 0.0
+
+    q_tokens = _query_tokens(q)
+    if not q_tokens:
+        return 0.0
+
+    title_l = (title or "").lower()
+    artist_l = (artist or "").lower()
+    title_tokens = _query_tokens(title)
+    artist_tokens = _query_tokens(artist)
+
+    title_hits = sum(1 for t in q_tokens if _token_in_haystack(t, title_tokens, title_l))
+    if title_hits == 0:
+        return 0.0
+
+    words = q.split()
+    # Guess "Artist … Title" (last word = title) when query has no separators.
+    artist_guess = ""
+    title_guess = ""
+    if len(words) >= 3:
+        artist_guess = " ".join(words[:-1]).lower()
+        title_guess = words[-1].lower()
+    elif len(words) == 2:
+        artist_guess, title_guess = words[0].lower(), words[1].lower()
+
+    artist_phrase_sim = 0.0
+    if artist_guess:
+        artist_phrase_sim = difflib.SequenceMatcher(None, artist_guess, artist_l).ratio() * 100.0
+        # Also compare against cleaned artist without featured junk
+        artist_clean = re.split(r'\s*(?:feat\.?|ft\.?|&|,)\s*', artist_l, maxsplit=1)[0].strip()
+        artist_phrase_sim = max(
+            artist_phrase_sim,
+            difflib.SequenceMatcher(None, artist_guess, artist_clean).ratio() * 100.0,
+        )
+
+    title_focus = 0.0
+    if title_guess:
+        if _token_in_haystack(title_guess, title_tokens, title_l):
+            # Prefer compact titles (Breathing) over long ones (Breathe of Life …)
+            compactness = min(1.0, (len(title_guess) + 2) / max(len(title_l), 1))
+            title_focus = 50.0 + 50.0 * compactness
+            title_focus = max(
+                title_focus,
+                difflib.SequenceMatcher(None, title_guess, title_l).ratio() * 100.0,
+            )
+
+    coverage = (
+        sum(
+            1 for t in q_tokens
+            if _token_in_haystack(t, title_tokens + artist_tokens, f"{title_l} {artist_l}")
+        )
+        / len(q_tokens)
+    ) * 100.0
+
+    # Strong contiguous artist match is required for multi-word artist queries.
+    if artist_guess and len(_query_tokens(artist_guess)) >= 2 and artist_phrase_sim < 55.0:
+        return 0.0
+
+    score = coverage * 0.35 + artist_phrase_sim * 0.4 + title_focus * 0.25
+    return min(score, 100.0)
+
+
+def _itunes_query_variants(query):
+    """Reorder free-text queries so iTunes can find Artist+Title better."""
+    q = (query or "").strip()
+    if not q:
+        return []
+    variants = [q]
+    words = q.split()
+    if len(words) >= 3:
+        # Treat last word as title: "Artist words … Title"
+        artist, title = " ".join(words[:-1]), words[-1]
+        variants.append(f"{title} {artist}")
+        variants.append(f"{artist} {title}")
+        if len(words) >= 4:
+            artist2, title2 = " ".join(words[:-2]), " ".join(words[-2:])
+            variants.append(f"{title2} {artist2}")
+            variants.append(f"{artist2} {title2}")
+    # dedupe preserving order
+    seen = set()
+    out = []
+    for v in variants:
+        key = v.lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(v)
+    return out
 
 # Spotify token cache
 _spotify_token = None
@@ -371,84 +500,114 @@ class AppleMusicMetadata:
             return False
 
     @classmethod
-    async def search_by_query(cls, query):
-        """Search iTunes API and upgrade artwork to max resolution."""
+    def _meta_from_itunes_track(cls, track, query=""):
+        meta = cls(None)
+        meta.title = track.get("trackName", query)
+        meta.artist = track.get("artistName", "")
+        meta.album = track.get("collectionName", "")
+        meta.preview_url = track.get("previewUrl")
+        ms = track.get("trackTimeMillis")
+        if ms:
+            meta.duration = float(ms) / 1000.0
+        artwork = track.get("artworkUrl100", "")
+        if artwork:
+            high_res = artwork.replace("100x100bb", "3000x3000bb")
+            high_res = high_res.replace("100x100", "3000x3000")
+            high_res = high_res.replace("600x600bb", "3000x3000bb")
+            meta.artwork_url = high_res
+        meta.type = "search"
+        meta.id = str(track.get("trackId", abs(hash(query))))
+        return meta
+
+    @classmethod
+    async def _itunes_raw_search(cls, query, limit=10):
         encoded_query = urllib.parse.quote(query)
-        url = f"https://itunes.apple.com/search?term={encoded_query}&media=music&entity=song&limit=1"
-
+        url = (
+            f"https://itunes.apple.com/search?term={encoded_query}"
+            f"&media=music&entity=song&limit={limit}"
+        )
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'application/json',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Referer': 'https://music.apple.com/',
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://music.apple.com/",
         }
-
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=headers) as response:
-                    try:
-                        text = await response.text()
-                        data = json.loads(text)
-                    except json.JSONDecodeError:
-                        return None
-
-                    if data.get('resultCount', 0) < 1:
-                        return None
-
-                    track = data['results'][0]
-                    meta = cls(None)
-                    meta.title = track.get('trackName', query)
-                    meta.artist = track.get('artistName', '')
-                    meta.album = track.get('collectionName', '')
-                    meta.preview_url = track.get('previewUrl')
-                    ms = track.get('trackTimeMillis')
-                    if ms:
-                        meta.duration = float(ms) / 1000.0
-
-                    artwork = track.get('artworkUrl100', '')
-                    if artwork:
-                        high_res = artwork.replace('100x100bb', '3000x3000bb')
-                        high_res = high_res.replace('100x100', '3000x3000')
-                        high_res = high_res.replace('600x600bb', '3000x3000bb')
-                        meta.artwork_url = high_res
-                    meta.type = 'search'
-                    meta.id = str(track.get('trackId', hash(query)))
-                    logger.info(f"iTunes search: {meta.title} by {meta.artist}")
-                    return meta
+                    text = await response.text()
+                    data = json.loads(text)
+            return data.get("results", [])[:limit]
         except Exception as e:
-            logger.error(f"iTunes search failed: {e}", exc_info=True)
+            logger.error(f"iTunes search failed for {query!r}: {e}", exc_info=True)
+            return []
+
+    @classmethod
+    async def search_by_query(cls, query, min_score=55.0):
+        """Search iTunes and return the best query-relevant track, or None.
+
+        Never blindly trusts result #1 — Apple often inserts unrelated chart
+        hits. Scores candidates against the user query and tries title/artist
+        reorderings when needed.
+        """
+        if not query or len(query.strip()) < 3:
             return None
+
+        best_meta = None
+        best_score = -1.0
+        seen_ids = set()
+
+        for variant in _itunes_query_variants(query):
+            tracks = await cls._itunes_raw_search(variant, limit=10)
+            for track in tracks:
+                tid = track.get("trackId")
+                if tid in seen_ids:
+                    continue
+                if tid is not None:
+                    seen_ids.add(tid)
+                title = track.get("trackName", "")
+                artist = track.get("artistName", "")
+                # Score against the *original* user query, not just the variant.
+                score = score_query_match(query, title, artist)
+                logger.info(
+                    f"iTunes candidate {score:.0f}%: '{title}' by '{artist}' (query={variant!r})"
+                )
+                if score > best_score:
+                    best_score = score
+                    best_meta = cls._meta_from_itunes_track(track, query)
+            # Stop early if we already have a strong match.
+            if best_score >= 80.0:
+                break
+
+        if best_meta and best_score >= min_score:
+            logger.info(
+                f"iTunes search picked {best_score:.0f}%: "
+                f"'{best_meta.title}' by '{best_meta.artist}'"
+            )
+            return best_meta
+
+        logger.warning(
+            f"iTunes search: no relevant match for {query!r} "
+            f"(best={best_score:.0f}%, need>={min_score:.0f}%)"
+        )
+        return None
 
     @classmethod
     async def search_many(cls, query, limit=5):
-        """Search iTunes and return up to ``limit`` AppleMusicMetadata track objects."""
-        encoded_query = urllib.parse.quote(query)
-        url = f"https://itunes.apple.com/search?term={encoded_query}&media=music&entity=song&limit={limit}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        }
+        """Search iTunes and return up to ``limit`` relevance-ranked tracks."""
+        tracks = await cls._itunes_raw_search(query, limit=max(limit * 2, 10))
+        scored = []
+        for track in tracks:
+            title = track.get("trackName", "")
+            artist = track.get("artistName", "")
+            score = score_query_match(query, title, artist)
+            if score <= 0:
+                continue
+            scored.append((score, track))
+        scored.sort(key=lambda x: x[0], reverse=True)
         results = []
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers) as response:
-                    data = json.loads(await response.text())
-            for track in data.get('results', [])[:limit]:
-                meta = cls(None)
-                meta.title = track.get('trackName', query)
-                meta.artist = track.get('artistName', '')
-                meta.album = track.get('collectionName', '')
-                meta.preview_url = track.get('previewUrl')
-                ms = track.get('trackTimeMillis')
-                if ms:
-                    meta.duration = float(ms) / 1000.0
-                artwork = track.get('artworkUrl100', '')
-                if artwork:
-                    meta.artwork_url = artwork.replace('100x100bb', '3000x3000bb').replace('100x100', '3000x3000')
-                meta.type = 'search'
-                meta.id = str(track.get('trackId', abs(hash(query))))
-                results.append(meta)
-        except Exception as e:
-            logger.error(f"iTunes multi-search failed: {e}")
+        for score, track in scored[:limit]:
+            results.append(cls._meta_from_itunes_track(track, query))
         return results
 
     @classmethod
@@ -759,7 +918,8 @@ class TrackMetadata:
             meta._copy_from(source, url=None)
             return meta
 
-        # Fallback: parse "Title by Artist" / "Artist - Title" from the raw query
+        # iTunes had no relevant hit — derive title/artist from the query so
+        # YouTube search still uses sensible terms (never invent a wrong track).
         title, artist = query, ""
         if re.search(r'\s+by\s+', query, re.IGNORECASE):
             parts = re.split(r'\s+by\s+', query, maxsplit=1, flags=re.IGNORECASE)
@@ -769,11 +929,18 @@ class TrackMetadata:
             parts = query.split(" - ", 1)
             if len(parts) == 2:
                 artist, title = parts[0].strip(), parts[1].strip()
+        else:
+            words = query.split()
+            if len(words) >= 3:
+                # Assume "Artist … Title" (last word = title) — common chat input.
+                artist = " ".join(words[:-1])
+                title = words[-1]
 
         meta.title = title
         meta.artist = artist
         meta.id = str(abs(hash(query)))
         meta.type = "search"
+        logger.info(f"Plain-query fallback metadata: '{meta.title}' by '{meta.artist}'")
         return meta
 
     @classmethod
