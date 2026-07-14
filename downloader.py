@@ -6,7 +6,7 @@ import asyncio
 import json
 import difflib
 from mutagen.mp3 import MP3 as MutagenMP3
-from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC, USLT, SYLT
+from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC, USLT, SYLT, TXXX
 import requests
 from PIL import Image
 import io
@@ -529,6 +529,9 @@ class MusicDownloader:
             return None
         logger.info(f"Best match {best_score:.1f}% — '{best_video.get('title', '')}' — downloading")
 
+        # Flat search may lack full title/thumbnail — refresh from the watch URL.
+        best_video = await self._hydrate_video_info(download_url, best_video, loop)
+
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 await loop.run_in_executor(None, ydl.download, [download_url])
@@ -564,11 +567,81 @@ class MusicDownloader:
         self._apply_metadata(file_path, metadata)
         return file_path
 
+    async def _hydrate_video_info(self, download_url, flat_video, loop):
+        """Replace flat-search stub with full metadata (title, uploader, thumbnail)."""
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": True,
+        }
+        self._apply_auth(opts)
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                full = await loop.run_in_executor(
+                    None, lambda: ydl.extract_info(download_url, download=False)
+                )
+            if full:
+                # Preserve flat fields that full extract might omit oddly
+                merged = dict(flat_video or {})
+                merged.update(full)
+                logger.info(
+                    f"Hydrated source info: '{merged.get('title')}' "
+                    f"uploader='{merged.get('uploader') or merged.get('channel')}'"
+                )
+                return merged
+        except Exception as e:
+            logger.warning(f"Could not hydrate video info: {e}")
+        return flat_video
+
+    def file_has_cover(self, file_path):
+        try:
+            audio = MutagenMP3(file_path, ID3=ID3)
+            if not audio.tags:
+                return False
+            return bool(audio.tags.getall("APIC"))
+        except Exception:
+            return False
+
+    def file_is_source_enriched(self, file_path):
+        """True when tags were written from the downloaded YouTube/SoundCloud title."""
+        try:
+            audio = MutagenMP3(file_path, ID3=ID3)
+            if not audio.tags:
+                return False
+            for frame in audio.tags.getall("TXXX"):
+                if getattr(frame, "desc", "") == "HIIT_SOURCE_ENRICHED":
+                    return str(frame).strip() in {"1", "True", "true"}
+            return False
+        except Exception:
+            return False
+
+    def sync_metadata_from_file(self, file_path, metadata):
+        """Copy ID3 title/artist into the metadata object used for Telegram send."""
+        try:
+            audio = MutagenMP3(file_path, ID3=ID3)
+            if not audio.tags:
+                return
+            titles = audio.tags.getall("TIT2")
+            artists = audio.tags.getall("TPE1")
+            albums = audio.tags.getall("TALB")
+            if titles and str(titles[0]):
+                metadata.title = str(titles[0])
+            if artists and str(artists[0]):
+                metadata.artist = str(artists[0])
+            if albums and str(albums[0]):
+                metadata.album = str(albums[0])
+            logger.info(
+                f"Synced send metadata from file: '{metadata.title}' by '{metadata.artist}'"
+            )
+        except Exception as e:
+            logger.debug(f"sync_metadata_from_file skipped: {e}")
+
     def _enrich_metadata_from_source(self, metadata, video):
         """Upgrade title/artist/artwork from the actual downloaded source.
 
-        Keeps Apple/Spotify names when they already look complete; always fills
-        missing artwork from the video thumbnail so watermarking still runs.
+        For plain-text searches always prefer the source's display name so Telegram
+        shows the real track, not the user's raw query split.
         """
         if not video:
             return
@@ -577,27 +650,30 @@ class MusicDownloader:
             "spotify.com" in (metadata.url or "") or "music.apple.com" in (metadata.url or "")
         )
 
-        # Prefer source's fuller name for plain-text searches / weak guesses.
         if not had_catalog:
             if src_title:
                 metadata.title = src_title
             if src_artist:
                 metadata.artist = src_artist
+            metadata._source_enriched = True
             logger.info(f"Enriched tags from source: '{metadata.title}' by '{metadata.artist}'")
         else:
-            # Catalog metadata is authoritative for title/artist; still note source.
             logger.info(
                 f"Keeping catalog tags '{metadata.title}' by '{metadata.artist}' "
                 f"(source was '{src_title}' by '{src_artist}')"
             )
 
-        if not getattr(metadata, "artwork_url", None):
-            thumb = _video_thumbnail_url(video)
-            if thumb:
+        thumb = _video_thumbnail_url(video)
+        if thumb and (
+            not getattr(metadata, "artwork_url", None)
+            or not had_catalog
+        ):
+            # Text search: always prefer source thumbnail for watermarking when
+            # we have no catalog art. For catalog links keep Spotify/Apple art.
+            if not had_catalog or not metadata.artwork_url:
                 metadata.artwork_url = thumb
-                # Mark as youtube-sourced art so watermark uses search style.
                 metadata._artwork_from_youtube = True
-                logger.info("Using video thumbnail for watermarked cover art")
+                logger.info(f"Using video thumbnail for watermarked cover: {thumb[:80]}")
 
     def _apply_lyrics(self, audio, lyrics):
         if not lyrics or not lyrics.get("text"):
@@ -642,13 +718,28 @@ class MusicDownloader:
                 audio.tags.add(TPE1(encoding=3, text=metadata.artist))
             if metadata.album:
                 audio.tags.add(TALB(encoding=3, text=metadata.album))
+            if getattr(metadata, "_source_enriched", False):
+                audio.tags.delall("TXXX:HIIT_SOURCE_ENRICHED")
+                audio.tags.add(
+                    TXXX(encoding=3, desc="HIIT_SOURCE_ENRICHED", text=["1"])
+                )
             if lyrics:
                 self._apply_lyrics(audio, lyrics)
 
             if metadata.artwork_url:
                 try:
-                    response = requests.get(metadata.artwork_url, timeout=10)
-                    if response.status_code == 200:
+                    headers = {
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/131.0.0.0 Safari/537.36"
+                        ),
+                        "Referer": "https://www.youtube.com/",
+                    }
+                    response = requests.get(
+                        metadata.artwork_url, timeout=15, headers=headers,
+                    )
+                    if response.status_code == 200 and response.content:
                         original_artwork = response.content
 
                         source = "unknown"
@@ -684,7 +775,9 @@ class MusicDownloader:
                         else:
                             logger.warning("Artwork processing returned None")
                     else:
-                        logger.warning(f"Artwork fetch failed: {response.status_code}")
+                        logger.warning(
+                            f"Artwork fetch failed: status={getattr(response, 'status_code', '?')}"
+                        )
                 except Exception as e:
                     logger.error(f"Artwork error: {e}", exc_info=True)
             else:

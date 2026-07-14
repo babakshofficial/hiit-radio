@@ -81,6 +81,41 @@ class CacheManager:
             logger.error(f"Cache copy failed: {e}")
             return False
 
+    def invalidate(self, title, artist, source=""):
+        """Remove a cache entry (DB + file) so the next request re-downloads."""
+        key = content_key(title, artist, source)
+        row = self.db.delete_cache_entry(key)
+        if row and row.get("path") and os.path.exists(row["path"]):
+            try:
+                os.remove(row["path"])
+            except OSError:
+                pass
+        logger.info(f"Cache invalidated: {title} — {artist}")
+
+    def clear_all(self):
+        """Delete every cache entry and file (used after tagging/strategy changes)."""
+        rows = self.db.delete_all_cache_entries()
+        removed = 0
+        for entry in rows:
+            path = entry.get("path")
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                    removed += 1
+                except OSError:
+                    pass
+        # Also remove any orphan files under CACHE_DIR
+        for root, _dirs, files in os.walk(self.cache_dir):
+            for name in files:
+                if name.endswith(".mp3"):
+                    try:
+                        os.remove(os.path.join(root, name))
+                        removed += 1
+                    except OSError:
+                        pass
+        logger.info(f"Cache cleared: {len(rows)} db rows, {removed} files removed")
+        return removed
+
     def sweep_expired(self):
         expired = self.db.delete_expired_cache_entries()
         removed = 0

@@ -309,6 +309,22 @@ class Database:
             return entry.get("telegram_file_id")
         return None
 
+    def delete_cache_entry(self, content_key):
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT path FROM cache_files WHERE content_key=?", (content_key,)
+            ).fetchone()
+            conn.execute("DELETE FROM cache_files WHERE content_key=?", (content_key,))
+            return dict(row) if row else None
+
+    def delete_all_cache_entries(self):
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT content_key, path FROM cache_files"
+            ).fetchall()
+            conn.execute("DELETE FROM cache_files")
+            return [dict(r) for r in rows]
+
     def delete_expired_cache_entries(self):
         now = time.time()
         with self._conn() as conn:

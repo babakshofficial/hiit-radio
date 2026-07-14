@@ -49,15 +49,34 @@ class DownloadOrchestrator:
         if cached_path:
             send_copy = os.path.join(self.download_dir, f"{metadata.id}_send.mp3")
             if self.cache.copy_for_send(metadata.title, metadata.artist, source, send_copy):
-                self.db.log_event("cache_hit", payload={
-                    "title": metadata.title, "artist": metadata.artist,
-                })
-                if bot:
-                    import admin_logger
-                    await admin_logger.log_cache_hit(
-                        bot, user, metadata.title, metadata.artist, source,
+                # Old text-search cache often has guessed title/artist and may
+                # even have cover art — still force refresh until source-enrich
+                # marker exists (full YT name + watermarked thumb path).
+                needs_refresh = bool(getattr(metadata, "search_query", None)) and (
+                    not self.music_downloader.file_has_cover(send_copy)
+                    or not self.music_downloader.file_is_source_enriched(send_copy)
+                )
+                if needs_refresh:
+                    logger.info(
+                        "Stale text-search cache (missing cover or source tags) — "
+                        "re-downloading for full name + watermark"
                     )
-                return send_copy, f"{source}_cache", True
+                    self.cache.invalidate(metadata.title, metadata.artist, source)
+                    try:
+                        os.remove(send_copy)
+                    except OSError:
+                        pass
+                else:
+                    self.music_downloader.sync_metadata_from_file(send_copy, metadata)
+                    self.db.log_event("cache_hit", payload={
+                        "title": metadata.title, "artist": metadata.artist,
+                    })
+                    if bot:
+                        import admin_logger
+                        await admin_logger.log_cache_hit(
+                            bot, user, metadata.title, metadata.artist, source,
+                        )
+                    return send_copy, f"{source}_cache", True
 
         if progress_reporter:
             await progress_reporter.update(
@@ -89,7 +108,17 @@ class DownloadOrchestrator:
         # Hot path: LRCLIB only with 3s timeout (skip Genius/Musixmatch).
         await self._embed_lyrics(file_path, metadata)
 
+        # Store under enriched tags AND under the original query guess so the
+        # next identical search hits this watermarked file.
         self.cache.put(metadata.title, metadata.artist, source, file_path)
+        search_q = getattr(metadata, "search_query", None)
+        if search_q:
+            from metadata import guess_title_artist
+            guess_title, guess_artist = guess_title_artist(search_q)
+            if guess_title and (
+                guess_title != metadata.title or guess_artist != metadata.artist
+            ):
+                self.cache.put(guess_title, guess_artist or "", source, file_path)
 
         self.db.log_event("download_success", payload={
             "title": metadata.title, "artist": metadata.artist, "platform": platform,
