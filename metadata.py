@@ -67,6 +67,7 @@ class SpotifyMetadata:
         self.album = None
         self.artwork_url = None
         self.preview_url = None
+        self.duration = None  # seconds
         self.type = "track"
         self.id = None
 
@@ -133,6 +134,9 @@ class SpotifyMetadata:
             album = data.get("album", {})
             self.album = album.get("name", "Unknown Album")
             self.preview_url = data.get("preview_url")
+            duration_ms = data.get("duration_ms")
+            if duration_ms:
+                self.duration = float(duration_ms) / 1000.0
 
             images = album.get("images", [])
             if images:
@@ -221,6 +225,14 @@ class SpotifyMetadata:
             if preview.get("url"):
                 self.preview_url = preview["url"]
 
+            duration_ms = entity.get("duration") or entity.get("durationMs") or entity.get("duration_ms")
+            if duration_ms:
+                try:
+                    ms = float(duration_ms)
+                    self.duration = ms / 1000.0 if ms > 1000 else ms
+                except (TypeError, ValueError):
+                    pass
+
             logger.info(f"Spotify (embed): '{self.title}' by '{self.artist}'")
             return bool(self.title and self.title != "Unknown Track")
         except Exception as e:
@@ -236,6 +248,7 @@ class AppleMusicMetadata:
         self.album = None
         self.artwork_url = None
         self.preview_url = None
+        self.duration = None  # seconds
         self.type = None
         self.id = None
 
@@ -344,7 +357,10 @@ class AppleMusicMetadata:
                                                         if result.get('previewUrl'):
                                                             self.preview_url = result['previewUrl']
                                                             logger.info("Got preview URL from iTunes Lookup API fallback")
-                                                            break
+                                                        ms = result.get('trackTimeMillis')
+                                                        if ms:
+                                                            self.duration = float(ms) / 1000.0
+                                                        break
                         except Exception as e:
                             logger.warning(f"iTunes Lookup fallback failed: {e}")
 
@@ -385,7 +401,10 @@ class AppleMusicMetadata:
                     meta.artist = track.get('artistName', '')
                     meta.album = track.get('collectionName', '')
                     meta.preview_url = track.get('previewUrl')
-                    
+                    ms = track.get('trackTimeMillis')
+                    if ms:
+                        meta.duration = float(ms) / 1000.0
+
                     artwork = track.get('artworkUrl100', '')
                     if artwork:
                         high_res = artwork.replace('100x100bb', '3000x3000bb')
@@ -419,6 +438,9 @@ class AppleMusicMetadata:
                 meta.artist = track.get('artistName', '')
                 meta.album = track.get('collectionName', '')
                 meta.preview_url = track.get('previewUrl')
+                ms = track.get('trackTimeMillis')
+                if ms:
+                    meta.duration = float(ms) / 1000.0
                 artwork = track.get('artworkUrl100', '')
                 if artwork:
                     meta.artwork_url = artwork.replace('100x100bb', '3000x3000bb').replace('100x100', '3000x3000')
@@ -482,6 +504,9 @@ class SpotifyCollection:
         meta.id = t.get('id') or str(abs(hash(meta.title or "")))
         meta.url = f"https://open.spotify.com/track/{meta.id}"
         meta.type = 'track'
+        duration_ms = t.get('duration_ms')
+        if duration_ms:
+            meta.duration = float(duration_ms) / 1000.0
         images = album.get('images', [])
         if images:
             meta.artwork_url = images[0].get('url', '')
@@ -540,6 +565,13 @@ class SpotifyCollection:
             meta.url = f"https://open.spotify.com/track/{track_id}"
             meta.type = "track"
             meta.artwork_url = artwork
+            duration_ms = item.get("duration") or item.get("durationMs") or item.get("duration_ms")
+            if duration_ms:
+                try:
+                    ms = float(duration_ms)
+                    meta.duration = ms / 1000.0 if ms > 1000 else ms
+                except (TypeError, ValueError):
+                    pass
             if meta.title:
                 tracks.append(meta)
         return tracks
@@ -674,6 +706,7 @@ class TrackMetadata:
         self.album = None
         self.artwork_url = None
         self.preview_url = None
+        self.duration = None  # seconds, when known from source metadata
         self.type = None
         self.id = None
         self.url = None
@@ -684,6 +717,7 @@ class TrackMetadata:
         self.album = getattr(source, "album", None)
         self.artwork_url = getattr(source, "artwork_url", None)
         self.preview_url = getattr(source, "preview_url", None)
+        self.duration = getattr(source, "duration", None)
         self.type = getattr(source, "type", None)
         self.id = getattr(source, "id", None)
         self.url = url if url is not None else getattr(source, "url", None)
@@ -772,6 +806,9 @@ class TrackMetadata:
                     meta.id = str(item.get('trackId', abs(hash(meta.title))))
                     meta.url = text
                     meta.type = 'song'
+                    ms = item.get('trackTimeMillis')
+                    if ms:
+                        meta.duration = float(ms) / 1000.0
                     artwork = item.get('artworkUrl100', '')
                     if artwork:
                         meta.artwork_url = artwork.replace('100x100bb', '3000x3000bb')

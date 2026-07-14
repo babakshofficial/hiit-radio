@@ -6,7 +6,7 @@ import os
 import shutil
 
 from cache_manager import CacheManager, content_key
-from lyrics_service import fetch_lyrics
+from lyrics_service import fetch_lyrics_fast
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ class DownloadOrchestrator:
 
         if progress_reporter:
             await progress_reporter.update(
-                1, f"{metadata.title} — {metadata.artist}\nدر حال جستجو و دانلود...",
+                1, f"{metadata.title} — {metadata.artist}\nدر حال جستجو...",
             )
         file_path = await self.music_downloader.download_song(metadata)
         platform = "youtube" if file_path else source
@@ -81,10 +81,14 @@ class DownloadOrchestrator:
                 )
             return None, None, False
 
-        # Embed lyrics (non-blocking failure)
+        if progress_reporter:
+            await progress_reporter.update(
+                1, f"{metadata.title} — {metadata.artist}\nدر حال آماده‌سازی...",
+            )
+
+        # Hot path: LRCLIB only with 3s timeout (skip Genius/Musixmatch).
         await self._embed_lyrics(file_path, metadata)
 
-        # Store in cache before send
         self.cache.put(metadata.title, metadata.artist, source, file_path)
 
         self.db.log_event("download_success", payload={
@@ -95,12 +99,14 @@ class DownloadOrchestrator:
     async def _embed_lyrics(self, file_path, metadata):
         try:
             from mutagen.mp3 import MP3
-            duration = None
+            duration = getattr(metadata, "duration", None)
             try:
-                duration = MP3(file_path).info.length
+                duration = duration or MP3(file_path).info.length
             except Exception:
                 pass
-            lyrics = await fetch_lyrics(metadata.title, metadata.artist, duration)
+            lyrics = await fetch_lyrics_fast(
+                metadata.title, metadata.artist, duration, timeout=3,
+            )
             self.music_downloader.embed_lyrics(file_path, lyrics)
         except Exception as e:
             logger.debug(f"Lyrics embed skipped: {e}")

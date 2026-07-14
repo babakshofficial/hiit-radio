@@ -38,7 +38,7 @@ async def fetch_lyrics(title, artist, duration_sec=None):
     if not title:
         return None
 
-    result = await _fetch_lrclib(title, artist, duration_sec)
+    result = await _fetch_lrclib(title, artist, duration_sec, timeout=10)
     if result:
         return result
 
@@ -55,14 +55,23 @@ async def fetch_lyrics(title, artist, duration_sec=None):
     return None
 
 
-async def _fetch_lrclib(title, artist, duration_sec=None):
+async def fetch_lyrics_fast(title, artist, duration_sec=None, timeout=3):
+    """Hot-path lyrics: LRCLIB only with a short timeout (no Genius/Musixmatch)."""
+    if not title:
+        return None
+    return await _fetch_lrclib(title, artist, duration_sec, timeout=timeout)
+
+
+async def _fetch_lrclib(title, artist, duration_sec=None, timeout=10):
     params = {"track_name": title, "artist_name": artist or ""}
     if duration_sec:
         params["duration"] = int(duration_sec)
     url = "https://lrclib.net/api/get"
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(
+                url, params=params, timeout=aiohttp.ClientTimeout(total=timeout)
+            ) as resp:
                 if resp.status != 200:
                     return None
                 data = await resp.json()

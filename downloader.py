@@ -51,6 +51,35 @@ def _token_title_similarity(expected, actual):
     return (matched / len(words)) * 100.0
 
 
+_NOISE_PATTERNS = (
+    r'\blive\b', r'\bcover\b', r'\bkaraoke\b', r'\bsped\s*up\b', r'\bslowed\b',
+    r'\bnightcore\b', r'#shorts\b', r'\breaction\b', r'\binstrumental\b',
+    r'\bremake\b', r'\bmashup\b', r'\b8d\s*audio\b',
+)
+
+
+def _has_noise(text, expected_title=""):
+    """True if candidate title looks like junk the user didn't ask for."""
+    hay = (text or "").lower()
+    expected = (expected_title or "").lower()
+    for pat in _NOISE_PATTERNS:
+        if re.search(pat, hay, re.I) and not re.search(pat, expected, re.I):
+            return True
+    return False
+
+
+def _candidate_url(video, source_label="YouTube"):
+    url = video.get("webpage_url") or video.get("url")
+    if url and url.startswith("http"):
+        return url
+    vid = video.get("id")
+    if not vid:
+        return None
+    if source_label == "SoundCloud":
+        return url
+    return f"https://www.youtube.com/watch?v={vid}"
+
+
 class MusicDownloader:
     def __init__(self, download_dir="downloads"):
         self.download_dir = download_dir
@@ -62,42 +91,12 @@ class MusicDownloader:
         )
         self.cookies_from_browser = os.getenv("YTDLP_COOKIES_FROM_BROWSER", "").strip()
 
-    def _build_ydl_opts(self, output_template):
-        """Build yt-dlp options. Authenticated cookies.txt wins on VPS; browser is desktop fallback."""
-        ydl_opts = {
-            'format': 'bestaudio/best',
-            'outtmpl': output_template,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '256',
-            }],
-            'quiet': True,
-            'no_warnings': True,
-            'http_headers': {
-                'User-Agent': (
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                    'AppleWebKit/537.36 (KHTML, like Gecko) '
-                    'Chrome/131.0.0.0 Safari/537.36'
-                ),
-            },
-            'sleep_interval': 2,
-            'max_sleep_interval': 5,
-            'noplaylist': True,
-            'extractor_args': {
-                'youtube': {
-                    # Prefer Android client — less aggressive bot checks than web.
-                    'player_client': ['android', 'web'],
-                }
-            },
-        }
-
+    def _apply_auth(self, ydl_opts):
+        """Attach cookies / proxy to yt-dlp options."""
         if os.path.exists(self.cookies_path) and _cookies_look_authenticated(self.cookies_path):
-            # Prefer exported cookies.txt (works on VPS/headless). Browser import is desktop-only.
             ydl_opts['cookiefile'] = self.cookies_path
             logger.info(f"Using authenticated YouTube cookies from {self.cookies_path}")
         elif self.cookies_from_browser:
-            # e.g. YTDLP_COOKIES_FROM_BROWSER=chrome  or  chrome:Profile\ 1
             parts = self.cookies_from_browser.split(":", 1)
             browser = parts[0].strip()
             profile = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
@@ -120,67 +119,110 @@ class MusicDownloader:
         if proxy:
             ydl_opts['proxy'] = proxy
             logger.info(f"Using proxy for yt-dlp: {proxy}")
-
         return ydl_opts
+
+    def _build_search_opts(self):
+        """Fast flat search — no sleep, list results only."""
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': 'in_playlist',
+            'skip_download': True,
+            'noplaylist': True,
+            'sleep_interval': 0,
+            'max_sleep_interval': 0,
+            'http_headers': {
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/131.0.0.0 Safari/537.36'
+                ),
+            },
+        }
+        return self._apply_auth(ydl_opts)
+
+    def _build_ydl_opts(self, output_template):
+        """Build yt-dlp options for the final audio download."""
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'outtmpl': output_template,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '256',
+            }],
+            'quiet': True,
+            'no_warnings': True,
+            'http_headers': {
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/131.0.0.0 Safari/537.36'
+                ),
+            },
+            'sleep_interval': 1,
+            'max_sleep_interval': 2,
+            'noplaylist': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                }
+            },
+        }
+        return self._apply_auth(ydl_opts)
 
     async def download_song(self, metadata):
         """Download song with multi-candidate search and multi-layer validation.
 
-        Instead of trusting only YouTube's #1 hit per query, we collect several
-        candidates from every search strategy, score each one on title + artist
-        similarity, and download the single best match above a safety threshold.
-        If YouTube yields no valid match, SoundCloud is tried as a fallback
-        before giving up.
+        Flat YouTube searches score candidates on title + artist + duration/topic
+        signals, then a single best URL is downloaded.
         """
 
-        # Minimum combined (title+artist) score required to accept a candidate.
         MATCH_THRESHOLD = 65.0
-        # The title itself must clear this bar independently, so that a wrong
-        # song by the *right* artist (100% artist boost) can't sneak through.
         TITLE_THRESHOLD = 70.0
-        # How many results to inspect per search query.
+        EARLY_ACCEPT = 80.0
         RESULTS_PER_QUERY = 8
 
         def title_similarity(a, b):
-            """Calculate similarity between two strings (0-100%)."""
             return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio() * 100
 
         def clean_title(title, artist=""):
-            """Remove common junk from YouTube titles and intelligently strip artist names."""
-            if not title: return ""
+            if not title:
+                return ""
             title = re.sub(r'\s*\([^)]*official[^)]*\)', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\[[^]]*audio[^]]*\]', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\[[^]]*music video[^]]*\]', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\([^)]*lyrics[^)]*\)', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\([^)]*remaster[^)]*\)', '', title, flags=re.IGNORECASE)
-            # Strip soundtrack/feature markers like (From "Hoppers") / (feat. X)
             title = re.sub(r'\s*\([^)]*(?:from|feat\.?|ft\.?)[^)]*\)', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\[[^]]*(?:from|feat\.?|ft\.?)[^]]*\]', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\|.*$', '', title)
             title = title.replace('"', '').replace("'", '')
-
-            # Smart artist stripping: If title starts with "Artist -", "Artist |", etc., remove it
             if artist:
                 pattern = r'^\s*' + re.escape(artist) + r'\s*[-–|]\s*'
                 title = re.sub(pattern, '', title, flags=re.IGNORECASE)
-
             title = re.sub(r'\s*[-–].*$', '', title)
             return title.strip()
 
         def search_title(title):
-            """Title cleaned for search queries (no nested quotes / soundtrack tags)."""
             return clean_title(title or "", "")
 
         def clean_artist(name):
-            """Normalise a YouTube uploader/channel into an artist name for comparison."""
-            if not name: return ""
+            if not name:
+                return ""
             name = re.sub(r'\s*-\s*Topic\s*$', '', name, flags=re.IGNORECASE)
             name = re.sub(r'VEVO\s*$', '', name, flags=re.IGNORECASE)
             return name.strip()
 
+        expected_duration = getattr(metadata, "duration", None)
+        try:
+            expected_duration = float(expected_duration) if expected_duration else None
+        except (TypeError, ValueError):
+            expected_duration = None
+
         def score(video):
-            """Combined title(70%) + artist(30%) similarity for a candidate video."""
-            yt_title = clean_title(video.get('title', ''), metadata.artist)
+            raw_title = video.get('title', '') or ''
+            yt_title = clean_title(raw_title, metadata.artist)
             yt_artist = clean_artist(video.get('uploader', '') or video.get('channel', ''))
             expected_title = clean_title(metadata.title, metadata.artist)
             seq_title_sim = title_similarity(yt_title, expected_title)
@@ -191,50 +233,72 @@ class MusicDownloader:
             if primary:
                 artist_sim = max(artist_sim, title_similarity(yt_artist, primary))
             combined = (title_sim * 0.7) + (artist_sim * 0.3)
-            return combined, title_sim, artist_sim, token_sim, yt_title, yt_artist, primary
+
+            uploader_raw = (video.get('uploader', '') or video.get('channel', '') or '').lower()
+            is_topic = uploader_raw.endswith('topic') or ' - topic' in uploader_raw
+            is_vevo = 'vevo' in uploader_raw
+            if is_topic or is_vevo:
+                combined = min(100.0, combined + 8.0)
+
+            cand_dur = video.get('duration')
+            try:
+                cand_dur = float(cand_dur) if cand_dur is not None else None
+            except (TypeError, ValueError):
+                cand_dur = None
+            if cand_dur is not None:
+                if cand_dur < 60 or cand_dur > 720:
+                    return None
+                if expected_duration and expected_duration > 0:
+                    ratio = abs(cand_dur - expected_duration) / expected_duration
+                    if ratio <= 0.15:
+                        combined = min(100.0, combined + 6.0)
+                    elif ratio > 0.35:
+                        combined -= 12.0
+
+            if _has_noise(raw_title, metadata.title or ""):
+                combined -= 25.0
+
+            return combined, title_sim, artist_sim, token_sim, yt_title, yt_artist, primary, is_topic
 
         q_title = search_title(metadata.title)
         q_artist = (metadata.artist or "").replace('"', '').strip()
-        q_primary = _primary_artist(q_artist)
+        q_primary = _primary_artist(q_artist) or q_artist
 
-        # YouTube search strategies ordered from most specific to least specific.
+        # Trimmed strategy list — most specific first.
+        yt_search_strategies = []
+        if q_title and q_artist:
+            yt_search_strategies.append(f'"{q_title}" "{q_artist}" audio')
+        if q_title and q_primary:
+            yt_search_strategies.append(f'{q_title} {q_primary} - Topic')
+            yt_search_strategies.append(f'{q_title} {q_primary} official audio')
+            yt_search_strategies.append(f'{q_title} {q_primary}')
+        if q_title and q_artist and q_artist != q_primary:
+            yt_search_strategies.append(f'{q_title} {q_artist}')
+        # Deduplicate while preserving order
+        seen_q = set()
         yt_search_strategies = [
-            f'"{q_title}" "{q_artist}" audio',
-            f'"{q_title}" "{q_artist}"',
-            f'"{q_title}" "{q_primary}" audio' if q_primary and q_primary != q_artist else None,
-            f'{q_title} {q_primary} - Topic',
-            f'{q_title} {q_primary} official audio',
-            f'{q_title} {q_artist}',
-        ]
-        if metadata.url and "spotify.com" in metadata.url:
-            yt_search_strategies[2:2] = [
-                f'"{q_title}" {q_primary} topic',
-                f'{q_title} {q_primary} topic',
-            ]
-        yt_search_strategies = [s for s in yt_search_strategies if s]
+            s for s in yt_search_strategies
+            if s and not (s in seen_q or seen_q.add(s))
+        ][:5]
 
-        # SoundCloud handles plain keyword queries best — no quotes, no
-        # "official audio"/"audio" suffixes, which tend to return zero results.
         sc_search_strategies = [
             f'{q_title} {q_primary}' if q_primary else f'{q_title} {q_artist}',
-            f'{q_title} {q_artist}',
             f'{q_title}',
         ]
+        sc_search_strategies = [s for s in sc_search_strategies if s and s.strip()]
 
         output_template = os.path.join(self.download_dir, f"{metadata.id}.%(ext)s")
+        search_opts = self._build_search_opts()
         ydl_opts = self._build_ydl_opts(output_template)
 
         expected_title_clean = clean_title(metadata.title, metadata.artist)
         loop = asyncio.get_event_loop()
 
         async def gather_best(search_prefix, source_label, strategies):
-            """Search one engine (e.g. 'ytsearch' / 'scsearch') across the given
-            strategies and return the best eligible candidate as
-            (combined_score, video) or None."""
             best_local = None
             seen_ids = set()
             bot_blocked = False
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with yt_dlp.YoutubeDL(search_opts) as ydl:
                 for strategy_idx, search_query in enumerate(strategies):
                     try:
                         logger.info(
@@ -252,23 +316,24 @@ class MusicDownloader:
                             continue
 
                         for video in entries:
-                            if not video or not video.get('webpage_url'):
+                            if not video:
                                 continue
                             vid = video.get('id')
-                            if vid in seen_ids:
+                            if not vid or vid in seen_ids:
+                                continue
+                            if not _candidate_url(video, source_label):
                                 continue
                             seen_ids.add(vid)
 
-                            combined, title_sim, artist_sim, token_sim, c_title, c_artist, primary = score(video)
+                            scored = score(video)
+                            if scored is None:
+                                continue
+                            combined, title_sim, artist_sim, token_sim, c_title, c_artist, primary, is_topic = scored
                             logger.info(
                                 f"[{source_label}] Candidate: Title {title_sim:.1f}%, Artist {artist_sim:.1f}%, "
                                 f"Combined {combined:.1f}% | '{c_title}' by '{c_artist}' | "
                                 f"Expected: '{expected_title_clean}' by '{metadata.artist}'"
                             )
-                            uploader_raw = (video.get('uploader', '') or video.get('channel', '')).lower()
-                            is_topic = uploader_raw.endswith('topic') or ' - topic' in uploader_raw
-                            # A candidate is only eligible if its title matches well enough.
-                            # Topic auto-uploads may use shortened titles — allow high token overlap.
                             if title_sim < TITLE_THRESHOLD:
                                 topic_ok = (
                                     is_topic
@@ -280,8 +345,18 @@ class MusicDownloader:
                             if best_local is None or combined > best_local[0]:
                                 best_local = (combined, video)
 
-                        # Early exit: a strong match this early is very likely correct.
-                        if best_local and best_local[0] >= 85:
+                        if best_local and best_local[0] >= EARLY_ACCEPT:
+                            logger.info(
+                                f"[{source_label}] Early accept at {best_local[0]:.1f}% "
+                                f"(strategy {strategy_idx + 1})"
+                            )
+                            break
+                        # After first two strategies, stop if we already cleared the bar.
+                        if strategy_idx >= 1 and best_local and best_local[0] >= MATCH_THRESHOLD:
+                            logger.info(
+                                f"[{source_label}] Stopping early — best {best_local[0]:.1f}% "
+                                f"after strategy {strategy_idx + 1}"
+                            )
                             break
                     except Exception as e:
                         err = str(e)
@@ -291,7 +366,6 @@ class MusicDownloader:
                                 f"[{source_label}] Strategy {strategy_idx + 1} blocked by YouTube bot check. "
                                 "Refresh logged-in cookies (cookies.txt) or set YTDLP_COOKIES_FROM_BROWSER=chrome"
                             )
-                            # No point retrying more YouTube strategies with the same bad cookies.
                             if source_label == "YouTube":
                                 break
                         else:
@@ -304,7 +378,6 @@ class MusicDownloader:
                 )
             return best_local
 
-        # PHASE 1: search YouTube; fall back to SoundCloud before giving up.
         best = await gather_best("ytsearch", "YouTube", yt_search_strategies)
         if not best or best[0] < MATCH_THRESHOLD:
             yt_txt = f"{best[0]:.1f}%" if best else "n/a"
@@ -320,12 +393,20 @@ class MusicDownloader:
             return None
 
         best_score, best_video = best
+        download_url = _candidate_url(
+            best_video,
+            "SoundCloud" if "soundcloud" in (best_video.get("extractor") or "").lower()
+            or (best_video.get("url") or "").find("soundcloud") >= 0
+            else "YouTube",
+        )
+        if not download_url:
+            logger.error("Best match has no downloadable URL")
+            return None
         logger.info(f"Best match {best_score:.1f}% — '{best_video.get('title', '')}' — downloading")
 
-        # PHASE 2: download the chosen candidate and run post-download validation.
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                await loop.run_in_executor(None, ydl.download, [best_video['webpage_url']])
+                await loop.run_in_executor(None, ydl.download, [download_url])
         except Exception as e:
             logger.error(f"Download of best match failed: {e}", exc_info=True)
             return None
@@ -335,7 +416,6 @@ class MusicDownloader:
             logger.warning("Download completed but output file not found")
             return None
 
-        # VALIDATION: Duration check
         try:
             audio_file = MutagenMP3(file_path)
             duration = audio_file.info.length
@@ -348,7 +428,6 @@ class MusicDownloader:
         except Exception as e:
             logger.warning(f"Duration validation skipped (error: {e})")
 
-        # VALIDATION: File size check
         file_size = os.path.getsize(file_path)
         if file_size < 1_000_000:
             logger.warning(f"File too small ({file_size/1024:.0f}KB) - likely wrong track")
@@ -410,8 +489,7 @@ class MusicDownloader:
                     response = requests.get(metadata.artwork_url, timeout=10)
                     if response.status_code == 200:
                         original_artwork = response.content
-                        
-                        # Route artwork processing by source
+
                         source = "unknown"
                         if hasattr(metadata, 'url') and metadata.url:
                             if "spotify.com" in metadata.url:
@@ -448,7 +526,7 @@ class MusicDownloader:
 
             audio.save(v2_version=3, v1=1)
             logger.info(f"Metadata applied: '{metadata.title}' by '{metadata.artist}'")
-            
+
         except Exception as e:
             logger.error(f"Metadata error: {e}", exc_info=True)
 
