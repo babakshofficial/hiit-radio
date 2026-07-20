@@ -47,6 +47,33 @@ class DownloadOrchestrator:
 
         cached_path = self.cache.get(metadata.title, metadata.artist, source)
         if cached_path:
+            # Fast path: if Telegram already has this audio, skip re-upload entirely.
+            file_id = self.cache.get_telegram_file_id(
+                metadata.title, metadata.artist, source,
+            )
+            if file_id:
+                self.music_downloader.sync_metadata_from_file(cached_path, metadata)
+                if (
+                    progress_reporter
+                    and getattr(progress_reporter, "progress_mode", "tracks")
+                    == "percent"
+                ):
+                    await progress_reporter.update(
+                        98,
+                        f"{metadata.title} — {metadata.artist}\nارسال سریع از کش...",
+                        force=True,
+                    )
+                self.db.log_event("cache_hit", payload={
+                    "title": metadata.title, "artist": metadata.artist,
+                    "telegram_file_id": True,
+                })
+                if bot:
+                    import admin_logger
+                    await admin_logger.log_cache_hit(
+                        bot, user, metadata.title, metadata.artist, source,
+                    )
+                return file_id, f"{source}_cache_id", True
+
             send_copy = os.path.join(self.download_dir, f"{metadata.id}_send.mp3")
             if self.cache.copy_for_send(metadata.title, metadata.artist, source, send_copy):
                 self.music_downloader.sync_metadata_from_file(send_copy, metadata)
@@ -64,6 +91,7 @@ class DownloadOrchestrator:
                     await progress_reporter.update(
                         95,
                         f"{metadata.title} — {metadata.artist}\nآماده ارسال به تلگرام...",
+                        force=True,
                     )
                 self.db.log_event("cache_hit", payload={
                     "title": metadata.title, "artist": metadata.artist,
@@ -80,10 +108,13 @@ class DownloadOrchestrator:
             and getattr(progress_reporter, "progress_mode", "tracks") == "percent"
         ):
             await progress_reporter.update(
-                20,
+                15,
                 f"{metadata.title} — {metadata.artist}\nدر حال جستجو و دانلود...",
+                force=True,
             )
-        file_path = await self.music_downloader.download_song(metadata)
+        file_path = await self.music_downloader.download_song(
+            metadata, progress_reporter=progress_reporter,
+        )
         platform = "youtube" if file_path else source
 
         if not file_path or not os.path.exists(file_path):
@@ -106,8 +137,9 @@ class DownloadOrchestrator:
             and getattr(progress_reporter, "progress_mode", "tracks") == "percent"
         ):
             await progress_reporter.update(
-                55,
+                88,
                 f"{metadata.title} — {metadata.artist}\nدر حال آماده‌سازی...",
+                force=True,
             )
 
         # Hot path: LRCLIB only with 3s timeout (skip Genius/Musixmatch).
@@ -118,8 +150,9 @@ class DownloadOrchestrator:
             and getattr(progress_reporter, "progress_mode", "tracks") == "percent"
         ):
             await progress_reporter.update(
-                85,
+                93,
                 f"{metadata.title} — {metadata.artist}\nآماده ارسال به تلگرام...",
+                force=True,
             )
 
         # Store under enriched tags AND under the original query guess so the
@@ -160,8 +193,12 @@ class DownloadOrchestrator:
     async def cleanup(self, file_path, keep_cache=True):
         """Remove send copy; original may remain in cache."""
         try:
-            if file_path and os.path.exists(file_path):
-                if file_path.endswith("_send.mp3") or "/downloads/" in file_path.replace("\\", "/"):
-                    os.remove(file_path)
+            if not file_path or not isinstance(file_path, str):
+                return
+            # Telegram file_id is not a filesystem path.
+            if not os.path.exists(file_path):
+                return
+            if file_path.endswith("_send.mp3") or "/downloads/" in file_path.replace("\\", "/"):
+                os.remove(file_path)
         except Exception as e:
             logger.error(f"Cleanup error: {e}")

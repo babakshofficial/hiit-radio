@@ -24,13 +24,18 @@ class ProgressReporter:
         self.bot = bot
         self.user = user
         self._last_edit = 0.0
-        self._min_interval = 2.0
+        self._min_interval = 1.5
         self._t0 = None
         self.progress_mode = progress_mode
         self._update_count = 0
+        self._last_current = -1
+        self._last_detail = None
 
     async def _vip_status(self, status_text):
         if not self.bot:
+            return
+        # Avoid spamming VIP channel on every percent tick (extra Telegram RTT).
+        if self.progress_mode == "percent" and self._update_count > 1:
             return
         import admin_logger
         await admin_logger.log_system(
@@ -40,31 +45,37 @@ class ProgressReporter:
             **{"پیشرفت": status_text},
         )
 
-    async def update(self, current, detail=""):
+    async def update(self, current, detail="", force=False):
         now = time.time()
         if self._t0 is None:
             self._t0 = now
 
-        # ETA only makes sense when we represent real "percent" progress.
+        current = max(0, min(int(current or 0), self.total))
+        advanced = current > self._last_current
+        detail_changed = detail != self._last_detail
+
+        # Always allow progress to move forward. Only throttle repeats.
+        if (
+            not force
+            and not advanced
+            and now - self._last_edit < self._min_interval
+            and current < self.total
+        ):
+            return
+
+        # ETA only when we have meaningful elapsed progress.
         eta_sec = None
         self._update_count += 1
         if self.progress_mode == "percent":
             elapsed = now - self._t0
-            frac = 0.0
-            if self.total > 0:
-                frac = min(max(float(current) / float(self.total), 0.0), 1.0)
-            # Avoid absurd ETA when we only updated once or before meaningful progress.
-            if (
-                frac >= 0.40
-                and elapsed >= 10
-                and self._update_count >= 2
-            ):
-                eta_sec = max(((elapsed / max(frac, 0.01)) - elapsed), 0.0)
-                eta_sec = min(eta_sec, 6 * 3600)  # cap at 6h
+            frac = float(current) / float(self.total) if self.total else 0.0
+            if frac >= 0.35 and elapsed >= 8 and self._update_count >= 2:
+                eta_sec = max((elapsed / max(frac, 0.01)) - elapsed, 0.0)
+                eta_sec = min(eta_sec, 20 * 60)  # cap at 20 minutes
 
-        if now - self._last_edit < self._min_interval and current < self.total:
-            return
         self._last_edit = now
+        self._last_current = current
+        self._last_detail = detail
         show_counter = self.progress_mode == "tracks"
         text = progress_update(
             self.label,

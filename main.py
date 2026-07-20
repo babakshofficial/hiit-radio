@@ -464,9 +464,28 @@ def _store_audio_file_id(metadata, platform, msg):
     source = _source_label(metadata)
     if platform and platform.endswith("_cache"):
         source = platform.replace("_cache", "")
+    if platform and platform.endswith("_cache_id"):
+        source = platform.replace("_cache_id", "")
     orchestrator.cache.save_telegram_file_id(
         metadata.title, metadata.artist, source, msg.audio.file_id,
     )
+
+
+async def _send_track_audio(message, metadata, file_path, platform, reply_markup=None):
+    """Send by Telegram file_id when possible; otherwise upload the local MP3."""
+    kwargs = {
+        "title": metadata.title,
+        "performer": metadata.artist,
+        "reply_markup": reply_markup,
+        "connect_timeout": TG_CONNECT_TIMEOUT,
+        "read_timeout": TG_READ_TIMEOUT,
+        "write_timeout": TG_WRITE_TIMEOUT,
+        "pool_timeout": TG_POOL_TIMEOUT,
+    }
+    if platform and str(platform).endswith("_cache_id"):
+        return await message.reply_audio(audio=file_path, **kwargs)
+    with open(file_path, "rb") as audio:
+        return await message.reply_audio(audio=audio, **kwargs)
 
 
 async def inline_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -610,7 +629,14 @@ async def _download_and_send(message, user, metadata, context):
     file_path, platform, cached = await orchestrator.get_or_download(
         metadata, reporter, bot=context.bot, user=user,
     )
-    if not file_path or not os.path.exists(file_path):
+    if not file_path:
+        await reporter.fail(msg.download_not_found())
+        await log_error(
+            context.bot, user, "Download failed",
+            _vip_failure_detail(metadata.title),
+        )
+        return
+    if not (platform and str(platform).endswith("_cache_id")) and not os.path.exists(file_path):
         await reporter.fail(msg.download_not_found())
         await log_error(
             context.bot, user, "Download failed",
@@ -620,18 +646,10 @@ async def _download_and_send(message, user, metadata, context):
 
     try:
         kb = recommendation_keyboard(metadata.artist, metadata.title)
-        with open(file_path, "rb") as audio:
-            await reporter.update(95, "در حال ارسال به تلگرام...")
-            sent = await message.reply_audio(
-                audio=audio,
-                title=metadata.title,
-                performer=metadata.artist,
-                reply_markup=kb,
-                connect_timeout=TG_CONNECT_TIMEOUT,
-                read_timeout=TG_READ_TIMEOUT,
-                write_timeout=TG_WRITE_TIMEOUT,
-                pool_timeout=TG_POOL_TIMEOUT,
-            )
+        await reporter.update(95, "در حال ارسال به تلگرام...", force=True)
+        sent = await _send_track_audio(
+            message, metadata, file_path, platform, reply_markup=kb,
+        )
         _store_audio_file_id(metadata, platform, sent)
         user_manager.record_download(
             user_id, metadata.title, metadata.artist, platform,
@@ -695,21 +713,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         metadata, reporter, bot=context.bot, user=user,
     )
 
-    if file_path and os.path.exists(file_path):
+    is_file_id = bool(platform and str(platform).endswith("_cache_id"))
+    if file_path and (is_file_id or os.path.exists(file_path)):
         try:
             kb = recommendation_keyboard(metadata.artist, metadata.title)
-            with open(file_path, "rb") as audio:
-                await reporter.update(95, "در حال ارسال به تلگرام...")
-                sent = await update.message.reply_audio(
-                    audio=audio,
-                    title=metadata.title,
-                    performer=metadata.artist,
-                    reply_markup=kb,
-                    connect_timeout=TG_CONNECT_TIMEOUT,
-                    read_timeout=TG_READ_TIMEOUT,
-                    write_timeout=TG_WRITE_TIMEOUT,
-                    pool_timeout=TG_POOL_TIMEOUT,
-                )
+            await reporter.update(95, "در حال ارسال به تلگرام...", force=True)
+            sent = await _send_track_audio(
+                update.message, metadata, file_path, platform, reply_markup=kb,
+            )
             _store_audio_file_id(metadata, platform, sent)
             user_manager.record_download(
                 user_id, metadata.title, metadata.artist, platform,

@@ -70,7 +70,8 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
         file_path, platform, cached = await orchestrator.get_or_download(
             track, reporter, bot=bot, user=user,
         )
-        if not file_path or not os.path.exists(file_path):
+        is_file_id = bool(platform and str(platform).endswith("_cache_id"))
+        if not file_path or (not is_file_id and not os.path.exists(file_path)):
             failed += 1
             await admin_logger.log_playlist_track(
                 bot, user, i, total, track.title, track.artist, "ناموفق",
@@ -79,23 +80,32 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
 
         try:
             kb = recommendation_keyboard(track.artist, track.title)
-            with open(file_path, 'rb') as audio:
+            send_kwargs = dict(
+                title=track.title,
+                performer=track.artist,
+                reply_markup=kb,
+                connect_timeout=TG_CONNECT_TIMEOUT,
+                read_timeout=TG_READ_TIMEOUT,
+                write_timeout=TG_WRITE_TIMEOUT,
+                pool_timeout=TG_POOL_TIMEOUT,
+            )
+            if is_file_id:
                 sent_msg = await update.message.reply_audio(
-                    audio=audio,
-                    title=track.title,
-                    performer=track.artist,
-                    reply_markup=kb,
-                    connect_timeout=TG_CONNECT_TIMEOUT,
-                    read_timeout=TG_READ_TIMEOUT,
-                    write_timeout=TG_WRITE_TIMEOUT,
-                    pool_timeout=TG_POOL_TIMEOUT,
+                    audio=file_path, **send_kwargs,
                 )
+            else:
+                with open(file_path, 'rb') as audio:
+                    sent_msg = await update.message.reply_audio(
+                        audio=audio, **send_kwargs,
+                    )
             if sent_msg and sent_msg.audio:
                 source = "spotify" if track.url and "spotify.com" in track.url else (
                     "apple" if track.url and "music.apple.com" in track.url else "youtube"
                 )
                 if platform and platform.endswith("_cache"):
                     source = platform.replace("_cache", "")
+                if platform and platform.endswith("_cache_id"):
+                    source = platform.replace("_cache_id", "")
                 orchestrator.cache.save_telegram_file_id(
                     track.title, track.artist, source, sent_msg.audio.file_id,
                 )

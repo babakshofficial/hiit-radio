@@ -269,6 +269,8 @@ class MusicDownloader:
             'noplaylist': True,
             'sleep_interval': 0,
             'max_sleep_interval': 0,
+            'socket_timeout': 20,
+            'retries': 2,
             'http_headers': {
                 'User-Agent': (
                     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -279,7 +281,7 @@ class MusicDownloader:
         }
         return self._apply_auth(ydl_opts)
 
-    def _build_ydl_opts(self, output_template):
+    def _build_ydl_opts(self, output_template, progress_hooks=None):
         """Build yt-dlp options for the final audio download."""
         ydl_opts = {
             'format': 'bestaudio/best',
@@ -291,6 +293,9 @@ class MusicDownloader:
             }],
             'quiet': True,
             'no_warnings': True,
+            'socket_timeout': 30,
+            'retries': 3,
+            'fragment_retries': 3,
             'http_headers': {
                 'User-Agent': (
                     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
@@ -298,8 +303,8 @@ class MusicDownloader:
                     'Chrome/131.0.0.0 Safari/537.36'
                 ),
             },
-            'sleep_interval': 1,
-            'max_sleep_interval': 2,
+            'sleep_interval': 0,
+            'max_sleep_interval': 0,
             'noplaylist': True,
             'extractor_args': {
                 'youtube': {
@@ -307,9 +312,11 @@ class MusicDownloader:
                 }
             },
         }
+        if progress_hooks:
+            ydl_opts['progress_hooks'] = list(progress_hooks)
         return self._apply_auth(ydl_opts)
 
-    async def download_song(self, metadata):
+    async def download_song(self, metadata, progress_reporter=None):
         """Download song with multi-candidate search and multi-layer validation.
 
         Flat YouTube searches score candidates on title + artist + duration/topic
@@ -476,17 +483,34 @@ class MusicDownloader:
 
         output_template = os.path.join(self.download_dir, f"{metadata.id}.%(ext)s")
         search_opts = self._build_search_opts()
-        ydl_opts = self._build_ydl_opts(output_template)
 
         expected_title_clean = clean_title(metadata.title, metadata.artist)
         loop = asyncio.get_event_loop()
+        download_pct = {"value": 0.0}
 
-        async def gather_best(search_prefix, source_label, strategies):
+        async def _report(pct, detail):
+            if not progress_reporter:
+                return
+            if getattr(progress_reporter, "progress_mode", "tracks") != "percent":
+                return
+            try:
+                await progress_reporter.update(pct, detail)
+            except Exception:
+                pass
+
+        async def gather_best(search_prefix, source_label, strategies, pct_start=20, pct_end=40):
             best_local = None
             seen_ids = set()
             bot_blocked = False
+            n = max(len(strategies), 1)
             with yt_dlp.YoutubeDL(search_opts) as ydl:
                 for strategy_idx, search_query in enumerate(strategies):
+                    pct = pct_start + int((pct_end - pct_start) * (strategy_idx / n))
+                    await _report(
+                        pct,
+                        f"{metadata.title} — {metadata.artist}\n"
+                        f"جستجو ({source_label}) {strategy_idx + 1}/{n}...",
+                    )
                     try:
                         logger.info(
                             f"[{source_label}] Search attempt {strategy_idx + 1}/{len(strategies)}: {search_query}"
@@ -569,11 +593,13 @@ class MusicDownloader:
                 )
             return best_local
 
-        best = await gather_best("ytsearch", "YouTube", yt_search_strategies)
+        await _report(18, f"{metadata.title} — {metadata.artist}\nدر حال جستجو در یوتیوب...")
+        best = await gather_best("ytsearch", "YouTube", yt_search_strategies, 20, 38)
         if not best or best[0] < MATCH_THRESHOLD:
             yt_txt = f"{best[0]:.1f}%" if best else "n/a"
             logger.warning(f"No valid YouTube match (best eligible: {yt_txt}) — trying SoundCloud fallback")
-            best = await gather_best("scsearch", "SoundCloud", sc_search_strategies)
+            await _report(40, f"{metadata.title} — {metadata.artist}\nجستجو در ساندکلاود...")
+            best = await gather_best("scsearch", "SoundCloud", sc_search_strategies, 40, 48)
 
         if not best or best[0] < MATCH_THRESHOLD:
             score_txt = f"{best[0]:.1f}%" if best else "n/a"
@@ -595,15 +621,61 @@ class MusicDownloader:
             return None
         logger.info(f"Best match {best_score:.1f}% — '{best_video.get('title', '')}' — downloading")
 
-        # Flat search may lack full title/thumbnail — refresh from the watch URL.
-        best_video = await self._hydrate_video_info(download_url, best_video, loop)
+        # Skip hydrate when flat result already has title + thumbnail (saves a round-trip).
+        need_hydrate = not (
+            (best_video.get("title") or "").strip()
+            and _video_thumbnail_url(best_video)
+        )
+        if need_hydrate:
+            await _report(50, f"{metadata.title} — {metadata.artist}\nآماده‌سازی لینک دانلود...")
+            best_video = await self._hydrate_video_info(download_url, best_video, loop)
+        else:
+            await _report(50, f"{metadata.title} — {metadata.artist}\nشروع دانلود...")
 
+        def _yt_hook(d):
+            try:
+                if d.get("status") == "downloading":
+                    total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                    done = d.get("downloaded_bytes") or 0
+                    if total:
+                        download_pct["value"] = max(
+                            download_pct["value"],
+                            min(done / float(total), 0.99),
+                        )
+                    else:
+                        download_pct["value"] = min(download_pct["value"] + 0.02, 0.85)
+                elif d.get("status") == "finished":
+                    download_pct["value"] = 1.0
+            except Exception:
+                pass
+
+        ydl_opts = self._build_ydl_opts(output_template, progress_hooks=[_yt_hook])
+
+        async def _heartbeat():
+            # Keep the bar moving while yt-dlp runs (search/download can take minutes).
+            base = 52
+            while True:
+                frac = download_pct["value"]
+                pct = base + int(frac * 28)  # 52 → 80
+                await _report(
+                    pct,
+                    f"{metadata.title} — {metadata.artist}\nدر حال دانلود فایل صوتی...",
+                )
+                await asyncio.sleep(3)
+
+        heartbeat = asyncio.create_task(_heartbeat())
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 await loop.run_in_executor(None, ydl.download, [download_url])
         except Exception as e:
             logger.error(f"Download of best match failed: {e}", exc_info=True)
             return None
+        finally:
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
 
         file_path = os.path.join(self.download_dir, f"{metadata.id}.mp3")
         if not os.path.exists(file_path):
@@ -629,6 +701,7 @@ class MusicDownloader:
             return None
 
         logger.info(f"Download successful (match {best_score:.1f}%)")
+        await _report(82, f"{metadata.title} — {metadata.artist}\nبرچسب‌گذاری و کاور...")
         self._enrich_metadata_from_source(metadata, best_video)
         self._apply_metadata(file_path, metadata)
         return file_path
@@ -640,6 +713,8 @@ class MusicDownloader:
             "no_warnings": True,
             "skip_download": True,
             "noplaylist": True,
+            "socket_timeout": 20,
+            "retries": 2,
         }
         self._apply_auth(opts)
         try:
