@@ -15,6 +15,10 @@ from progress import ProgressReporter
 from recommendations import recommendation_keyboard
 
 logger = logging.getLogger(__name__)
+TG_CONNECT_TIMEOUT = float(os.getenv("TG_CONNECT_TIMEOUT", "30"))
+TG_READ_TIMEOUT = float(os.getenv("TG_READ_TIMEOUT", "300"))
+TG_WRITE_TIMEOUT = float(os.getenv("TG_WRITE_TIMEOUT", "300"))
+TG_POOL_TIMEOUT = float(os.getenv("TG_POOL_TIMEOUT", "30"))
 
 
 async def process_playlist(update, context, tracks, collection_name, orchestrator,
@@ -81,8 +85,10 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
                     title=track.title,
                     performer=track.artist,
                     reply_markup=kb,
-                    read_timeout=120,
-                    write_timeout=120,
+                    connect_timeout=TG_CONNECT_TIMEOUT,
+                    read_timeout=TG_READ_TIMEOUT,
+                    write_timeout=TG_WRITE_TIMEOUT,
+                    pool_timeout=TG_POOL_TIMEOUT,
                 )
             if sent_msg and sent_msg.audio:
                 source = "spotify" if track.url and "spotify.com" in track.url else (

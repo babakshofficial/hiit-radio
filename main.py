@@ -69,6 +69,11 @@ import reporting as rpt
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
+TG_CONNECT_TIMEOUT = float(os.getenv("TG_CONNECT_TIMEOUT", "30"))
+TG_READ_TIMEOUT = float(os.getenv("TG_READ_TIMEOUT", "300"))
+TG_WRITE_TIMEOUT = float(os.getenv("TG_WRITE_TIMEOUT", "300"))
+TG_MEDIA_WRITE_TIMEOUT = float(os.getenv("TG_MEDIA_WRITE_TIMEOUT", "600"))
+TG_POOL_TIMEOUT = float(os.getenv("TG_POOL_TIMEOUT", "30"))
 
 _ADMIN_COMMANDS = {
     "/stats", "/analytics", "/creds", "/channelid", "/viplogtest",
@@ -614,8 +619,10 @@ async def _download_and_send(message, user, metadata, context):
                 title=metadata.title,
                 performer=metadata.artist,
                 reply_markup=kb,
-                read_timeout=120,
-                write_timeout=120,
+                connect_timeout=TG_CONNECT_TIMEOUT,
+                read_timeout=TG_READ_TIMEOUT,
+                write_timeout=TG_WRITE_TIMEOUT,
+                pool_timeout=TG_POOL_TIMEOUT,
             )
         _store_audio_file_id(metadata, platform, sent)
         user_manager.record_download(
@@ -682,8 +689,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     title=metadata.title,
                     performer=metadata.artist,
                     reply_markup=kb,
-                    read_timeout=120,
-                    write_timeout=120,
+                    connect_timeout=TG_CONNECT_TIMEOUT,
+                    read_timeout=TG_READ_TIMEOUT,
+                    write_timeout=TG_WRITE_TIMEOUT,
+                    pool_timeout=TG_POOL_TIMEOUT,
                 )
             _store_audio_file_id(metadata, platform, sent)
             user_manager.record_download(
@@ -988,6 +997,11 @@ def main():
     application = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
+        .connect_timeout(TG_CONNECT_TIMEOUT)
+        .read_timeout(TG_READ_TIMEOUT)
+        .write_timeout(TG_WRITE_TIMEOUT)
+        .media_write_timeout(TG_MEDIA_WRITE_TIMEOUT)
+        .pool_timeout(TG_POOL_TIMEOUT)
         .post_init(_on_startup)
         .post_shutdown(_on_shutdown)
         .build()
