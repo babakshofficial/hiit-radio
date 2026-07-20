@@ -9,7 +9,7 @@ import random
 from mutagen.mp3 import MP3 as MutagenMP3
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC, USLT, SYLT, TXXX
 import requests
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageFilter, ImageChops
 import io
 
 from metadata import score_query_coverage
@@ -176,58 +176,55 @@ class MusicDownloader:
             self._logo_base = None
 
     def _make_dynamic_logo(self):
-        """Return a RGBA logo with a subtle google-logo-like stroke."""
+        """Return logo with a light Google-colored outline around letter edges.
+
+        Thin outer rim following the glyph silhouette, colored with discrete
+        Google brand colors (blue/red/yellow/green). Palette rotation is random
+        per download so each watermark looks slightly different.
+        """
         if self._logo_base is None:
             return None
-        logo = self._logo_base.copy()
+        logo = self._logo_base.copy().convert("RGBA")
         w, h = logo.size
         if w <= 0 or h <= 0:
             return None
 
-        rng = random.Random(
-            int.from_bytes(os.urandom(4), "little", signed=False)
-        )
-
-        # Google-ish primary colors; keep alpha low + blur for "light" stroke.
+        rng = random.Random(int.from_bytes(os.urandom(4), "little", signed=False))
+        # Order chosen so neighbors blend without muddy purple.
         google_colors = [
-            (66, 133, 244),  # blue
-            (234, 67, 53),   # red
-            (52, 168, 83),   # green
-            (251, 188, 5),   # yellow
+            (66, 133, 244),   # blue
+            (52, 168, 83),    # green
+            (251, 188, 5),    # yellow
+            (234, 67, 53),    # red
         ]
-        c1, c2 = rng.sample(google_colors, 2)
-        alpha = rng.randint(40, 85)
+        shift = rng.randint(0, len(google_colors) - 1)
+        stops = google_colors[shift:] + google_colors[:shift]
 
-        overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(overlay)
+        alpha = logo.getchannel("A")
+        # Thin outer rim only.
+        expanded = alpha.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.MaxFilter(3))
+        ring = ImageChops.subtract(expanded, alpha)
+        ring = ring.point(lambda v: 255 if v >= 40 else 0)
 
-        # Deterministic curve shape with tiny random offsets.
-        min_dim = min(w, h)
-        width = max(2, int(min_dim * rng.uniform(0.018, 0.03)))
+        phase = rng.random()
+        axis = rng.choice(("x", "y"))
+        opacity = rng.randint(180, 230)
+        n = len(stops)
 
-        def jx(frac):  # jitter in pixels
-            return int(frac * rng.uniform(-0.08, 0.08))
+        color_img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        ring_px = ring.load()
+        out_px = color_img.load()
+        for y in range(h):
+            for x in range(w):
+                if ring_px[x, y] < 40:
+                    continue
+                t = ((y if axis == "y" else x) / max((h if axis == "y" else w) - 1, 1)) + phase
+                idx = int((t % 1.0) * n) % n
+                r, g, b = stops[idx]
+                out_px[x, y] = (r, g, b, opacity)
 
-        p0 = (int(w * 0.10) + jx(w * 0.02), int(h * 0.70) + jx(h * 0.02))
-        p1 = (int(w * 0.40) + jx(w * 0.03), int(h * 0.45) + jx(h * 0.03))
-        p2 = (int(w * 0.90) + jx(w * 0.02), int(h * 0.60) + jx(h * 0.02))
-
-        draw.line(
-            [p0, p1],
-            fill=(c1[0], c1[1], c1[2], alpha),
-            width=width,
-        )
-        draw.line(
-            [p1, p2],
-            fill=(c2[0], c2[1], c2[2], alpha),
-            width=width,
-        )
-
-        # So the stroke looks "painted" and stays subtle.
-        blur_r = max(1.0, width * 0.35)
-        overlay = overlay.filter(ImageFilter.GaussianBlur(radius=blur_r))
-        logo = Image.alpha_composite(logo, overlay)
-        return logo
+        color_img = color_img.filter(ImageFilter.GaussianBlur(radius=0.45))
+        return Image.alpha_composite(color_img, logo)
 
     def _apply_auth(self, ydl_opts):
         """Attach cookies / proxy to yt-dlp options."""
