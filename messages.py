@@ -253,9 +253,22 @@ def playlist_summary(sent, total, failed=0):
     return summary
 
 
-def progress_update(label, current, total, detail=""):
+def progress_update(label, current, total, detail="", eta_sec=None):
+    total = max(int(total or 1), 1)
+    current = max(int(current or 0), 0)
+    current = min(current, total)
+    pct = int((current / total) * 100)
+    bar_len = 20
+    filled = int((bar_len * current) / total)
+    bar = "[" + ("#" * filled) + ("-" * (bar_len - filled)) + "]"
     detail_line = f"\n{detail}" if detail else ""
-    return f"📥 {label} — آهنگ {current} از {total}{detail_line}"
+    eta_line = ""
+    if eta_sec is not None:
+        eta_sec = max(int(round(eta_sec)), 0)
+        m = eta_sec // 60
+        s = eta_sec % 60
+        eta_line = f"\n⏳ حدودا {m}:{s:02d}"
+    return f"📥 {label} {bar} {pct}% — آهنگ {current} از {total}{detail_line}{eta_line}"
 
 
 def progress_done(label, summary=""):

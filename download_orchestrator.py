@@ -50,6 +50,20 @@ class DownloadOrchestrator:
             send_copy = os.path.join(self.download_dir, f"{metadata.id}_send.mp3")
             if self.cache.copy_for_send(metadata.title, metadata.artist, source, send_copy):
                 self.music_downloader.sync_metadata_from_file(send_copy, metadata)
+                # Randomize the colorful stroke watermark for every usage,
+                # even when the underlying MP3 is served from cache.
+                try:
+                    self.music_downloader.rewatermark_from_file(send_copy)
+                except Exception:
+                    pass
+                if (
+                    progress_reporter
+                    and getattr(progress_reporter, "total", 1) <= 4
+                ):
+                    await progress_reporter.update(
+                        3,
+                        f"{metadata.title} — {metadata.artist}\nآماده ارسال به تلگرام...",
+                    )
                 self.db.log_event("cache_hit", payload={
                     "title": metadata.title, "artist": metadata.artist,
                 })
@@ -60,9 +74,9 @@ class DownloadOrchestrator:
                     )
                 return send_copy, f"{source}_cache", True
 
-        if progress_reporter:
+        if progress_reporter and getattr(progress_reporter, "total", 1) <= 4:
             await progress_reporter.update(
-                1, f"{metadata.title} — {metadata.artist}\nدر حال جستجو...",
+                1, f"{metadata.title} — {metadata.artist}\nدر حال جستجو و دانلود...",
             )
         file_path = await self.music_downloader.download_song(metadata)
         platform = "youtube" if file_path else source
@@ -82,13 +96,18 @@ class DownloadOrchestrator:
                 )
             return None, None, False
 
-        if progress_reporter:
+        if progress_reporter and getattr(progress_reporter, "total", 1) <= 4:
             await progress_reporter.update(
-                1, f"{metadata.title} — {metadata.artist}\nدر حال آماده‌سازی...",
+                2, f"{metadata.title} — {metadata.artist}\nدر حال آماده‌سازی...",
             )
 
         # Hot path: LRCLIB only with 3s timeout (skip Genius/Musixmatch).
         await self._embed_lyrics(file_path, metadata)
+
+        if progress_reporter and getattr(progress_reporter, "total", 1) <= 4:
+            await progress_reporter.update(
+                3, f"{metadata.title} — {metadata.artist}\nآماده ارسال به تلگرام...",
+            )
 
         # Store under enriched tags AND under the original query guess so the
         # next identical search hits this watermarked file.

@@ -17,6 +17,7 @@ class ProgressReporter:
         self.user = user
         self._last_edit = 0.0
         self._min_interval = 2.0
+        self._t0 = None
 
     async def _vip_status(self, status_text):
         if not self.bot:
@@ -31,10 +32,20 @@ class ProgressReporter:
 
     async def update(self, current, detail=""):
         now = time.time()
+        if self._t0 is None:
+            self._t0 = now
+
+        eta_sec = None
+        if self.total > 0 and current > 0:
+            elapsed = now - self._t0
+            frac = min(max(float(current) / float(self.total), 0.0), 1.0)
+            if frac > 0:
+                # Simple linear ETA based on achieved fraction.
+                eta_sec = max((elapsed / frac) - elapsed, 0.0)
         if now - self._last_edit < self._min_interval and current < self.total:
             return
         self._last_edit = now
-        text = progress_update(self.label, current, self.total, detail)
+        text = progress_update(self.label, current, self.total, detail, eta_sec=eta_sec)
         status_text = f"{current}/{self.total}"
         if detail:
             status_text += f" — {detail}"
