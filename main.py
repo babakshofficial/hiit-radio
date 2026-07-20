@@ -597,8 +597,15 @@ async def _download_and_send(message, user, metadata, context):
         return
 
     status = await message.reply_text(msg.downloading())
-    reporter = ProgressReporter(status, 4, "آهنگ", bot=context.bot, user=user)
-    await reporter.update(1, f"{metadata.title} — {_unknown_artist(metadata.artist)}")
+    reporter = ProgressReporter(
+        status,
+        100,
+        "آهنگ",
+        bot=context.bot,
+        user=user,
+        progress_mode="percent",
+    )
+    await reporter.update(10, f"{metadata.title} — {_unknown_artist(metadata.artist)}")
 
     file_path, platform, cached = await orchestrator.get_or_download(
         metadata, reporter, bot=context.bot, user=user,
@@ -614,7 +621,7 @@ async def _download_and_send(message, user, metadata, context):
     try:
         kb = recommendation_keyboard(metadata.artist, metadata.title)
         with open(file_path, "rb") as audio:
-            await reporter.update(4, "در حال ارسال به تلگرام...")
+            await reporter.update(95, "در حال ارسال به تلگرام...")
             sent = await message.reply_audio(
                 audio=audio,
                 title=metadata.title,
@@ -674,8 +681,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_error(context.bot, user, "Metadata not found", text)
         return
 
-    reporter = ProgressReporter(status_message, 4, "آهنگ", bot=context.bot, user=user)
-    await reporter.update(1, f"{metadata.title} — {_unknown_artist(metadata.artist)}")
+    reporter = ProgressReporter(
+        status_message,
+        100,
+        "آهنگ",
+        bot=context.bot,
+        user=user,
+        progress_mode="percent",
+    )
+    await reporter.update(10, f"{metadata.title} — {_unknown_artist(metadata.artist)}")
 
     file_path, platform, cached = await orchestrator.get_or_download(
         metadata, reporter, bot=context.bot, user=user,
@@ -685,7 +699,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             kb = recommendation_keyboard(metadata.artist, metadata.title)
             with open(file_path, "rb") as audio:
-                await reporter.update(4, "در حال ارسال به تلگرام...")
+                await reporter.update(95, "در حال ارسال به تلگرام...")
                 sent = await update.message.reply_audio(
                     audio=audio,
                     title=metadata.title,

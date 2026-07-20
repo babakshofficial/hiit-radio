@@ -9,7 +9,7 @@ import random
 from mutagen.mp3 import MP3 as MutagenMP3
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC, USLT, SYLT, TXXX
 import requests
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 import io
 
 from metadata import score_query_coverage
@@ -176,43 +176,57 @@ class MusicDownloader:
             self._logo_base = None
 
     def _make_dynamic_logo(self):
-        """Return a RGBA logo with a random colorful stroke drawn on it."""
+        """Return a RGBA logo with a subtle google-logo-like stroke."""
         if self._logo_base is None:
             return None
         logo = self._logo_base.copy()
         w, h = logo.size
         if w <= 0 or h <= 0:
-            return logo
+            return None
 
-        rng = random.Random(int.from_bytes(os.urandom(4), "little", signed=False))
-        draw = ImageDraw.Draw(logo)
+        rng = random.Random(
+            int.from_bytes(os.urandom(4), "little", signed=False)
+        )
 
-        # Bright palette for visible strokes.
-        palette = [
-            (255, 64, 64),    # red
-            (64, 255, 64),    # green
-            (64, 128, 255),   # blue
-            (255, 200, 64),   # yellow
-            (255, 64, 200),   # magenta
-            (64, 255, 240),   # cyan
+        # Google-ish primary colors; keep alpha low + blur for "light" stroke.
+        google_colors = [
+            (66, 133, 244),  # blue
+            (234, 67, 53),   # red
+            (52, 168, 83),   # green
+            (251, 188, 5),   # yellow
         ]
+        c1, c2 = rng.sample(google_colors, 2)
+        alpha = rng.randint(40, 85)
 
-        strokes = rng.randint(1, 3)
-        for _ in range(strokes):
-            color = rng.choice(palette)
-            alpha = rng.randint(110, 220)
-            width = max(2, int(min(w, h) * rng.uniform(0.02, 0.06)))
+        overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
 
-            # Draw a slightly "brushy" polyline across the logo.
-            x1, y1 = rng.randint(0, w), rng.randint(0, h)
-            x2, y2 = rng.randint(0, w), rng.randint(0, h)
-            x3, y3 = rng.randint(0, w), rng.randint(0, h)
-            draw.line(
-                [(x1, y1), (x2, y2), (x3, y3)],
-                fill=(color[0], color[1], color[2], alpha),
-                width=width,
-            )
+        # Deterministic curve shape with tiny random offsets.
+        min_dim = min(w, h)
+        width = max(2, int(min_dim * rng.uniform(0.018, 0.03)))
 
+        def jx(frac):  # jitter in pixels
+            return int(frac * rng.uniform(-0.08, 0.08))
+
+        p0 = (int(w * 0.10) + jx(w * 0.02), int(h * 0.70) + jx(h * 0.02))
+        p1 = (int(w * 0.40) + jx(w * 0.03), int(h * 0.45) + jx(h * 0.03))
+        p2 = (int(w * 0.90) + jx(w * 0.02), int(h * 0.60) + jx(h * 0.02))
+
+        draw.line(
+            [p0, p1],
+            fill=(c1[0], c1[1], c1[2], alpha),
+            width=width,
+        )
+        draw.line(
+            [p1, p2],
+            fill=(c2[0], c2[1], c2[2], alpha),
+            width=width,
+        )
+
+        # So the stroke looks "painted" and stays subtle.
+        blur_r = max(1.0, width * 0.35)
+        overlay = overlay.filter(ImageFilter.GaussianBlur(radius=blur_r))
+        logo = Image.alpha_composite(logo, overlay)
         return logo
 
     def _apply_auth(self, ydl_opts):
@@ -690,7 +704,12 @@ class MusicDownloader:
             logger.debug(f"sync_metadata_from_file skipped: {e}")
 
     def rewatermark_from_file(self, file_path, default_style="youtube"):
-        """Re-embed APIC with a freshly-drawn random logo stroke."""
+        """Re-embed APIC with a freshly-drawn logo stroke.
+
+        IMPORTANT: we only repaint the logo region on the already-processed
+        artwork. This avoids re-cropping/re-pasting which would duplicate the
+        logo and make strokes look ridiculous.
+        """
         if not file_path or not os.path.exists(file_path):
             return False
         try:
@@ -715,12 +734,36 @@ class MusicDownloader:
                         pass
                     break
 
-            # Re-apply the same artwork layout style, but with a new random stroke.
-            if style in {"spotify", "apple"}:
-                processed_artwork = self._process_apple_music_artwork(original_artwork)
-            else:
-                processed_artwork = self._process_itunes_query_artwork(original_artwork)
+            if self._logo_base is None:
+                return False
+            logo = self._make_dynamic_logo()
+            if not logo or logo.width <= 0 or logo.height <= 0:
+                return False
 
+            img = Image.open(io.BytesIO(original_artwork))
+            if img.mode != "RGBA":
+                img = img.convert("RGBA")
+
+            w, h = img.size
+            # Match the exact logo sizing used in the artwork processors.
+            if style in {"spotify", "apple"}:
+                logo_w = int(w * 0.25)
+            else:
+                logo_w = int(w * 0.30)
+
+            base_w, base_h = self._logo_base.size
+            logo_h = int(logo_w * base_h / max(base_w, 1))
+            logo_w = max(1, logo_w)
+            logo_h = max(1, logo_h)
+
+            logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
+            x = max(0, w - logo_w - 20)
+            y = max(0, h - logo_h - 20)
+            img.paste(logo, (x, y), logo)
+
+            out = io.BytesIO()
+            img.convert("RGB").save(out, format="JPEG", quality=95)
+            processed_artwork = out.getvalue()
             if not processed_artwork:
                 return False
 
@@ -924,7 +967,7 @@ class MusicDownloader:
 
             # 3. Paste logo (25% of 600 = 150px)
             logo = self._make_dynamic_logo()
-            if not logo:
+            if not logo or logo.width <= 0 or logo.height <= 0:
                 logger.warning("hiit-radio.png NOT FOUND (dynamic logo unavailable)")
                 out = io.BytesIO()
                 img.save(out, format="JPEG", quality=95)
@@ -981,7 +1024,7 @@ class MusicDownloader:
 
             # 4. Paste logo (30% of 600 = 180px)
             logo = self._make_dynamic_logo()
-            if not logo:
+            if not logo or logo.width <= 0 or logo.height <= 0:
                 logger.warning("hiit-radio.png NOT FOUND (dynamic logo unavailable)")
                 out = io.BytesIO()
                 bordered.save(out, format="JPEG", quality=95)

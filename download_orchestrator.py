@@ -58,10 +58,11 @@ class DownloadOrchestrator:
                     pass
                 if (
                     progress_reporter
-                    and getattr(progress_reporter, "total", 1) <= 4
+                    and getattr(progress_reporter, "progress_mode", "tracks")
+                    == "percent"
                 ):
                     await progress_reporter.update(
-                        3,
+                        95,
                         f"{metadata.title} — {metadata.artist}\nآماده ارسال به تلگرام...",
                     )
                 self.db.log_event("cache_hit", payload={
@@ -74,9 +75,13 @@ class DownloadOrchestrator:
                     )
                 return send_copy, f"{source}_cache", True
 
-        if progress_reporter and getattr(progress_reporter, "total", 1) <= 4:
+        if (
+            progress_reporter
+            and getattr(progress_reporter, "progress_mode", "tracks") == "percent"
+        ):
             await progress_reporter.update(
-                1, f"{metadata.title} — {metadata.artist}\nدر حال جستجو و دانلود...",
+                20,
+                f"{metadata.title} — {metadata.artist}\nدر حال جستجو و دانلود...",
             )
         file_path = await self.music_downloader.download_song(metadata)
         platform = "youtube" if file_path else source
@@ -96,17 +101,25 @@ class DownloadOrchestrator:
                 )
             return None, None, False
 
-        if progress_reporter and getattr(progress_reporter, "total", 1) <= 4:
+        if (
+            progress_reporter
+            and getattr(progress_reporter, "progress_mode", "tracks") == "percent"
+        ):
             await progress_reporter.update(
-                2, f"{metadata.title} — {metadata.artist}\nدر حال آماده‌سازی...",
+                55,
+                f"{metadata.title} — {metadata.artist}\nدر حال آماده‌سازی...",
             )
 
         # Hot path: LRCLIB only with 3s timeout (skip Genius/Musixmatch).
         await self._embed_lyrics(file_path, metadata)
 
-        if progress_reporter and getattr(progress_reporter, "total", 1) <= 4:
+        if (
+            progress_reporter
+            and getattr(progress_reporter, "progress_mode", "tracks") == "percent"
+        ):
             await progress_reporter.update(
-                3, f"{metadata.title} — {metadata.artist}\nآماده ارسال به تلگرام...",
+                85,
+                f"{metadata.title} — {metadata.artist}\nآماده ارسال به تلگرام...",
             )
 
         # Store under enriched tags AND under the original query guess so the
