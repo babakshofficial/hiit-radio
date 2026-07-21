@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run on the VPS to find why downloads fail (credentials, ffmpeg, network, proxy).
+# Run on the VPS to find why downloads fail (credentials, ffmpeg, network).
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -22,7 +22,7 @@ echo
 echo "--- .env ---"
 if [[ -f .env ]]; then
   echo "OK: .env exists"
-  grep -E '^BOT_TOKEN=|^VIP_LOG|^YTDLP_|^SPOTIFY_|^HTTPS_PROXY=|^YTDLP_PROXY=' .env | sed 's/BOT_TOKEN=.*/BOT_TOKEN=***hidden***/' || true
+  grep -E '^BOT_TOKEN=|^VIP_LOG|^YTDLP_|^SPOTIFY_' .env | sed 's/BOT_TOKEN=.*/BOT_TOKEN=***hidden***/' || true
   if ! grep -q '^VIP_LOG_CHANNEL_ID=.\+' .env 2>/dev/null; then
     echo "WARN: VIP_LOG_CHANNEL_ID not set — admin logs disabled"
   fi
@@ -67,12 +67,7 @@ if [[ -x "$YTDLP" ]]; then
   set +e
   COOKIE_ARG=()
   [[ -f "$COOKIES" ]] && COOKIE_ARG=(--cookies "$COOKIES")
-  PROXY_ARG=()
-  if [[ -f .env ]]; then
-    PROXY=$(grep -E '^YTDLP_PROXY=|^HTTPS_PROXY=' .env | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
-    [[ -n "${PROXY:-}" ]] && PROXY_ARG=(--proxy "$PROXY")
-  fi
-  OUT=$("$YTDLP" "${COOKIE_ARG[@]}" "${PROXY_ARG[@]}" --flat-playlist --print title "ytsearch1:rick astley never gonna give you up" 2>&1)
+  OUT=$("$YTDLP" "${COOKIE_ARG[@]}" --flat-playlist --print title "ytsearch1:rick astley never gonna give you up" 2>&1)
   RC=$?
   set -e
   if [[ $RC -eq 0 ]]; then
@@ -82,8 +77,7 @@ if [[ -x "$YTDLP" ]]; then
     echo "FAIL: YouTube search blocked or unreachable"
     echo "$OUT" | tail -8
     echo
-    echo "If you use proxychains on PC, add YTDLP_PROXY=socks5://127.0.0.1:PORT to .env on VPS"
-    echo "Or wrap systemd with proxychains (same as your desktop setup)"
+    echo "Export fresh logged-in cookies.txt (non-empty SID/__Secure-*PSID) and restart the bot."
   fi
 else
   echo "SKIP: yt-dlp not in venv"

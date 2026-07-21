@@ -118,22 +118,14 @@ Git does **not** copy `cookies.txt` or `.env`. You must deploy them manually.
    sudo apt update && sudo apt install -y ffmpeg
    ```
 
-4. **Proxy (if your PC uses proxychains)**
-   - If the bot on your PC runs behind `proxychains4`, the VPS needs the same reachability.
-   - Either add to `.env`:
-     ```env
-     YTDLP_PROXY=socks5://127.0.0.1:1080
-     ```
-   - Or change systemd `ExecStart` to use proxychains like on your desktop.
-
-5. **Run the diagnostic script on the VPS**
+4. **Run the diagnostic script on the VPS**
    ```bash
    cd /home/babak/hiit-radio
    chmod +x vps_diagnose.sh
    ./vps_diagnose.sh
    ```
 
-6. **Verify in Telegram (admin)**
+5. **Verify in Telegram (admin)**
    ```text
    /creds
    ```

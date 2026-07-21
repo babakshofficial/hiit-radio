@@ -122,52 +122,81 @@ def score_query_match(query, title, artist):
     artist_l = (artist or "").lower()
     title_tokens = _query_tokens(title)
     artist_tokens = _query_tokens(artist)
+    hay_text = f"{title_l} {artist_l}"
 
     title_hits = sum(1 for t in q_tokens if _token_in_haystack(t, title_tokens, title_l))
     if title_hits == 0:
         return 0.0
 
-    words = q.split()
-    # Guess "Artist … Title" (last word = title) when query has no separators.
-    artist_guess = ""
-    title_guess = ""
-    if len(words) >= 3:
-        artist_guess = " ".join(words[:-1]).lower()
-        title_guess = words[-1].lower()
-    elif len(words) == 2:
-        artist_guess, title_guess = words[0].lower(), words[1].lower()
-
-    artist_phrase_sim = 0.0
-    if artist_guess:
-        artist_phrase_sim = difflib.SequenceMatcher(None, artist_guess, artist_l).ratio() * 100.0
-        # Also compare against cleaned artist without featured junk
+    def _artist_similarity(guess):
+        guess = (guess or "").strip().lower()
+        if not guess:
+            return 0.0
         artist_clean = re.split(r'\s*(?:feat\.?|ft\.?|&|,)\s*', artist_l, maxsplit=1)[0].strip()
-        artist_phrase_sim = max(
-            artist_phrase_sim,
-            difflib.SequenceMatcher(None, artist_guess, artist_clean).ratio() * 100.0,
+        return max(
+            difflib.SequenceMatcher(None, guess, artist_l).ratio() * 100.0,
+            difflib.SequenceMatcher(None, guess, artist_clean).ratio() * 100.0,
         )
 
-    title_focus = 0.0
-    if title_guess:
-        if _token_in_haystack(title_guess, title_tokens, title_l):
-            # Prefer compact titles (Breathing) over long ones (Breathe of Life …)
-            compactness = min(1.0, (len(title_guess) + 2) / max(len(title_l), 1))
-            title_focus = 50.0 + 50.0 * compactness
-            title_focus = max(
-                title_focus,
-                difflib.SequenceMatcher(None, title_guess, title_l).ratio() * 100.0,
-            )
+    def _title_focus(guess):
+        guess = (guess or "").strip().lower()
+        if not guess:
+            return 0.0
+        if not _token_in_haystack(guess, title_tokens, title_l):
+            guess_tokens = _query_tokens(guess)
+            if not guess_tokens or not all(
+                _token_in_haystack(t, title_tokens, title_l) for t in guess_tokens
+            ):
+                return 0.0
+        compactness = min(1.0, (len(guess) + 2) / max(len(title_l), 1))
+        return max(
+            50.0 + 50.0 * compactness,
+            difflib.SequenceMatcher(None, guess, title_l).ratio() * 100.0,
+        )
+
+    words = q.split()
+    orientation_guesses = []
+
+    guessed_title, guessed_artist = guess_title_artist(q)
+    if guessed_title or guessed_artist:
+        orientation_guesses.append((guessed_title, guessed_artist))
+        if guessed_title and guessed_artist:
+            orientation_guesses.append((guessed_artist, guessed_title))
+
+    for idx in range(1, len(words)):
+        left = " ".join(words[:idx]).strip()
+        right = " ".join(words[idx:]).strip()
+        orientation_guesses.append((left, right))
+        orientation_guesses.append((right, left))
+
+    best_orientation = (0.0, 0.0, "", "")
+    seen = set()
+    for title_guess, artist_guess in orientation_guesses:
+        key = (title_guess.lower(), artist_guess.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        current = (
+            _artist_similarity(artist_guess),
+            _title_focus(title_guess),
+            title_guess,
+            artist_guess,
+        )
+        if current[:2] > best_orientation[:2]:
+            best_orientation = current
+
+    artist_phrase_sim, title_focus, _best_title_guess, best_artist_guess = best_orientation
 
     coverage = (
         sum(
             1 for t in q_tokens
-            if _token_in_haystack(t, title_tokens + artist_tokens, f"{title_l} {artist_l}")
+            if _token_in_haystack(t, title_tokens + artist_tokens, hay_text)
         )
         / len(q_tokens)
     ) * 100.0
 
     # Strong contiguous artist match is required for multi-word artist queries.
-    if artist_guess and len(_query_tokens(artist_guess)) >= 2 and artist_phrase_sim < 55.0:
+    if best_artist_guess and len(_query_tokens(best_artist_guess)) >= 2 and artist_phrase_sim < 55.0:
         return 0.0
 
     score = coverage * 0.35 + artist_phrase_sim * 0.4 + title_focus * 0.25
@@ -289,7 +318,10 @@ class SpotifyMetadata:
             # where the API is unavailable — e.g. 403 "premium subscription
             # required", missing credentials, or rate limiting.
             logger.warning("Spotify API unavailable — falling back to public embed page")
-            return await self._fetch_from_embed()
+            if await self._fetch_from_embed():
+                return True
+            logger.warning("Spotify embed unavailable — falling back to oEmbed")
+            return await self._fetch_from_oembed()
         except Exception as e:
             logger.error(f"Spotify fetch error: {e}", exc_info=True)
             return False
@@ -348,7 +380,8 @@ class SpotifyMetadata:
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
-            async with aiohttp.ClientSession() as session:
+            timeout = aiohttp.ClientTimeout(total=25, connect=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.get(embed_url, headers=headers) as resp:
                     if resp.status != 200:
                         logger.error(f"Spotify embed fetch failed: {resp.status}")
@@ -426,6 +459,47 @@ class SpotifyMetadata:
         except Exception as e:
             logger.error(f"Spotify embed fallback error: {e}", exc_info=True)
             return False
+
+    async def _fetch_from_oembed(self):
+        """Last-resort no-auth metadata via Spotify's public oEmbed endpoint."""
+        try:
+            track_url = f"https://open.spotify.com/track/{self.id}"
+            oembed_url = (
+                "https://open.spotify.com/oembed?"
+                + urllib.parse.urlencode({"url": track_url})
+            )
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "application/json",
+            }
+            timeout = aiohttp.ClientTimeout(total=25, connect=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(oembed_url, headers=headers) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Spotify oEmbed fetch failed: {resp.status}")
+                        return False
+                    data = await resp.json(content_type=None)
+
+            title = (data.get("title") or "").strip()
+            artist = (data.get("author_name") or "").strip()
+            # oEmbed titles are often "Song · Artist"
+            if " · " in title and not artist:
+                left, right = title.split(" · ", 1)
+                title, artist = left.strip(), right.strip()
+            if not title:
+                return False
+
+            self.title = title
+            self.artist = artist or self.artist or "Unknown Artist"
+            thumb = data.get("thumbnail_url")
+            if thumb:
+                self.artwork_url = thumb
+            logger.info(f"Spotify (oEmbed): '{self.title}' by '{self.artist}'")
+            return True
+        except Exception as e:
+            logger.error(f"Spotify oEmbed fallback error: {e}", exc_info=True)
+            return False
+
 
 class AppleMusicMetadata:
     """Handle Apple Music metadata extraction and iTunes search."""

@@ -16,22 +16,45 @@ from metadata import score_query_coverage
 
 logger = logging.getLogger(__name__)
 
-# Auth cookie names that indicate a logged-in YouTube session.
-_YT_AUTH_COOKIE_NAMES = (
+# Soft signals that a YouTube cookie jar was exported while signed in.
+_YT_AUTH_HINT_NAMES = (
     "LOGIN_INFO",
     "SAPISID",
+)
+# Hard session cookies yt-dlp needs to pass the bot check.
+_YT_SESSION_COOKIE_NAMES = (
+    "SID",
     "__Secure-1PSID",
     "__Secure-3PSID",
-    "SID",
 )
 
 
 def _cookies_look_authenticated(cookies_path):
-    """Return True if cookies.txt appears to contain a logged-in YouTube session."""
+    """Return True if cookies.txt has a usable logged-in YouTube session.
+
+    LOGIN_INFO/SAPISID alone are not enough — without SID / __Secure-*PSID,
+    YouTube still returns the bot-check interstitial. Empty cookie values
+    (common in broken exports) also count as missing.
+    """
     try:
+        values_by_name = {}
         with open(cookies_path, "r", encoding="utf-8", errors="ignore") as f:
-            text = f.read()
-        return any(name in text for name in _YT_AUTH_COOKIE_NAMES)
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if len(parts) < 7:
+                    continue
+                name = parts[5]
+                value = parts[6]
+                if not value:
+                    continue
+                # Prefer any non-empty value for this cookie name.
+                values_by_name[name] = value
+        has_hint = any(name in values_by_name for name in _YT_AUTH_HINT_NAMES)
+        has_session = any(name in values_by_name for name in _YT_SESSION_COOKIE_NAMES)
+        return has_hint and has_session
     except OSError:
         return False
 
@@ -72,14 +95,19 @@ def _has_noise(text, expected_title=""):
 
 
 def _candidate_url(video, source_label="YouTube"):
-    url = video.get("webpage_url") or video.get("url")
-    if url and url.startswith("http"):
+    url = (
+        video.get("webpage_url")
+        or video.get("permalink_url")
+        or video.get("url")
+    )
+    if url and str(url).startswith("http"):
         return url
     vid = video.get("id")
     if not vid:
         return None
     if source_label == "SoundCloud":
-        return url
+        # Flat scsearch results sometimes only expose a numeric/track id.
+        return None
     return f"https://www.youtube.com/watch?v={vid}"
 
 
@@ -227,8 +255,12 @@ class MusicDownloader:
         return Image.alpha_composite(color_img, logo)
 
     def _apply_auth(self, ydl_opts):
-        """Attach cookies / proxy to yt-dlp options."""
-        if os.path.exists(self.cookies_path) and _cookies_look_authenticated(self.cookies_path):
+        """Attach cookies to yt-dlp options."""
+        cookies_ok = (
+            os.path.exists(self.cookies_path)
+            and _cookies_look_authenticated(self.cookies_path)
+        )
+        if cookies_ok:
             ydl_opts['cookiefile'] = self.cookies_path
             logger.info(f"Using authenticated YouTube cookies from {self.cookies_path}")
         elif self.cookies_from_browser:
@@ -237,11 +269,17 @@ class MusicDownloader:
             profile = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
             ydl_opts['cookiesfrombrowser'] = (browser, profile, None, None)
             logger.info(f"Using YouTube cookies from browser: {self.cookies_from_browser}")
+            if os.path.exists(self.cookies_path):
+                logger.warning(
+                    f"cookies.txt at {self.cookies_path} is incomplete "
+                    "(needs SID or __Secure-*PSID plus LOGIN_INFO/SAPISID); "
+                    "preferring YTDLP_COOKIES_FROM_BROWSER instead."
+                )
         elif os.path.exists(self.cookies_path):
-            ydl_opts['cookiefile'] = self.cookies_path
             logger.warning(
-                f"cookies.txt at {self.cookies_path} has no logged-in YouTube session "
-                "(missing LOGIN_INFO/SAPISID). YouTube will likely bot-block downloads. "
+                f"cookies.txt at {self.cookies_path} has no usable YouTube session "
+                "(need non-empty SID/__Secure-*PSID and LOGIN_INFO/SAPISID). "
+                "Skipping cookiefile — YouTube will likely bot-block downloads. "
                 "Export fresh cookies while signed into youtube.com."
             )
         else:
@@ -249,11 +287,6 @@ class MusicDownloader:
                 f"No authenticated cookies at {self.cookies_path}. YouTube may bot-block. "
                 "Copy cookies.txt from your PC or export fresh cookies on desktop."
             )
-
-        proxy = os.getenv("YTDLP_PROXY", "").strip() or os.getenv("HTTPS_PROXY", "").strip()
-        if proxy:
-            ydl_opts['proxy'] = proxy
-            logger.info(f"Using proxy for yt-dlp: {proxy}")
         return ydl_opts
 
     def _build_search_opts(self):
@@ -591,12 +624,15 @@ class MusicDownloader:
             return best_local
 
         await _report(18, f"{metadata.title} — {metadata.artist}\nدر حال جستجو در یوتیوب...")
-        best = await gather_best("ytsearch", "YouTube", yt_search_strategies, 20, 38)
+        yt_best = await gather_best("ytsearch", "YouTube", yt_search_strategies, 20, 38)
+        sc_best = None
+        best = yt_best
         if not best or best[0] < MATCH_THRESHOLD:
             yt_txt = f"{best[0]:.1f}%" if best else "n/a"
             logger.warning(f"No valid YouTube match (best eligible: {yt_txt}) — trying SoundCloud fallback")
             await _report(40, f"{metadata.title} — {metadata.artist}\nجستجو در ساندکلاود...")
-            best = await gather_best("scsearch", "SoundCloud", sc_search_strategies, 40, 48)
+            sc_best = await gather_best("scsearch", "SoundCloud", sc_search_strategies, 40, 48)
+            best = sc_best
 
         if not best or best[0] < MATCH_THRESHOLD:
             score_txt = f"{best[0]:.1f}%" if best else "n/a"
@@ -606,28 +642,12 @@ class MusicDownloader:
             )
             return None
 
-        best_score, best_video = best
-        download_url = _candidate_url(
-            best_video,
-            "SoundCloud" if "soundcloud" in (best_video.get("extractor") or "").lower()
-            or (best_video.get("url") or "").find("soundcloud") >= 0
-            else "YouTube",
-        )
-        if not download_url:
-            logger.error("Best match has no downloadable URL")
-            return None
-        logger.info(f"Best match {best_score:.1f}% — '{best_video.get('title', '')}' — downloading")
-
-        # Skip hydrate when flat result already has title + thumbnail (saves a round-trip).
-        need_hydrate = not (
-            (best_video.get("title") or "").strip()
-            and _video_thumbnail_url(best_video)
-        )
-        if need_hydrate:
-            await _report(50, f"{metadata.title} — {metadata.artist}\nآماده‌سازی لینک دانلود...")
-            best_video = await self._hydrate_video_info(download_url, best_video, loop)
-        else:
-            await _report(50, f"{metadata.title} — {metadata.artist}\nشروع دانلود...")
+        def _source_label_for(video):
+            extractor = (video.get("extractor") or "").lower()
+            url = video.get("url") or video.get("webpage_url") or ""
+            if "soundcloud" in extractor or "soundcloud" in url:
+                return "SoundCloud"
+            return "YouTube"
 
         def _yt_hook(d):
             try:
@@ -646,37 +666,80 @@ class MusicDownloader:
             except Exception:
                 pass
 
-        ydl_opts = self._build_ydl_opts(output_template, progress_hooks=[_yt_hook])
+        async def _download_candidate(candidate):
+            score, video = candidate
+            source_label = _source_label_for(video)
+            url = _candidate_url(video, source_label)
+            if not url:
+                logger.error(f"Best {source_label} match has no downloadable URL")
+                return None, None
+            logger.info(
+                f"Best {source_label} match {score:.1f}% — '{video.get('title', '')}' — downloading"
+            )
 
-        async def _heartbeat():
-            # Keep the bar moving while yt-dlp runs (search/download can take minutes).
-            base = 52
-            while True:
-                frac = download_pct["value"]
-                pct = base + int(frac * 28)  # 52 → 80
-                await _report(
-                    pct,
-                    f"{metadata.title} — {metadata.artist}\nدر حال دانلود فایل صوتی...",
-                )
-                await asyncio.sleep(3)
+            need_hydrate = not (
+                (video.get("title") or "").strip()
+                and _video_thumbnail_url(video)
+            )
+            if need_hydrate:
+                await _report(50, f"{metadata.title} — {metadata.artist}\nآماده‌سازی لینک دانلود...")
+                video = await self._hydrate_video_info(url, video, loop)
+            else:
+                await _report(50, f"{metadata.title} — {metadata.artist}\nشروع دانلود...")
 
-        heartbeat = asyncio.create_task(_heartbeat())
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                await loop.run_in_executor(None, ydl.download, [download_url])
-        except Exception as e:
-            logger.error(f"Download of best match failed: {e}", exc_info=True)
-            return None
-        finally:
-            heartbeat.cancel()
+            download_pct["value"] = 0.0
+            ydl_opts = self._build_ydl_opts(output_template, progress_hooks=[_yt_hook])
+
+            async def _heartbeat():
+                base = 52
+                while True:
+                    frac = download_pct["value"]
+                    pct = base + int(frac * 28)  # 52 → 80
+                    await _report(
+                        pct,
+                        f"{metadata.title} — {metadata.artist}\nدر حال دانلود فایل صوتی...",
+                    )
+                    await asyncio.sleep(3)
+
+            heartbeat = asyncio.create_task(_heartbeat())
             try:
-                await heartbeat
-            except asyncio.CancelledError:
-                pass
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    await loop.run_in_executor(None, ydl.download, [url])
+            except Exception as e:
+                logger.error(f"Download of {source_label} match failed: {e}", exc_info=True)
+                return None, None
+            finally:
+                heartbeat.cancel()
+                try:
+                    await heartbeat
+                except asyncio.CancelledError:
+                    pass
 
-        file_path = os.path.join(self.download_dir, f"{metadata.id}.mp3")
-        if not os.path.exists(file_path):
-            logger.warning("Download completed but output file not found")
+            path = os.path.join(self.download_dir, f"{metadata.id}.mp3")
+            if not os.path.exists(path):
+                logger.warning(f"{source_label} download completed but output file not found")
+                return None, None
+            return path, video
+
+        best_score, best_video = best
+        file_path, best_video = await _download_candidate(best)
+        used_youtube = _source_label_for(best[1]) == "YouTube"
+
+        # YouTube often finds a match then fails at download (bot-check / expired cookies).
+        # Fall through to SoundCloud instead of giving up.
+        if not file_path and used_youtube:
+            if sc_best is None:
+                await _report(40, f"{metadata.title} — {metadata.artist}\nجستجو در ساندکلاود...")
+                sc_best = await gather_best("scsearch", "SoundCloud", sc_search_strategies, 40, 48)
+            if sc_best and sc_best[0] >= MATCH_THRESHOLD:
+                logger.warning(
+                    f"YouTube download failed — retrying with SoundCloud "
+                    f"(score {sc_best[0]:.1f}%)"
+                )
+                best_score, best_video = sc_best
+                file_path, best_video = await _download_candidate(sc_best)
+
+        if not file_path:
             return None
 
         try:

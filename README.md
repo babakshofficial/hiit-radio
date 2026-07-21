@@ -68,7 +68,7 @@ All settings live in `.env`. See `.env.example` for the full list.
 | `VIP_LOG_CHANNEL_ID` | Private channel ID for admin logs (empty = disabled) |
 | `DATABASE_PATH` | SQLite database file (default: `hiit_radio.db`) |
 | `CACHE_DIR` / `CACHE_TTL_HOURS` | On-disk download cache |
-| `TG_*_TIMEOUT` | Telegram API/upload timeouts for slow VPS/proxy links |
+| `TG_*_TIMEOUT` | Telegram API/upload timeouts for slow VPS links |
 | `YTDLP_COOKIES_FROM_BROWSER` | e.g. `chrome` — read live browser cookies |
 | `YTDLP_COOKIES` | Path to exported `cookies.txt` |
 | `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | Spotify Web API (metadata only) |
