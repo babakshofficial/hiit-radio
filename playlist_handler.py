@@ -33,7 +33,7 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
         await update.message.reply_text(playlist_empty())
         return
 
-    context.user_data["active_job"] = {"cancel": False, "type": "playlist"}
+    context.user_data["active_job"] = {"cancel": False, "kind": "playlist", "type": "playlist"}
     status = await update.message.reply_text(playlist_start(collection_name, total))
     await admin_logger.log_playlist_start(bot, user, collection_name, total)
 

@@ -339,7 +339,7 @@ def playlist_start(collection_name, total):
     return (
         f"📋 شروع دانلود: {name}\n"
         f"تعداد: {total} آهنگ\n\n"
-        "/cancel برای توقف"
+        "/cancel برای توقف کار جاری"
     )
 
 

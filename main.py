@@ -447,83 +447,132 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg.discover_not_configured())
         return
 
+    _start_job(context, "discover")
     status = await update.message.reply_text(msg.discover_preparing())
+    reporter = ProgressReporter(
+        status,
+        100,
+        "پیشنهاد",
+        bot=context.bot,
+        user=update.effective_user,
+        progress_mode="percent",
+    )
+    try:
+        await reporter.update(8, msg.discover_llm_phase(), force=True)
 
-    recs = get_cached_recommendations(user_id)
-    if recs is not None:
-        db.log_llm_usage(
-            user_id,
-            model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
-            cached=True,
-            success=True,
-            recommendations_count=len(recs),
-        )
-    else:
-        recs, usage = await recommend_songs(history, user_id=user_id, limit=10)
-        db.log_llm_usage(
-            user_id,
-            model=usage.get("model"),
-            prompt_tokens=usage.get("prompt_tokens", 0),
-            completion_tokens=usage.get("completion_tokens", 0),
-            total_tokens=usage.get("total_tokens", 0),
-            cached=False,
-            success=bool(usage.get("success") and recs is not None),
-            recommendations_count=usage.get("recommendations_count", 0),
-        )
-        if recs is None:
-            await status.edit_text(msg.discover_llm_error())
-            return
-        set_cached_recommendations(user_id, recs)
-
-    suggestions = []
-    seen = set()
-    history_keys = {
-        ((r.get("title") or "").strip().lower(), (r.get("artist") or "").strip().lower())
-        for r in history if r.get("title")
-    }
-
-    for rec in recs:
-        title = rec.get("title", "").strip()
-        artist = rec.get("artist", "").strip()
-        if not title:
-            continue
-        key = (title.lower(), artist.lower())
-        if key in seen or key in history_keys:
-            continue
-
-        query = f"{title} {artist}".strip() if artist else title
-        resolved = await AppleMusicMetadata.search_by_query(query)
-        if not resolved or not resolved.title:
-            resolved = await AppleMusicMetadata.search_by_query(title)
-        if not resolved or not resolved.title:
-            continue
-
-        res_key = (resolved.title.strip().lower(), (resolved.artist or "").strip().lower())
-        if res_key in seen or res_key in history_keys:
-            continue
-        seen.add(res_key)
-        suggestions.append(TrackMetadata()._copy_from(resolved))
-        if len(suggestions) >= 10:
-            break
-
-    if not suggestions:
-        await status.edit_text(msg.discover_no_results())
-        return
-
-    lines = [msg.discover_header()]
-    buttons = []
-    for i, s in enumerate(suggestions[:10], 1):
-        lines.append(f"{i}. {s.title} — {_unknown_artist(s.artist)}")
-        buttons.append([
-            InlineKeyboardButton(
-                _btn_download(s.title, i),
-                callback_data=f"discoverpick:{i}",
+        recs = get_cached_recommendations(user_id)
+        if recs is not None:
+            db.log_llm_usage(
+                user_id,
+                model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
+                cached=True,
+                success=True,
+                recommendations_count=len(recs),
             )
-        ])
-    context.user_data["discover_cache"] = {
-        str(i): s for i, s in enumerate(suggestions[:10], 1)
-    }
-    await status.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+            await reporter.update(45, msg.discover_llm_phase(), force=True)
+        else:
+            if _cancel_check(context):
+                await reporter.fail(msg.work_cancelled())
+                return
+            result, cancelled = await _await_with_progress(
+                recommend_songs(history, user_id=user_id, limit=10),
+                reporter,
+                lambda: _cancel_check(context),
+                12,
+                50,
+                msg.discover_llm_phase(),
+            )
+            if cancelled:
+                await reporter.fail(msg.work_cancelled())
+                return
+            recs, usage = result
+            db.log_llm_usage(
+                user_id,
+                model=usage.get("model"),
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                total_tokens=usage.get("total_tokens", 0),
+                cached=False,
+                success=bool(usage.get("success") and recs is not None),
+                recommendations_count=usage.get("recommendations_count", 0),
+            )
+            if recs is None:
+                await reporter.fail(msg.discover_llm_error())
+                return
+            set_cached_recommendations(user_id, recs)
+
+        suggestions = []
+        seen = set()
+        history_keys = {
+            ((r.get("title") or "").strip().lower(), (r.get("artist") or "").strip().lower())
+            for r in history if r.get("title")
+        }
+        candidates = [r for r in (recs or []) if (r.get("title") or "").strip()]
+        total_cands = max(len(candidates), 1)
+
+        for idx, rec in enumerate(candidates):
+            if _cancel_check(context):
+                await reporter.fail(msg.work_cancelled())
+                return
+            title = rec.get("title", "").strip()
+            artist = rec.get("artist", "").strip()
+            key = (title.lower(), artist.lower())
+            if key in seen or key in history_keys:
+                continue
+
+            pct = 50 + int(40 * (idx + 1) / total_cands)
+            await reporter.update(
+                min(pct, 90),
+                msg.discover_resolve_phase(len(suggestions) + 1, 10),
+                force=True,
+            )
+
+            query = f"{title} {artist}".strip() if artist else title
+            resolved = await AppleMusicMetadata.search_by_query(query)
+            if not resolved or not resolved.title:
+                resolved = await AppleMusicMetadata.search_by_query(title)
+            if not resolved or not resolved.title:
+                continue
+
+            res_key = (
+                resolved.title.strip().lower(),
+                (resolved.artist or "").strip().lower(),
+            )
+            if res_key in seen or res_key in history_keys:
+                continue
+            seen.add(res_key)
+            suggestions.append(TrackMetadata()._copy_from(resolved))
+            if len(suggestions) >= 10:
+                break
+
+        if _cancel_check(context):
+            await reporter.fail(msg.work_cancelled())
+            return
+
+        if not suggestions:
+            await reporter.fail(msg.discover_no_results())
+            return
+
+        lines = [msg.discover_header()]
+        buttons = []
+        for i, s in enumerate(suggestions[:10], 1):
+            lines.append(f"{i}. {s.title} — {_unknown_artist(s.artist)}")
+            buttons.append([
+                InlineKeyboardButton(
+                    _btn_download(s.title, i),
+                    callback_data=f"discoverpick:{i}",
+                )
+            ])
+        context.user_data["discover_cache"] = {
+            str(i): s for i, s in enumerate(suggestions[:10], 1)
+        }
+        await reporter.update(100, "آماده شد", force=True)
+        await status.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+    except Exception as e:
+        logger.error(f"Discover failed: {e}", exc_info=True)
+        await reporter.fail(msg.discover_llm_error())
+    finally:
+        _end_job(context)
 
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -567,7 +616,10 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job = context.user_data.get("active_job")
     if job:
         job["cancel"] = True
-        await log_system(context.bot, "لغو دانلود", user=update.effective_user)
+        kind = job.get("kind") or "work"
+        await log_system(
+            context.bot, "لغو کار کاربر", user=update.effective_user, kind=kind,
+        )
         await update.message.reply_text(msg.cancel_ok())
     else:
         await update.message.reply_text(msg.cancel_no_job())
@@ -741,24 +793,55 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(msg.pick_expired_short())
             return
         title, artist = ref
+        _start_job(context, "similar")
         status = await query.message.reply_text(msg.similar_preparing())
-        suggestions = await _resolve_similar_tracks(title, artist, update.effective_user.id)
-        if not suggestions:
-            await status.edit_text(msg.similar_not_found())
-            return
-        lines = [msg.similar_header(title, artist)]
-        buttons = []
-        context.user_data["reco_cache"] = {}
-        for i, meta in enumerate(suggestions, 1):
-            lines.append(f"{i}. {meta.title} — {meta.artist}")
-            context.user_data["reco_cache"][str(i)] = meta
-            buttons.append([
-                InlineKeyboardButton(
-                    _btn_download(meta.title, i),
-                    callback_data=f"searchpick:{i}",
-                )
-            ])
-        await status.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+        reporter = ProgressReporter(
+            status,
+            100,
+            "مشابه",
+            bot=context.bot,
+            user=update.effective_user,
+            progress_mode="percent",
+        )
+        try:
+            await reporter.update(10, msg.similar_llm_phase(), force=True)
+            suggestions = await _resolve_similar_tracks(
+                title,
+                artist,
+                update.effective_user.id,
+                reporter=reporter,
+                cancel_check=lambda: _cancel_check(context),
+            )
+            if _cancel_check(context):
+                await reporter.fail(msg.work_cancelled())
+                return
+            if suggestions is None:
+                await reporter.fail(msg.work_cancelled())
+                return
+            if not suggestions:
+                await reporter.fail(msg.similar_not_found())
+                return
+            lines = [msg.similar_header(title, artist)]
+            buttons = []
+            context.user_data["reco_cache"] = {}
+            for i, meta in enumerate(suggestions, 1):
+                lines.append(f"{i}. {meta.title} — {meta.artist}")
+                context.user_data["reco_cache"][str(i)] = meta
+                buttons.append([
+                    InlineKeyboardButton(
+                        _btn_download(meta.title, i),
+                        callback_data=f"searchpick:{i}",
+                    )
+                ])
+            await reporter.update(100, "آماده شد", force=True)
+            await status.edit_text(
+                "\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons)
+            )
+        except Exception as e:
+            logger.error(f"Similar tracks failed: {e}", exc_info=True)
+            await reporter.fail(msg.similar_not_found())
+        finally:
+            _end_job(context)
         return
 
     if data.startswith("reco:lyrics:"):
@@ -768,16 +851,48 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(msg.pick_expired_short())
             return
         title, artist = ref
+        _start_job(context, "lyrics")
         status = await query.message.reply_text(msg.searching())
-        text = _lyrics_from_cache(title, artist)
-        if not text:
-            result = await fetch_lyrics(title, artist)
-            text = (result or {}).get("text") if result else None
-        if not text:
-            await status.edit_text(msg.lyrics_not_found())
-            return
-        await status.delete()
-        await _reply_lyrics(query.message, title, artist, text)
+        reporter = ProgressReporter(
+            status,
+            100,
+            "متن آهنگ",
+            bot=context.bot,
+            user=update.effective_user,
+            progress_mode="percent",
+        )
+        try:
+            await reporter.update(20, f"{title} — {artist or msg.UNKNOWN}", force=True)
+            text = _lyrics_from_cache(title, artist)
+            if not text:
+                if _cancel_check(context):
+                    await reporter.fail(msg.work_cancelled())
+                    return
+                result, cancelled = await _await_with_progress(
+                    fetch_lyrics(title, artist),
+                    reporter,
+                    lambda: _cancel_check(context),
+                    25,
+                    85,
+                    "در حال دریافت متن آهنگ...",
+                )
+                if cancelled:
+                    await reporter.fail(msg.work_cancelled())
+                    return
+                text = (result or {}).get("text") if result else None
+            if _cancel_check(context):
+                await reporter.fail(msg.work_cancelled())
+                return
+            if not text:
+                await reporter.fail(msg.lyrics_not_found())
+                return
+            await status.delete()
+            await _reply_lyrics(query.message, title, artist, text)
+        except Exception as e:
+            logger.error(f"Lyrics failed: {e}", exc_info=True)
+            await reporter.fail(msg.lyrics_not_found())
+        finally:
+            _end_job(context)
         return
 
     if data.startswith("searchpick:"):
@@ -810,11 +925,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-async def _resolve_similar_tracks(title, artist, user_id, limit=8):
-    """Resolve similar track metadata via LLM (preferred) or iTunes fallback."""
+async def _resolve_similar_tracks(
+    title, artist, user_id, limit=8, reporter=None, cancel_check=None,
+):
+    """Resolve similar track metadata via LLM (preferred) or iTunes fallback.
+
+    Returns a list of TrackMetadata, or ``None`` if cancelled.
+    """
     seed_key = ((title or "").strip().lower(), (artist or "").strip().lower())
     suggestions = []
     seen = set()
+
+    def _cancelled():
+        try:
+            return bool(cancel_check and cancel_check())
+        except Exception:
+            return False
 
     async def _append_resolved(rec_title, rec_artist):
         query = f"{rec_title} {rec_artist}".strip() if rec_artist else rec_title
@@ -835,7 +961,21 @@ async def _resolve_similar_tracks(title, artist, user_id, limit=8):
 
     recs = None
     if llm_configured():
-        recs, usage = await recommend_similar(title, artist, limit=limit)
+        if _cancelled():
+            return None
+        if reporter:
+            await reporter.update(15, msg.similar_llm_phase(), force=True)
+        result, cancelled = await _await_with_progress(
+            recommend_similar(title, artist, limit=limit),
+            reporter,
+            cancel_check,
+            15,
+            55,
+            msg.similar_llm_phase(),
+        )
+        if cancelled:
+            return None
+        recs, usage = result
         user_manager.database.log_llm_usage(
             user_id,
             model=usage.get("model"),
@@ -846,9 +986,17 @@ async def _resolve_similar_tracks(title, artist, user_id, limit=8):
             success=bool(usage.get("success") and recs is not None),
             recommendations_count=usage.get("recommendations_count", 0),
         )
-        for rec in recs or []:
+        for i, rec in enumerate(recs or []):
+            if _cancelled():
+                return None
             if len(suggestions) >= limit:
                 break
+            if reporter:
+                await reporter.update(
+                    55 + int(20 * (i + 1) / max(len(recs), 1)),
+                    msg.similar_resolve_phase(len(suggestions) + 1, limit),
+                    force=True,
+                )
             await _append_resolved(rec.get("title", ""), rec.get("artist", ""))
 
     if len(suggestions) < 3:
@@ -859,15 +1007,27 @@ async def _resolve_similar_tracks(title, artist, user_id, limit=8):
             queries.append(f"{title} {artist}")
         if title:
             queries.append(title)
-        for q in queries:
+        for qi, q in enumerate(queries):
+            if _cancelled():
+                return None
+            if reporter:
+                await reporter.update(
+                    75 + int(15 * (qi + 1) / max(len(queries), 1)),
+                    msg.similar_resolve_phase(len(suggestions) + 1, limit),
+                    force=True,
+                )
             results = await AppleMusicMetadata.search_many(q, limit=limit)
             for r in results or []:
+                if _cancelled():
+                    return None
                 if len(suggestions) >= limit:
                     break
                 await _append_resolved(r.title, r.artist)
             if len(suggestions) >= limit:
                 break
 
+    if _cancelled():
+        return None
     return suggestions[:limit]
 
 
@@ -879,7 +1039,7 @@ async def _download_and_send(message, user, metadata, context):
         await message.reply_text(msg.rate_limit(wait_time // 60))
         return
 
-    context.user_data["active_job"] = {"cancel": False, "kind": "track"}
+    _start_job(context, "track")
     status = await message.reply_text(msg.downloading())
     reporter = ProgressReporter(
         status,
@@ -941,7 +1101,7 @@ async def _download_and_send(message, user, metadata, context):
             pass
         await log_error(context.bot, user, "Send failed", str(e))
     finally:
-        context.user_data.pop("active_job", None)
+        _end_job(context)
         await orchestrator.cleanup(file_path)
 
 
@@ -972,12 +1132,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg.rate_limit(wait_time // 60))
         return
 
-    context.user_data["active_job"] = {"cancel": False, "kind": "track"}
+    _start_job(context, "track")
     status_message = await update.message.reply_text(msg.searching())
     metadata = await TrackMetadata.create(text)
 
     if not metadata.title:
-        context.user_data.pop("active_job", None)
+        _end_job(context)
         await status_message.edit_text(msg.metadata_not_found())
         await log_error(context.bot, user, "Metadata not found", text)
         return
@@ -1034,7 +1194,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 _vip_failure_detail(text),
             )
     finally:
-        context.user_data.pop("active_job", None)
+        _end_job(context)
         await orchestrator.cleanup(file_path)
 
 
