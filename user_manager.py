@@ -66,6 +66,21 @@ class UserManager:
     def get_history_by_id(self, history_id):
         return self.db.get_history_by_id(history_id)
 
+    def add_favorite(self, user_id, title, artist=None, album=None, content_key=None):
+        return self.db.add_favorite(user_id, title, artist, album, content_key)
+
+    def remove_favorite(self, user_id, content_key):
+        return self.db.remove_favorite(user_id, content_key)
+
+    def is_favorite(self, user_id, content_key):
+        return self.db.is_favorite(user_id, content_key)
+
+    def list_favorites(self, user_id, limit=30):
+        return self.db.list_favorites(user_id, limit)
+
+    def get_favorite_by_id(self, favorite_id, user_id=None):
+        return self.db.get_favorite_by_id(favorite_id, user_id)
+
     @property
     def database(self):
         return self.db

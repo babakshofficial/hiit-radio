@@ -289,3 +289,117 @@ async def recommend_songs(history, user_id=None, limit=10):
     usage["success"] = True
     usage["recommendations_count"] = len(result)
     return result, usage
+
+
+async def recommend_similar(title, artist, limit=8):
+    """Suggest tracks similar to a seed song. Returns (recs, usage) like recommend_songs."""
+    model = os.getenv("LLM_MODEL", "gpt-4o-mini").strip()
+    usage = {
+        "model": model,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "success": False,
+        "recommendations_count": 0,
+    }
+    if not is_configured():
+        return None, usage
+
+    seed_title = (title or "").strip()
+    seed_artist = (artist or "").strip()
+    if not seed_title:
+        usage["success"] = True
+        return [], usage
+
+    api_base = _api_base()
+    api_key = _api_key()
+    url = _completions_url(api_base)
+
+    system_prompt = (
+        "You are a music recommendation assistant. "
+        "Given one seed track, suggest similar songs listeners would enjoy next. "
+        "Do not include the seed track itself. Prefer real, well-known recordings. "
+        "Respond with ONLY valid JSON in this exact shape: "
+        '{"recommendations": [{"title": "Song Name", "artist": "Artist Name"}, ...]} '
+        f"Include exactly {limit} recommendations."
+    )
+    user_prompt = (
+        f'Seed track: "{seed_title}"'
+        + (f' by "{seed_artist}"' if seed_artist else "")
+        + f"\n\nRecommend {limit} similar songs as JSON."
+    )
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if "openrouter.ai" in url:
+        referer = os.getenv("LLM_HTTP_REFERER", "https://t.me/hiit_radio_bot").strip()
+        app_title = os.getenv("LLM_APP_TITLE", "HiiT Radio Bot").strip()
+        if referer:
+            headers["HTTP-Referer"] = referer
+        if app_title:
+            headers["X-Title"] = app_title
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.75,
+    }
+    if _truthy_env("LLM_REASONING") or ":free" in model or model.startswith("tencent/"):
+        payload["reasoning"] = {"enabled": True}
+
+    timeout_sec = int(os.getenv("LLM_TIMEOUT", "90") or 90)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url, headers=headers, json=payload,
+                timeout=aiohttp.ClientTimeout(total=timeout_sec),
+            ) as resp:
+                body = await resp.text()
+                if resp.status != 200:
+                    logger.error(
+                        f"LLM similar API {resp.status} model={model!r} url={url}: {body[:500]}"
+                    )
+                    return None, usage
+                data = json.loads(body)
+    except Exception as e:
+        logger.error(f"LLM similar request failed ({url}): {e}", exc_info=True)
+        return None, usage
+
+    api_usage = data.get("usage") or {}
+    usage["prompt_tokens"] = api_usage.get("prompt_tokens", 0) or 0
+    usage["completion_tokens"] = api_usage.get("completion_tokens", 0) or 0
+    usage["total_tokens"] = api_usage.get("total_tokens", 0) or (
+        usage["prompt_tokens"] + usage["completion_tokens"]
+    )
+
+    try:
+        content = _message_text(data["choices"][0]["message"])
+    except (KeyError, IndexError, TypeError):
+        logger.error("LLM similar response missing choices/message")
+        return None, usage
+
+    recs = _parse_recommendations(content, limit)
+    if not recs:
+        logger.error(f"LLM similar returned no parseable recommendations: {content[:300]}")
+        return None, usage
+
+    seed_key = _normalize_key(seed_title, seed_artist)
+    filtered = []
+    seen = set()
+    for rec in recs:
+        key = _normalize_key(rec["title"], rec.get("artist"))
+        if key == seed_key or key in seen:
+            continue
+        if seed_title and key[0] == seed_key[0] and not key[1]:
+            continue
+        seen.add(key)
+        filtered.append(rec)
+    result = filtered[:limit]
+    usage["success"] = True
+    usage["recommendations_count"] = len(result)
+    return result, usage

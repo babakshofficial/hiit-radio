@@ -33,8 +33,19 @@ class DownloadOrchestrator:
                 h.update(chunk)
         return h.hexdigest()[:16]
 
-    async def get_or_download(self, metadata, progress_reporter=None, bot=None, user=None):
-        """Return (file_path, platform, cached) or (None, None, False)."""
+    async def get_or_download(
+        self,
+        metadata,
+        progress_reporter=None,
+        bot=None,
+        user=None,
+        cancel_check=None,
+    ):
+        """Return ``(file_path, platform, cached, error_code)``.
+
+        On success ``error_code`` is ``None``. ``file_path`` may be a Telegram
+        ``file_id`` when ``platform`` ends with ``_cache_id``.
+        """
         source = self._source_label(metadata)
         self.db.log_event("download_start", payload={
             "title": metadata.title, "artist": metadata.artist, "source": source,
@@ -44,6 +55,15 @@ class DownloadOrchestrator:
             await admin_logger.log_download_start(
                 bot, user, metadata.title, metadata.artist, source,
             )
+
+        def _cancelled():
+            try:
+                return bool(cancel_check and cancel_check())
+            except Exception:
+                return False
+
+        if _cancelled():
+            return None, None, False, "cancelled"
 
         cached_path = self.cache.get(metadata.title, metadata.artist, source)
         if cached_path:
@@ -72,13 +92,11 @@ class DownloadOrchestrator:
                     await admin_logger.log_cache_hit(
                         bot, user, metadata.title, metadata.artist, source,
                     )
-                return file_id, f"{source}_cache_id", True
+                return file_id, f"{source}_cache_id", True, None
 
             send_copy = os.path.join(self.download_dir, f"{metadata.id}_send.mp3")
             if self.cache.copy_for_send(metadata.title, metadata.artist, source, send_copy):
                 self.music_downloader.sync_metadata_from_file(send_copy, metadata)
-                # Randomize the colorful stroke watermark for every usage,
-                # even when the underlying MP3 is served from cache.
                 try:
                     self.music_downloader.rewatermark_from_file(send_copy)
                 except Exception:
@@ -101,7 +119,10 @@ class DownloadOrchestrator:
                     await admin_logger.log_cache_hit(
                         bot, user, metadata.title, metadata.artist, source,
                     )
-                return send_copy, f"{source}_cache", True
+                return send_copy, f"{source}_cache", True, None
+
+        if _cancelled():
+            return None, None, False, "cancelled"
 
         if (
             progress_reporter
@@ -112,25 +133,40 @@ class DownloadOrchestrator:
                 f"{metadata.title} — {metadata.artist}\nدر حال جستجو و دانلود...",
                 force=True,
             )
-        file_path = await self.music_downloader.download_song(
-            metadata, progress_reporter=progress_reporter,
+        file_path, error_code = await self.music_downloader.download_song(
+            metadata,
+            progress_reporter=progress_reporter,
+            cancel_check=cancel_check,
         )
         platform = "youtube" if file_path else source
 
         if not file_path or not os.path.exists(file_path):
+            code = error_code or "unknown"
             self.db.log_event("download_fail", payload={
-                "title": metadata.title, "artist": metadata.artist, "source": source,
+                "title": metadata.title,
+                "artist": metadata.artist,
+                "source": source,
+                "error_code": code,
             })
             if bot:
                 import admin_logger
                 from cred_status import get_credentials_status
                 _, yt_ok = get_credentials_status()
-                fail_reason = "youtube cookies unavailable" if not yt_ok else None
+                fail_reason = code
+                if code == "bot_check" or not yt_ok:
+                    fail_reason = f"{code}; youtube cookies unavailable" if not yt_ok else code
+                    await admin_logger.maybe_alert_cookie_issue(
+                        bot,
+                        detail=f"download bot_check for {metadata.title!r}",
+                    )
                 await admin_logger.log_download_fail(
                     bot, user, metadata.title, metadata.artist, source,
                     reason=fail_reason,
                 )
-            return None, None, False
+            return None, None, False, code
+
+        if _cancelled():
+            return None, None, False, "cancelled"
 
         if (
             progress_reporter
@@ -170,7 +206,7 @@ class DownloadOrchestrator:
         self.db.log_event("download_success", payload={
             "title": metadata.title, "artist": metadata.artist, "platform": platform,
         })
-        return file_path, platform, False
+        return file_path, platform, False, None
 
     async def _embed_lyrics(self, file_path, metadata):
         try:

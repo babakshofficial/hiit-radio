@@ -116,6 +116,21 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 
 CREATE INDEX IF NOT EXISTS idx_llm_usage_user_time
     ON llm_usage(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS favorites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    artist TEXT,
+    album TEXT,
+    content_key TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id),
+    UNIQUE(user_id, content_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_favorites_user_time
+    ON favorites(user_id, created_at DESC);
 """
 
 EXPORT_EVENT_LIMIT = 10000
@@ -262,6 +277,117 @@ class Database:
                 "SELECT * FROM download_history WHERE id=?", (history_id,)
             ).fetchone()
             return dict(row) if row else None
+
+    # --- Favorites ---
+
+    def add_favorite(self, user_id, title, artist=None, album=None, content_key=None):
+        user_id = str(user_id)
+        title = (title or "").strip()
+        if not title or not content_key:
+            return None
+        now = time.time()
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO favorites (user_id, title, artist, album, content_key, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id, content_key) DO UPDATE SET
+                     title=excluded.title,
+                     artist=excluded.artist,
+                     album=excluded.album,
+                     created_at=excluded.created_at""",
+                (user_id, title, artist, album, content_key, now),
+            )
+            row = conn.execute(
+                "SELECT id FROM favorites WHERE user_id=? AND content_key=?",
+                (user_id, content_key),
+            ).fetchone()
+            return row["id"] if row else None
+
+    def remove_favorite(self, user_id, content_key):
+        user_id = str(user_id)
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM favorites WHERE user_id=? AND content_key=?",
+                (user_id, content_key),
+            )
+            return cur.rowcount > 0
+
+    def is_favorite(self, user_id, content_key):
+        user_id = str(user_id)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM favorites WHERE user_id=? AND content_key=? LIMIT 1",
+                (user_id, content_key),
+            ).fetchone()
+            return bool(row)
+
+    def list_favorites(self, user_id, limit=30):
+        user_id = str(user_id)
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT id, title, artist, album, content_key, created_at
+                   FROM favorites WHERE user_id=?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (user_id, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_favorite_by_id(self, favorite_id, user_id=None):
+        with self._conn() as conn:
+            if user_id is not None:
+                row = conn.execute(
+                    "SELECT * FROM favorites WHERE id=? AND user_id=?",
+                    (favorite_id, str(user_id)),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM favorites WHERE id=?", (favorite_id,)
+                ).fetchone()
+            return dict(row) if row else None
+
+    # --- Charts ---
+
+    def get_top_songs(self, period="week", limit=10):
+        """Top songs from download_history for day|week|all."""
+        now = time.time()
+        if period == "day":
+            cutoff = now - 86400
+        elif period == "all":
+            cutoff = 0
+        else:
+            cutoff = now - 7 * 86400
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT title, artist, COUNT(*) AS cnt
+                   FROM download_history
+                   WHERE created_at >= ? AND title IS NOT NULL AND TRIM(title) != ''
+                   GROUP BY LOWER(TRIM(title)), LOWER(TRIM(COALESCE(artist, '')))
+                   ORDER BY cnt DESC, MAX(created_at) DESC
+                   LIMIT ?""",
+                (cutoff, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_top_artists(self, period="week", limit=10):
+        now = time.time()
+        if period == "day":
+            cutoff = now - 86400
+        elif period == "all":
+            cutoff = 0
+        else:
+            cutoff = now - 7 * 86400
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT artist, COUNT(*) AS cnt
+                   FROM download_history
+                   WHERE created_at >= ?
+                     AND artist IS NOT NULL AND TRIM(artist) != ''
+                   GROUP BY LOWER(TRIM(artist))
+                   ORDER BY cnt DESC, MAX(created_at) DESC
+                   LIMIT ?""",
+                (cutoff, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     # --- Cache index ---
 

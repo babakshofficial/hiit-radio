@@ -57,9 +57,11 @@ def start_text():
         "دستورها:\n"
         "/help — راهنمای استفاده\n"
         "/history — دانلودهای اخیر\n"
+        "/liked — علاقه‌مندی‌ها\n"
+        "/top — محبوب‌ترین آهنگ‌ها\n"
         "/discover — پیشنهاد شخصی\n"
         "/aboutme — درباره ربات و سازنده\n"
-        "/cancel — توقف دانلود پلی‌لیست"
+        "/cancel — توقف کار جاری"
     )
 
 
@@ -70,7 +72,10 @@ def help_text():
         "۲. یا اسم آهنگ و هنرمند رو بنویس\n"
         "۳. یا اینلاین: "
         f"{BOT_INLINE} نام آهنگ — توی هر چتی\n\n"
+        "/liked — آهنگ‌های ذخیره‌شده\n"
+        "/top — جدول محبوب‌ها (day / week / all)\n"
         "/discover — بر اساس تاریخچه‌ات، ۱۰ آهنگ پیشنهاد می‌دم\n"
+        "/cancel — توقف هر کار جاری (دانلود، پیشنهاد، …)\n"
         "/aboutme — درباره ربات و سازنده\n\n"
         "محدودیت: ۱۰ دانلود در ساعت "
         "(هر آهنگ توی پلی‌لیست جدا حساب می‌شه)."
@@ -131,6 +136,14 @@ def discover_preparing():
     return "⏳ دارم برات آهنگ پیشنهاد می‌دم..."
 
 
+def discover_llm_phase():
+    return "در حال فکر کردن روی سلیقه‌ات..."
+
+
+def discover_resolve_phase(done, total):
+    return f"در حال پیدا کردن آهنگ‌ها ({done}/{total})..."
+
+
 def discover_llm_error():
     return "الان نتونستم پیشنهاد بدم — یه کم دیگه دوباره امتحان کن 🙏"
 
@@ -144,11 +157,19 @@ def discover_header():
 
 
 def cancel_ok():
-    return "⏹ درخواست توقف ثبت شد — به زودی متوقف می‌شه."
+    return "⏹ درخواست توقف ثبت شد — کار جاری به زودی متوقف می‌شه."
 
 
 def cancel_no_job():
-    return "الان کار فعالی در حال اجرا نیست."
+    return "الان کار فعالی از طرف تو در حال اجرا نیست."
+
+
+def download_cancelled():
+    return "متوقف شد."
+
+
+def work_cancelled():
+    return "کار لغو شد."
 
 
 def rate_limit(minutes):
@@ -179,12 +200,96 @@ def download_not_found():
     return "نسخه کامل پیدا نشد — شاید با اسم دیگه‌ای جستجو کنی بهتر بشه."
 
 
+def download_fail_bot_check():
+    return (
+        "الان یوتیوب اجازه دانلود نداد — "
+        "یه کم دیگه دوباره امتحان کن یا اسم دیگه‌ای بفرست."
+    )
+
+
+def download_fail_timeout():
+    return "دانلود طول کشید و قطع شد — لطفاً دوباره تلاش کن 🙏"
+
+
+def download_fail_invalid():
+    return "فایل درست دانلود نشد — یه لینک یا اسم دیگه امتحان کن."
+
+
+def download_fail_message(error_code):
+    """Map internal failure codes to non-technical Persian copy."""
+    mapping = {
+        "no_match": download_not_found(),
+        "bot_check": download_fail_bot_check(),
+        "timeout": download_fail_timeout(),
+        "invalid_file": download_fail_invalid(),
+        "cancelled": download_cancelled(),
+        "send_failed": send_failed(),
+        "unknown": download_not_found(),
+    }
+    return mapping.get(error_code or "unknown", download_not_found())
+
+
 def record_not_found():
     return "این مورد توی تاریخچه پیدا نشد."
 
 
 def songs_not_found():
     return "آهنگی پیدا نشد — یه اسم دیگه امتحان کن."
+
+
+def similar_preparing():
+    return "⏳ دارم آهنگ‌های مشابه پیدا می‌کنم..."
+
+
+def similar_llm_phase():
+    return "در حال پیدا کردن آهنگ‌های مشابه..."
+
+
+def similar_resolve_phase(done, total):
+    return f"در حال آماده‌سازی لیست ({done}/{total})..."
+
+
+def similar_header(title, artist):
+    who = f" — {artist}" if artist else ""
+    return f"🎧 مشابه «{title}{who}»:\n"
+
+
+def similar_not_found():
+    return "آهنگ مشابهی پیدا نشد — بعداً دوباره امتحان کن."
+
+
+def liked_empty():
+    return "هنوز چیزی به علاقه‌مندی‌ها اضافه نکردی ❤️"
+
+
+def liked_header():
+    return "❤️ علاقه‌مندی‌هات:\n"
+
+
+def favorite_added(title):
+    return f"به علاقه‌مندی‌ها اضافه شد: {title or UNKNOWN}"
+
+
+def favorite_removed(title):
+    return f"از علاقه‌مندی‌ها حذف شد: {title or UNKNOWN}"
+
+
+def favorite_missing():
+    return "این آهنگ برای علاقه‌مندی پیدا نشد."
+
+
+def top_header(period_label):
+    return f"🏆 محبوب‌ترین‌ها ({period_label}):\n"
+
+
+def top_empty():
+    return "فعلاً آماری برای این بازه نیست."
+
+
+def top_period_label(period):
+    return {"day": "۲۴ ساعت", "week": "هفته", "all": "همه زمان‌ها"}.get(
+        period, "هفته"
+    )
 
 
 def lyrics_not_found():
@@ -287,4 +392,7 @@ def progress_fail(label, reason=""):
 
 
 BTN_MORE_BY_ARTIST = "آهنگ‌های بیشتر"
+BTN_SIMILAR = "آهنگ‌های مشابه"
 BTN_LYRICS = "متن آهنگ"
+BTN_FAVORITE_ADD = "❤️ علاقه‌مندی"
+BTN_FAVORITE_REMOVE = "💔 حذف علاقه‌مندی"

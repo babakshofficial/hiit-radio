@@ -51,19 +51,24 @@ from admin_logger import (
     send_test_message,
     validate_vip_log_channel,
     vip_status_text,
+    report_cookie_health_transition,
+    maybe_alert_cookie_issue,
 )
 import admin_logger
 from progress import ProgressReporter
 from download_orchestrator import DownloadOrchestrator
 from playlist_handler import process_playlist
-from recommendations import recommendation_keyboard, resolve_lyrics_ref
+from recommendations import recommendation_keyboard, resolve_lyrics_ref, resolve_track_ref
 from lyrics_service import fetch_lyrics
 from llm_service import (
     is_configured as llm_configured,
     recommend_songs,
+    recommend_similar,
     get_cached_recommendations,
     set_cached_recommendations,
 )
+from cache_manager import content_key
+from downloader import _cookies_look_authenticated
 import messages as msg
 import reporting as rpt
 
@@ -103,6 +108,60 @@ def _platform_fa(platform):
 
 def _unknown_artist(artist):
     return msg.unknown_artist(artist)
+
+
+def _favorite_content_key(title, artist):
+    return content_key(title, artist, "")
+
+
+def _track_keyboard(user_id, title, artist):
+    favorited = user_manager.is_favorite(
+        user_id, _favorite_content_key(title, artist),
+    )
+    return recommendation_keyboard(artist, title, favorited=favorited)
+
+
+def _start_job(context, kind):
+    context.user_data["active_job"] = {"cancel": False, "kind": kind}
+
+
+def _end_job(context):
+    context.user_data.pop("active_job", None)
+
+
+def _cancel_check(context):
+    return bool(context.user_data.get("active_job", {}).get("cancel"))
+
+
+async def _await_with_progress(coro, reporter, cancel_check, pct_lo, pct_hi, detail):
+    """Await ``coro`` while pulsing a percent progress bar; cancel if requested.
+
+    Returns ``(result, cancelled)``. On cancel, the task is cancelled and
+    ``(None, True)`` is returned.
+    """
+    task = asyncio.create_task(coro)
+    pct = int(pct_lo)
+    hi = max(int(pct_hi) - 1, pct)
+    try:
+        while True:
+            if cancel_check and cancel_check():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                return None, True
+            done, _pending = await asyncio.wait({task}, timeout=2.0)
+            if done:
+                exc = task.exception()
+                if exc:
+                    raise exc
+                return task.result(), False
+            if reporter:
+                pct = min(pct + 3, hi)
+                await reporter.update(pct, detail, force=True)
+    except asyncio.CancelledError:
+        return None, True
 
 
 def _lyrics_from_cache(title, artist):
@@ -309,6 +368,70 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def liked_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    await _touch_user(update)
+    rows = user_manager.list_favorites(update.effective_user.id, limit=30)
+    if not rows:
+        await update.message.reply_text(msg.liked_empty())
+        return
+    lines = [msg.liked_header()]
+    buttons = []
+    for row in rows:
+        artist = row.get("artist") or msg.UNKNOWN
+        lines.append(f"• {row['title']} — {artist}")
+        buttons.append([
+            InlineKeyboardButton(
+                msg.btn_download(row["title"]),
+                callback_data=f"liked:{row['id']}",
+            )
+        ])
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    await _touch_user(update)
+    period = "week"
+    if context.args:
+        arg = (context.args[0] or "").strip().lower()
+        if arg in ("day", "week", "all"):
+            period = arg
+    songs = user_manager.database.get_top_songs(period=period, limit=10)
+    if not songs:
+        await update.message.reply_text(msg.top_empty())
+        return
+    lines = [msg.top_header(msg.top_period_label(period))]
+    buttons = []
+    context.user_data["top_cache"] = {}
+    for i, row in enumerate(songs, 1):
+        title = row.get("title") or msg.UNKNOWN
+        artist = row.get("artist") or msg.UNKNOWN
+        cnt = row.get("cnt") or 0
+        lines.append(f"{i}. {title} — {artist} ({cnt})")
+        meta = TrackMetadata()
+        meta.title = title
+        meta.artist = artist if artist != msg.UNKNOWN else ""
+        meta.id = str(abs(hash(f"{meta.title}{meta.artist}top{i}")))
+        meta.type = "top"
+        context.user_data["top_cache"][str(i)] = meta
+        buttons.append([
+            InlineKeyboardButton(
+                msg.btn_download(title, i),
+                callback_data=f"toppick:{i}",
+            )
+        ])
+    await update.message.reply_text(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
 async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_access(update, context):
         return
@@ -444,7 +567,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job = context.user_data.get("active_job")
     if job:
         job["cancel"] = True
-        await log_system(context.bot, "لغو پلی‌لیست", user=update.effective_user)
+        await log_system(context.bot, "لغو دانلود", user=update.effective_user)
         await update.message.reply_text(msg.cancel_ok())
     else:
         await update.message.reply_text(msg.cancel_no_job())
@@ -546,6 +669,50 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _download_and_send(query.message, update.effective_user, meta, context)
         return
 
+    if data.startswith("liked:"):
+        fav_id = int(data.split(":", 1)[1])
+        row = user_manager.get_favorite_by_id(fav_id, update.effective_user.id)
+        if not row:
+            await query.message.reply_text(msg.favorite_missing())
+            return
+        meta = TrackMetadata()
+        meta.title = row["title"]
+        meta.artist = row.get("artist") or ""
+        meta.album = row.get("album")
+        meta.id = str(abs(hash(f"{meta.title}{meta.artist}liked")))
+        meta.type = "favorite"
+        await _download_and_send(query.message, update.effective_user, meta, context)
+        return
+
+    if data.startswith("fav:add:") or data.startswith("fav:del:"):
+        action, token = data.split(":", 2)[1], data.split(":", 2)[2]
+        ref = resolve_track_ref(token)
+        if not ref:
+            await query.message.reply_text(msg.pick_expired_short())
+            return
+        title, artist = ref
+        key = _favorite_content_key(title, artist)
+        user_id = update.effective_user.id
+        if action == "add":
+            user_manager.add_favorite(user_id, title, artist, content_key=key)
+            await query.message.reply_text(msg.favorite_added(title))
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=_track_keyboard(user_id, title, artist)
+                )
+            except Exception:
+                pass
+        else:
+            user_manager.remove_favorite(user_id, key)
+            await query.message.reply_text(msg.favorite_removed(title))
+            try:
+                await query.edit_message_reply_markup(
+                    reply_markup=_track_keyboard(user_id, title, artist)
+                )
+            except Exception:
+                pass
+        return
+
     if data.startswith("reco:artist:"):
         artist = data.split(":", 2)[2]
         results = await AppleMusicMetadata.search_many(artist, limit=5)
@@ -565,6 +732,33 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             ])
         await query.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+        return
+
+    if data.startswith("reco:similar:"):
+        token = data.split(":", 2)[2]
+        ref = resolve_track_ref(token)
+        if not ref:
+            await query.message.reply_text(msg.pick_expired_short())
+            return
+        title, artist = ref
+        status = await query.message.reply_text(msg.similar_preparing())
+        suggestions = await _resolve_similar_tracks(title, artist, update.effective_user.id)
+        if not suggestions:
+            await status.edit_text(msg.similar_not_found())
+            return
+        lines = [msg.similar_header(title, artist)]
+        buttons = []
+        context.user_data["reco_cache"] = {}
+        for i, meta in enumerate(suggestions, 1):
+            lines.append(f"{i}. {meta.title} — {meta.artist}")
+            context.user_data["reco_cache"][str(i)] = meta
+            buttons.append([
+                InlineKeyboardButton(
+                    _btn_download(meta.title, i),
+                    callback_data=f"searchpick:{i}",
+                )
+            ])
+        await status.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
         return
 
     if data.startswith("reco:lyrics:"):
@@ -597,6 +791,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _download_and_send(query.message, update.effective_user, meta, context)
         return
 
+    if data.startswith("toppick:"):
+        idx = data.split(":", 1)[1]
+        meta = context.user_data.get("top_cache", {}).get(idx)
+        if not meta:
+            await query.message.reply_text(msg.pick_expired_short())
+            return
+        await _download_and_send(query.message, update.effective_user, meta, context)
+        return
+
     if data.startswith("discoverpick:"):
         idx = data.split(":", 1)[1]
         meta = context.user_data.get("discover_cache", {}).get(idx)
@@ -607,6 +810,67 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
+async def _resolve_similar_tracks(title, artist, user_id, limit=8):
+    """Resolve similar track metadata via LLM (preferred) or iTunes fallback."""
+    seed_key = ((title or "").strip().lower(), (artist or "").strip().lower())
+    suggestions = []
+    seen = set()
+
+    async def _append_resolved(rec_title, rec_artist):
+        query = f"{rec_title} {rec_artist}".strip() if rec_artist else rec_title
+        resolved = await AppleMusicMetadata.search_by_query(query)
+        if not resolved or not resolved.title:
+            resolved = await AppleMusicMetadata.search_by_query(rec_title)
+        if not resolved or not resolved.title:
+            return False
+        key = (
+            resolved.title.strip().lower(),
+            (resolved.artist or "").strip().lower(),
+        )
+        if key == seed_key or key in seen:
+            return False
+        seen.add(key)
+        suggestions.append(TrackMetadata()._copy_from(resolved))
+        return True
+
+    recs = None
+    if llm_configured():
+        recs, usage = await recommend_similar(title, artist, limit=limit)
+        user_manager.database.log_llm_usage(
+            user_id,
+            model=usage.get("model"),
+            prompt_tokens=usage.get("prompt_tokens", 0),
+            completion_tokens=usage.get("completion_tokens", 0),
+            total_tokens=usage.get("total_tokens", 0),
+            cached=False,
+            success=bool(usage.get("success") and recs is not None),
+            recommendations_count=usage.get("recommendations_count", 0),
+        )
+        for rec in recs or []:
+            if len(suggestions) >= limit:
+                break
+            await _append_resolved(rec.get("title", ""), rec.get("artist", ""))
+
+    if len(suggestions) < 3:
+        queries = []
+        if artist:
+            queries.append(artist)
+        if title and artist:
+            queries.append(f"{title} {artist}")
+        if title:
+            queries.append(title)
+        for q in queries:
+            results = await AppleMusicMetadata.search_many(q, limit=limit)
+            for r in results or []:
+                if len(suggestions) >= limit:
+                    break
+                await _append_resolved(r.title, r.artist)
+            if len(suggestions) >= limit:
+                break
+
+    return suggestions[:limit]
+
+
 async def _download_and_send(message, user, metadata, context):
     user_id = user.id
     allowed, wait_time = user_manager.check_rate_limit(user_id)
@@ -615,6 +879,7 @@ async def _download_and_send(message, user, metadata, context):
         await message.reply_text(msg.rate_limit(wait_time // 60))
         return
 
+    context.user_data["active_job"] = {"cancel": False, "kind": "track"}
     status = await message.reply_text(msg.downloading())
     reporter = ProgressReporter(
         status,
@@ -626,26 +891,37 @@ async def _download_and_send(message, user, metadata, context):
     )
     await reporter.update(10, f"{metadata.title} — {_unknown_artist(metadata.artist)}")
 
-    file_path, platform, cached = await orchestrator.get_or_download(
-        metadata, reporter, bot=context.bot, user=user,
-    )
-    if not file_path:
-        await reporter.fail(msg.download_not_found())
-        await log_error(
-            context.bot, user, "Download failed",
-            _vip_failure_detail(metadata.title),
-        )
-        return
-    if not (platform and str(platform).endswith("_cache_id")) and not os.path.exists(file_path):
-        await reporter.fail(msg.download_not_found())
-        await log_error(
-            context.bot, user, "Download failed",
-            _vip_failure_detail(metadata.title),
-        )
-        return
-
+    file_path = None
+    platform = None
+    cached = False
+    error_code = None
     try:
-        kb = recommendation_keyboard(metadata.artist, metadata.title)
+        file_path, platform, cached, error_code = await orchestrator.get_or_download(
+            metadata,
+            reporter,
+            bot=context.bot,
+            user=user,
+            cancel_check=lambda: _cancel_check(context),
+        )
+        if _cancel_check(context):
+            await reporter.fail(msg.download_cancelled())
+            return
+        if not file_path:
+            await reporter.fail(msg.download_fail_message(error_code))
+            await log_error(
+                context.bot, user, f"Download failed ({error_code})",
+                _vip_failure_detail(metadata.title),
+            )
+            return
+        if not (platform and str(platform).endswith("_cache_id")) and not os.path.exists(file_path):
+            await reporter.fail(msg.download_fail_message(error_code or "invalid_file"))
+            await log_error(
+                context.bot, user, "Download failed",
+                _vip_failure_detail(metadata.title),
+            )
+            return
+
+        kb = _track_keyboard(user_id, metadata.title, metadata.artist)
         await reporter.update(95, "در حال ارسال به تلگرام...", force=True)
         sent = await _send_track_audio(
             message, metadata, file_path, platform, reply_markup=kb,
@@ -659,8 +935,13 @@ async def _download_and_send(message, user, metadata, context):
         await status.delete()
     except Exception as e:
         logger.error(f"Send failed: {e}")
-        await status.edit_text(msg.send_failed())
+        try:
+            await status.edit_text(msg.send_failed())
+        except Exception:
+            pass
+        await log_error(context.bot, user, "Send failed", str(e))
     finally:
+        context.user_data.pop("active_job", None)
         await orchestrator.cleanup(file_path)
 
 
@@ -691,10 +972,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg.rate_limit(wait_time // 60))
         return
 
+    context.user_data["active_job"] = {"cancel": False, "kind": "track"}
     status_message = await update.message.reply_text(msg.searching())
     metadata = await TrackMetadata.create(text)
 
     if not metadata.title:
+        context.user_data.pop("active_job", None)
         await status_message.edit_text(msg.metadata_not_found())
         await log_error(context.bot, user, "Metadata not found", text)
         return
@@ -709,43 +992,111 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await reporter.update(10, f"{metadata.title} — {_unknown_artist(metadata.artist)}")
 
-    file_path, platform, cached = await orchestrator.get_or_download(
-        metadata, reporter, bot=context.bot, user=user,
-    )
-
-    is_file_id = bool(platform and str(platform).endswith("_cache_id"))
-    if file_path and (is_file_id or os.path.exists(file_path)):
-        try:
-            kb = recommendation_keyboard(metadata.artist, metadata.title)
-            await reporter.update(95, "در حال ارسال به تلگرام...", force=True)
-            sent = await _send_track_audio(
-                update.message, metadata, file_path, platform, reply_markup=kb,
-            )
-            _store_audio_file_id(metadata, platform, sent)
-            user_manager.record_download(
-                user_id, metadata.title, metadata.artist, platform,
-                metadata.url, metadata.album, cached=cached,
-            )
-            await log_download(
-                context.bot, user, metadata.title, metadata.artist, platform, cached=cached,
-            )
-            await status_message.delete()
-        except Exception as e:
-            logger.error(f"Send failed: {e}")
-            await status_message.edit_text(msg.send_failed())
-            await log_error(context.bot, user, "Send failed", str(e))
-        await orchestrator.cleanup(file_path)
-    else:
-        await reporter.fail(msg.download_not_found())
-        await log_error(
-            context.bot, user, "No full track found",
-            _vip_failure_detail(text),
+    file_path = None
+    try:
+        file_path, platform, cached, error_code = await orchestrator.get_or_download(
+            metadata,
+            reporter,
+            bot=context.bot,
+            user=user,
+            cancel_check=lambda: _cancel_check(context),
         )
+
+        if _cancel_check(context):
+            await reporter.fail(msg.download_cancelled())
+            return
+
+        is_file_id = bool(platform and str(platform).endswith("_cache_id"))
+        if file_path and (is_file_id or os.path.exists(file_path)):
+            try:
+                kb = _track_keyboard(user_id, metadata.title, metadata.artist)
+                await reporter.update(95, "در حال ارسال به تلگرام...", force=True)
+                sent = await _send_track_audio(
+                    update.message, metadata, file_path, platform, reply_markup=kb,
+                )
+                _store_audio_file_id(metadata, platform, sent)
+                user_manager.record_download(
+                    user_id, metadata.title, metadata.artist, platform,
+                    metadata.url, metadata.album, cached=cached,
+                )
+                await log_download(
+                    context.bot, user, metadata.title, metadata.artist, platform, cached=cached,
+                )
+                await status_message.delete()
+            except Exception as e:
+                logger.error(f"Send failed: {e}")
+                await status_message.edit_text(msg.send_failed())
+                await log_error(context.bot, user, "Send failed", str(e))
+        else:
+            await reporter.fail(msg.download_fail_message(error_code))
+            await log_error(
+                context.bot, user, f"No full track found ({error_code})",
+                _vip_failure_detail(text),
+            )
+    finally:
+        context.user_data.pop("active_job", None)
+        await orchestrator.cleanup(file_path)
 
 
 async def _cache_sweep_job(context: ContextTypes.DEFAULT_TYPE):
     removed = orchestrator.sweep_cache()
     await log_system(context.bot, "پاکسازی کش", removed=removed)
+
+
+async def _cookie_health_job(context: ContextTypes.DEFAULT_TYPE):
+    await _check_and_report_cookie_health(context.bot)
+
+
+async def _check_and_report_cookie_health(bot):
+    cookies_path = downloader.cookies_path
+    path_exists = os.path.exists(cookies_path)
+    healthy = path_exists and _cookies_look_authenticated(cookies_path)
+    if healthy:
+        detail = f"cookies.txt OK ({cookies_path})"
+    elif path_exists:
+        detail = (
+            f"cookies.txt incomplete/empty session cookies at {cookies_path}. "
+            "Re-export while signed into youtube.com (need non-empty SID/__Secure-*PSID)."
+        )
+    else:
+        detail = f"cookies.txt missing at {cookies_path}"
+    await report_cookie_health_transition(bot, healthy, detail=detail)
+    if not healthy:
+        await maybe_alert_cookie_issue(bot, detail=detail)
+
+
+async def _cache_sweep_fallback_loop(bot):
+    while True:
+        removed = orchestrator.sweep_cache()
+        await log_system(bot, "پاکسازی کش (fallback)", removed=removed)
+        await _check_and_report_cookie_health(bot)
+        await asyncio.sleep(3600)
+
+
+async def _on_startup(application):
+    gate_ok = await validate_channel_gate(application.bot)
+    vip_ok = await validate_vip_log_channel(application.bot)
+    _, yt_ok = get_credentials_status()
+    if not vip_ok:
+        await notify_admin_vip_issue(
+            application.bot,
+            "⚠️ لاگ VIP کار نمی‌کند.\n"
+            "ربات را ادمین کانال خصوصی کن، VIP_LOG_CHANNEL_ID را در .env بگذار، "
+            "و /viplogtest را بزن.",
+        )
+    await log_startup(application.bot, gate_ok, vip_ok, yt_ok)
+    removed = orchestrator.sweep_cache()
+    await log_system(application.bot, "پاکسازی کش (startup)", removed=removed)
+    await _check_and_report_cookie_health(application.bot)
+    if application.job_queue:
+        application.job_queue.run_repeating(_cache_sweep_job, interval=3600, first=60)
+        application.job_queue.run_repeating(_cookie_health_job, interval=3600, first=120)
+        return
+    logger.warning(
+        "JobQueue unavailable; using asyncio fallback for cache sweep. "
+        'Install with: pip install "python-telegram-bot[job-queue]"'
+    )
+    asyncio.create_task(_cache_sweep_fallback_loop(application.bot))
 
 
 async def _send_report(message, text, reply_markup=None, edit=False):
@@ -974,39 +1325,6 @@ async def vip_update_logger(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def _cache_sweep_fallback_loop(bot):
-    """Hourly cache sweep when PTB JobQueue is unavailable."""
-    await asyncio.sleep(60)
-    while True:
-        removed = orchestrator.sweep_cache()
-        await log_system(bot, "پاکسازی کش (fallback)", removed=removed)
-        await asyncio.sleep(3600)
-
-
-async def _on_startup(application):
-    gate_ok = await validate_channel_gate(application.bot)
-    vip_ok = await validate_vip_log_channel(application.bot)
-    _, yt_ok = get_credentials_status()
-    if not vip_ok:
-        await notify_admin_vip_issue(
-            application.bot,
-            "⚠️ لاگ VIP کار نمی‌کند.\n"
-            "ربات را ادمین کانال خصوصی کن، VIP_LOG_CHANNEL_ID را در .env بگذار، "
-            "و /viplogtest را بزن.",
-        )
-    await log_startup(application.bot, gate_ok, vip_ok, yt_ok)
-    removed = orchestrator.sweep_cache()
-    await log_system(application.bot, "پاکسازی کش (startup)", removed=removed)
-    if application.job_queue:
-        application.job_queue.run_repeating(_cache_sweep_job, interval=3600, first=60)
-        return
-    logger.warning(
-        "JobQueue unavailable; using asyncio fallback for cache sweep. "
-        'Install with: pip install "python-telegram-bot[job-queue]"'
-    )
-    asyncio.create_task(_cache_sweep_fallback_loop(application.bot))
-
-
 async def _on_shutdown(application):
     await log_shutdown(application.bot)
 
@@ -1059,6 +1377,8 @@ def main():
     application.add_handler(CommandHandler("user", user_command))
     application.add_handler(CommandHandler("export", export_command))
     application.add_handler(CommandHandler("history", history_command))
+    application.add_handler(CommandHandler("liked", liked_command))
+    application.add_handler(CommandHandler("top", top_command))
     application.add_handler(CommandHandler("discover", discover_command))
     application.add_handler(CommandHandler("aboutme", aboutme_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))

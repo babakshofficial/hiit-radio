@@ -314,11 +314,15 @@ class MusicDownloader:
             ydl_opts['progress_hooks'] = list(progress_hooks)
         return self._apply_auth(ydl_opts)
 
-    async def download_song(self, metadata, progress_reporter=None):
+    async def download_song(self, metadata, progress_reporter=None, cancel_check=None):
         """Download song with multi-candidate search and multi-layer validation.
 
         Flat YouTube searches score candidates on title + artist + duration/topic
         signals, then a single best URL is downloaded.
+
+        Returns ``(file_path, error_code)``. On success ``error_code`` is ``None``.
+        Failure codes: ``no_match``, ``bot_check``, ``timeout``, ``invalid_file``,
+        ``cancelled``, ``unknown``.
         """
 
         MATCH_THRESHOLD = 65.0
@@ -326,6 +330,20 @@ class MusicDownloader:
         EARLY_ACCEPT = 80.0
         QUERY_COVERAGE_MIN = 55.0
         RESULTS_PER_QUERY = 8
+
+        def _is_cancelled():
+            try:
+                return bool(cancel_check and cancel_check())
+            except Exception:
+                return False
+
+        def _classify_error(err):
+            text = str(err or "").lower()
+            if "confirm you're not a bot" in text or "sign in to confirm" in text:
+                return "bot_check"
+            if "timed out" in text or "timeout" in text:
+                return "timeout"
+            return "unknown"
 
         original_query = (
             (getattr(metadata, "search_query", None) or "")
@@ -503,6 +521,8 @@ class MusicDownloader:
             n = max(len(strategies), 1)
             with yt_dlp.YoutubeDL(search_opts) as ydl:
                 for strategy_idx, search_query in enumerate(strategies):
+                    if _is_cancelled():
+                        return None, False, True
                     pct = pct_start + int((pct_end - pct_start) * (strategy_idx / n))
                     await _report(
                         pct,
@@ -589,18 +609,32 @@ class MusicDownloader:
                     "YouTube bot-check blocked all strategies — falling through to SoundCloud. "
                     "Fix cookies to restore YouTube downloads."
                 )
-            return best_local
+            return best_local, bot_blocked, False
+
+        if _is_cancelled():
+            return None, "cancelled"
 
         await _report(18, f"{metadata.title} — {metadata.artist}\nدر حال جستجو در یوتیوب...")
-        yt_best = await gather_best("ytsearch", "YouTube", yt_search_strategies, 20, 38)
+        yt_best, yt_bot_blocked, cancelled = await gather_best(
+            "ytsearch", "YouTube", yt_search_strategies, 20, 38
+        )
+        if cancelled or _is_cancelled():
+            return None, "cancelled"
         sc_best = None
+        sc_bot_blocked = False
         best = yt_best
+        saw_bot_check = yt_bot_blocked
         if not best or best[0] < MATCH_THRESHOLD:
             yt_txt = f"{best[0]:.1f}%" if best else "n/a"
             logger.warning(f"No valid YouTube match (best eligible: {yt_txt}) — trying SoundCloud fallback")
             await _report(40, f"{metadata.title} — {metadata.artist}\nجستجو در ساندکلاود...")
-            sc_best = await gather_best("scsearch", "SoundCloud", sc_search_strategies, 40, 48)
+            sc_best, sc_bot_blocked, cancelled = await gather_best(
+                "scsearch", "SoundCloud", sc_search_strategies, 40, 48
+            )
+            if cancelled or _is_cancelled():
+                return None, "cancelled"
             best = sc_best
+            saw_bot_check = saw_bot_check or sc_bot_blocked
 
         if not best or best[0] < MATCH_THRESHOLD:
             score_txt = f"{best[0]:.1f}%" if best else "n/a"
@@ -608,7 +642,7 @@ class MusicDownloader:
                 f"No candidate passed validation on any source (title >= {TITLE_THRESHOLD:.0f}% and "
                 f"combined >= {MATCH_THRESHOLD:.0f}%). Best eligible: {score_txt}"
             )
-            return None
+            return None, ("bot_check" if saw_bot_check else "no_match")
 
         def _source_label_for(video):
             extractor = (video.get("extractor") or "").lower()
@@ -640,7 +674,9 @@ class MusicDownloader:
             url = _candidate_url(video, source_label)
             if not url:
                 logger.error(f"Best {source_label} match has no downloadable URL")
-                return None, None
+                return None, None, "no_match"
+            if _is_cancelled():
+                return None, None, "cancelled"
             logger.info(
                 f"Best {source_label} match {score:.1f}% — '{video.get('title', '')}' — downloading"
             )
@@ -654,6 +690,9 @@ class MusicDownloader:
                 video = await self._hydrate_video_info(url, video, loop)
             else:
                 await _report(50, f"{metadata.title} — {metadata.artist}\nشروع دانلود...")
+
+            if _is_cancelled():
+                return None, None, "cancelled"
 
             download_pct["value"] = 0.0
             ydl_opts = self._build_ydl_opts(output_template, progress_hooks=[_yt_hook])
@@ -674,8 +713,9 @@ class MusicDownloader:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     await loop.run_in_executor(None, ydl.download, [url])
             except Exception as e:
+                code = _classify_error(e)
                 logger.error(f"Download of {source_label} match failed: {e}", exc_info=True)
-                return None, None
+                return None, None, code
             finally:
                 heartbeat.cancel()
                 try:
@@ -686,29 +726,42 @@ class MusicDownloader:
             path = os.path.join(self.download_dir, f"{metadata.id}.mp3")
             if not os.path.exists(path):
                 logger.warning(f"{source_label} download completed but output file not found")
-                return None, None
-            return path, video
+                return None, None, "invalid_file"
+            return path, video, None
+
+        if _is_cancelled():
+            return None, "cancelled"
 
         best_score, best_video = best
-        file_path, best_video = await _download_candidate(best)
+        file_path, best_video, dl_err = await _download_candidate(best)
         used_youtube = _source_label_for(best[1]) == "YouTube"
+        last_err = dl_err
 
         # YouTube often finds a match then fails at download (bot-check / expired cookies).
         # Fall through to SoundCloud instead of giving up.
-        if not file_path and used_youtube:
+        if not file_path and used_youtube and not _is_cancelled():
             if sc_best is None:
                 await _report(40, f"{metadata.title} — {metadata.artist}\nجستجو در ساندکلاود...")
-                sc_best = await gather_best("scsearch", "SoundCloud", sc_search_strategies, 40, 48)
+                sc_best, sc_bot_blocked, cancelled = await gather_best(
+                    "scsearch", "SoundCloud", sc_search_strategies, 40, 48
+                )
+                if cancelled:
+                    return None, "cancelled"
+                saw_bot_check = saw_bot_check or sc_bot_blocked
             if sc_best and sc_best[0] >= MATCH_THRESHOLD:
                 logger.warning(
                     f"YouTube download failed — retrying with SoundCloud "
                     f"(score {sc_best[0]:.1f}%)"
                 )
                 best_score, best_video = sc_best
-                file_path, best_video = await _download_candidate(sc_best)
+                file_path, best_video, dl_err = await _download_candidate(sc_best)
+                last_err = dl_err or last_err
+
+        if _is_cancelled():
+            return None, "cancelled"
 
         if not file_path:
-            return None
+            return None, last_err or ("bot_check" if saw_bot_check else "no_match")
 
         try:
             audio_file = MutagenMP3(file_path)
@@ -716,7 +769,7 @@ class MusicDownloader:
             if duration < 60 or duration > 600:
                 logger.warning(f"Invalid duration ({duration:.1f}s) - likely wrong track")
                 os.remove(file_path)
-                return None
+                return None, "invalid_file"
             if duration < 90 or duration > 420:
                 logger.warning(f"Unusual duration ({duration:.1f}s) - proceeding anyway")
         except Exception as e:
@@ -726,13 +779,13 @@ class MusicDownloader:
         if file_size < 1_000_000:
             logger.warning(f"File too small ({file_size/1024:.0f}KB) - likely wrong track")
             os.remove(file_path)
-            return None
+            return None, "invalid_file"
 
         logger.info(f"Download successful (match {best_score:.1f}%)")
         await _report(82, f"{metadata.title} — {metadata.artist}\nبرچسب‌گذاری و کاور...")
         self._enrich_metadata_from_source(metadata, best_video)
         self._apply_metadata(file_path, metadata)
-        return file_path
+        return file_path, None
 
     async def _hydrate_video_info(self, download_url, flat_video, loop):
         """Replace flat-search stub with full metadata (title, uploader, thumbnail)."""

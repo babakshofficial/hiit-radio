@@ -3,6 +3,7 @@
 import logging
 import os
 
+from cache_manager import content_key
 from messages import (
     playlist_cancelled,
     playlist_empty,
@@ -67,19 +68,31 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
             bot, user, i, total, track.title, track.artist, "در حال دانلود",
         )
 
-        file_path, platform, cached = await orchestrator.get_or_download(
+        file_path, platform, cached, error_code = await orchestrator.get_or_download(
             track, reporter, bot=bot, user=user,
+            cancel_check=lambda: context.user_data.get("active_job", {}).get("cancel"),
         )
         is_file_id = bool(platform and str(platform).endswith("_cache_id"))
         if not file_path or (not is_file_id and not os.path.exists(file_path)):
             failed += 1
             await admin_logger.log_playlist_track(
-                bot, user, i, total, track.title, track.artist, "ناموفق",
+                bot, user, i, total, track.title, track.artist,
+                f"ناموفق ({error_code or 'unknown'})",
             )
             continue
 
+        if context.user_data.get("active_job", {}).get("cancel"):
+            cancelled = True
+            stop_reason = "لغو توسط کاربر"
+            await reporter.fail(playlist_cancelled(sent, total))
+            await orchestrator.cleanup(file_path)
+            break
+
         try:
-            kb = recommendation_keyboard(track.artist, track.title)
+            favorited = user_manager.is_favorite(
+                user_id, content_key(track.title, track.artist, ""),
+            )
+            kb = recommendation_keyboard(track.artist, track.title, favorited=favorited)
             send_kwargs = dict(
                 title=track.title,
                 performer=track.artist,

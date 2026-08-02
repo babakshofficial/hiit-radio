@@ -16,8 +16,11 @@ The user interface is in **Persian (Farsi)**. Admin tooling and this documentati
 ### User experience
 - Inline mode — search from any chat (`@YourBot song name`)
 - Download history — `/history` with one-tap re-download buttons
-- Recommendations — “More by artist” / “Similar songs” after each track
+- Favorites — ❤️ button after download; browse with `/liked`
+- Charts — `/top` (`day` / `week` / `all`) from bot download stats
+- Recommendations — “More by artist”, “Similar songs”, and lyrics after each track
 - Discovery — `/discover` personalized picks via LLM from your download history
+- Cancel — `/cancel` stops the current single-track or playlist download
 - Rate limiting — 10 downloads per hour per user (each playlist track counts separately)
 - File cache — repeated requests served from disk without re-downloading
 

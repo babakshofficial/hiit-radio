@@ -43,6 +43,12 @@ def _enabled():
     return bool(_vip_channel_id())
 
 
+# Debounce VIP cookie alerts (seconds).
+_COOKIE_ALERT_COOLDOWN = 30 * 60
+_last_cookie_alert_at = 0.0
+_last_cookie_health = None  # None | True | False
+
+
 def _ts():
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -346,3 +352,40 @@ async def log_broadcast(bot, admin_user, sent, failed):
     await log_vip(bot, "پیام همگانی", user=admin_user, **{
         "ارسال": sent, "ناموفق": failed,
     })
+
+
+async def log_cookie_health(bot, healthy, detail=None):
+    fields = {"وضعیت": "سالم" if healthy else "ناسالم"}
+    if detail:
+        fields["جزئیات"] = str(detail)[:400]
+    await log_vip(bot, "سلامت کوکی یوتیوب", **fields)
+
+
+async def maybe_alert_cookie_issue(bot, detail=None, force=False):
+    """Rate-limited VIP alert when YouTube cookies look broken / bot-check hits."""
+    import time
+
+    global _last_cookie_alert_at
+    now = time.time()
+    if not force and (now - _last_cookie_alert_at) < _COOKIE_ALERT_COOLDOWN:
+        return False
+    _last_cookie_alert_at = now
+    await log_cookie_health(
+        bot,
+        healthy=False,
+        detail=detail or (
+            "کوکی یوتیوب نامعتبر یا منقضی است. cookies.txt را با نشست لاگین‌شده تازه "
+            "اکسپورت کن (SID / __Secure-*PSID غیرخالی)."
+        ),
+    )
+    return True
+
+
+async def report_cookie_health_transition(bot, healthy, detail=None):
+    """VIP notify only when cookie health state changes (or first check)."""
+    global _last_cookie_health
+    if _last_cookie_health is healthy:
+        return False
+    _last_cookie_health = healthy
+    await log_cookie_health(bot, healthy, detail=detail)
+    return True
