@@ -5,7 +5,6 @@ import logging
 import asyncio
 import json
 import difflib
-import random
 from mutagen.mp3 import MP3 as MutagenMP3
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC, USLT, SYLT, TXXX
 import requests
@@ -204,12 +203,7 @@ class MusicDownloader:
             self._logo_base = None
 
     def _make_dynamic_logo(self):
-        """Return logo with a light Google-colored outline around letter edges.
-
-        Thin outer rim following the glyph silhouette, colored with discrete
-        Google brand colors (blue/red/yellow/green). Palette rotation is random
-        per download so each watermark looks slightly different.
-        """
+        """Return logo with a thin white outline around letter edges."""
         if self._logo_base is None:
             return None
         logo = self._logo_base.copy().convert("RGBA")
@@ -217,42 +211,16 @@ class MusicDownloader:
         if w <= 0 or h <= 0:
             return None
 
-        rng = random.Random(int.from_bytes(os.urandom(4), "little", signed=False))
-        # Order chosen so neighbors blend without muddy purple.
-        google_colors = [
-            (66, 133, 244),   # blue
-            (52, 168, 83),    # green
-            (251, 188, 5),    # yellow
-            (234, 67, 53),    # red
-        ]
-        shift = rng.randint(0, len(google_colors) - 1)
-        stops = google_colors[shift:] + google_colors[:shift]
-
         alpha = logo.getchannel("A")
-        # Thin outer rim only.
+        # Thin outer rim following the glyph silhouette.
         expanded = alpha.filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.MaxFilter(3))
         ring = ImageChops.subtract(expanded, alpha)
         ring = ring.point(lambda v: 255 if v >= 40 else 0)
 
-        phase = rng.random()
-        axis = rng.choice(("x", "y"))
-        opacity = rng.randint(180, 230)
-        n = len(stops)
-
-        color_img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        ring_px = ring.load()
-        out_px = color_img.load()
-        for y in range(h):
-            for x in range(w):
-                if ring_px[x, y] < 40:
-                    continue
-                t = ((y if axis == "y" else x) / max((h if axis == "y" else w) - 1, 1)) + phase
-                idx = int((t % 1.0) * n) % n
-                r, g, b = stops[idx]
-                out_px[x, y] = (r, g, b, opacity)
-
-        color_img = color_img.filter(ImageFilter.GaussianBlur(radius=0.45))
-        return Image.alpha_composite(color_img, logo)
+        stroke = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        stroke.paste((255, 255, 255, 220), mask=ring)
+        stroke = stroke.filter(ImageFilter.GaussianBlur(radius=0.45))
+        return Image.alpha_composite(stroke, logo)
 
     def _apply_auth(self, ydl_opts):
         """Attach cookies to yt-dlp options."""
