@@ -70,6 +70,7 @@ from llm_service import (
 )
 from cache_manager import content_key
 from downloader import cookie_jar_status
+from preview import PreviewSender
 import jobs
 import messages as msg
 import reporting as rpt
@@ -1074,6 +1075,9 @@ async def _download_and_send(message, user, metadata, context):
     )
     await reporter.update(10, f"{metadata.title} — {_unknown_artist(metadata.artist)}")
 
+    preview = PreviewSender(message, metadata)
+    preview.start()
+
     file_path = None
     platform = None
     cached = False
@@ -1116,6 +1120,7 @@ async def _download_and_send(message, user, metadata, context):
         )
         await log_download(context.bot, user, metadata.title, metadata.artist, platform, cached=cached)
         await status.delete()
+        await preview.finish(delete=True)
     except Exception as e:
         logger.error(f"Send failed: {e}")
         try:
@@ -1124,6 +1129,7 @@ async def _download_and_send(message, user, metadata, context):
             pass
         await log_error(context.bot, user, "Send failed", str(e))
     finally:
+        await preview.finish(delete=False)
         _end_job(context, job)
         await orchestrator.cleanup(file_path)
 
@@ -1180,6 +1186,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await reporter.update(10, f"{metadata.title} — {_unknown_artist(metadata.artist)}")
 
+    preview = PreviewSender(update.message, metadata)
+    preview.start()
+
     file_path = None
     try:
         file_path, platform, cached, error_code = await orchestrator.get_or_download(
@@ -1211,6 +1220,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     context.bot, user, metadata.title, metadata.artist, platform, cached=cached,
                 )
                 await status_message.delete()
+                await preview.finish(delete=True)
             except Exception as e:
                 logger.error(f"Send failed: {e}")
                 await status_message.edit_text(msg.send_failed())
@@ -1222,6 +1232,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 _vip_failure_detail(text),
             )
     finally:
+        await preview.finish(delete=False)
         _end_job(context, job)
         await orchestrator.cleanup(file_path)
 

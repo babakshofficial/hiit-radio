@@ -22,6 +22,7 @@ The user interface is in **Persian (Farsi)**. Admin tooling and this documentati
 - Discovery — `/discover` personalized picks via LLM from your download history
 - Cancel — `/cancel` stops every background job the user has running (downloads, playlists, LLM calls)
 - Rate limiting — 10 downloads per hour per user (each playlist track counts separately)
+- Instant preview — if the full download takes more than a few seconds, a 30s voice note plays while you wait
 - File cache — repeated requests served from disk without re-downloading
 
 ### Access & admin
@@ -73,6 +74,7 @@ All settings live in `.env`. See `.env.example` for the full list.
 | `DATABASE_PATH` | SQLite database file (default: `hiit_radio.db`) |
 | `CACHE_DIR` / `CACHE_TTL_HOURS` | On-disk download cache |
 | `MAX_ACTIVE_JOBS` | Concurrent background jobs allowed per user (default: 3) |
+| `PREVIEW_ENABLED` / `PREVIEW_DELAY_SEC` | 30s preview voice note while a full track downloads |
 | `TG_*_TIMEOUT` | Telegram API/upload timeouts for slow VPS links |
 | `YTDLP_COOKIES_FROM_BROWSER` | e.g. `chrome` — read live browser cookies |
 | `YTDLP_COOKIES` | Path to exported `cookies.txt` |
@@ -244,6 +246,7 @@ Users only see simple result messages. Technical details (credential status, bac
 | `jobs.py` | Per-user registry of cancellable background work |
 | `admin_logger.py` | VIP channel activity logging |
 | `progress.py` | Throttled in-chat progress updates |
+| `preview.py` | Delayed 30s preview voice notes during slow downloads |
 | `recommendations.py` | Post-download inline keyboard |
 | `llm_service.py` | LLM recommendations for `/discover` |
 | `reporting.py` | Admin report formatters and pagination keyboards |

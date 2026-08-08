@@ -173,6 +173,17 @@ def too_many_jobs(limit):
     )
 
 
+def preview_caption(title="", artist=""):
+    line = "🎧 پیش‌نمایش ۳۰ ثانیه‌ای — نسخه کامل داره آماده می‌شه…"
+    title = (title or "").strip()
+    artist = (artist or "").strip()
+    if title and artist:
+        return f"{line}\n{title} — {artist}"
+    if title:
+        return f"{line}\n{title}"
+    return line
+
+
 def download_cancelled():
     return "متوقف شد."
 
