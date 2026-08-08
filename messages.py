@@ -156,12 +156,21 @@ def discover_header():
     return "🎧 پیشنهاد برای تو:\n"
 
 
-def cancel_ok():
+def cancel_ok(count=1):
+    if count > 1:
+        return f"⏹ درخواست توقف برای {count} کار ثبت شد — به زودی متوقف می‌شن."
     return "⏹ درخواست توقف ثبت شد — کار جاری به زودی متوقف می‌شه."
 
 
 def cancel_no_job():
     return "الان کار فعالی از طرف تو در حال اجرا نیست."
+
+
+def too_many_jobs(limit):
+    return (
+        f"همزمان بیشتر از {limit} کار نمی‌تونی اجرا کنی.\n"
+        "صبر کن تموم بشه یا با /cancel متوقفش کن."
+    )
 
 
 def download_cancelled():
@@ -389,6 +398,43 @@ def progress_fail(label, reason=""):
     if reason:
         text += f"\n{reason}"
     return text
+
+
+def cookies_status(ok, detail, path, updated=None):
+    """Admin-facing cookie jar health report."""
+    lines = [
+        "🍪 وضعیت کوکی یوتیوب",
+        f"وضعیت: {'سالم' if ok else 'ناسالم'}",
+        f"جزئیات: {detail}",
+        f"مسیر: {path}",
+    ]
+    if updated:
+        lines.append(f"آخرین به‌روزرسانی: {updated}")
+    lines.append("")
+    lines.append(
+        "برای به‌روزرسانی، فایل cookies.txt رو (خروجی Netscape از مرورگری که "
+        "توی youtube.com لاگین هستی) همین‌جا به‌صورت فایل بفرست."
+    )
+    return "\n".join(lines)
+
+
+def cookies_accepted(detail, backed_up):
+    text = f"✅ cookies.txt به‌روزرسانی شد.\nجزئیات: {detail}"
+    if backed_up:
+        text += "\nنسخه قبلی در cookies.txt.bak ذخیره شد."
+    return text
+
+
+def cookies_rejected(detail):
+    return (
+        "❌ این فایل کوکی معتبر نیست و ذخیره نشد.\n"
+        f"جزئیات: {detail}\n\n"
+        "دوباره در حالی که توی youtube.com لاگین هستی خروجی Netscape بگیر."
+    )
+
+
+def cookies_too_large(limit_kb):
+    return f"❌ فایل خیلی بزرگه (بیشتر از {limit_kb} کیلوبایت)."
 
 
 BTN_MORE_BY_ARTIST = "آهنگ‌های بیشتر"

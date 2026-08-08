@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -68,7 +69,8 @@ from llm_service import (
     set_cached_recommendations,
 )
 from cache_manager import content_key
-from downloader import _cookies_look_authenticated
+from downloader import cookie_jar_status
+import jobs
 import messages as msg
 import reporting as rpt
 
@@ -82,7 +84,7 @@ TG_POOL_TIMEOUT = float(os.getenv("TG_POOL_TIMEOUT", "30"))
 
 _ADMIN_COMMANDS = {
     "/stats", "/analytics", "/creds", "/channelid", "/viplogtest",
-    "/broadcast", "/report", "/users", "/user", "/export",
+    "/broadcast", "/report", "/users", "/user", "/export", "/cookies",
 }
 
 logging.basicConfig(
@@ -122,15 +124,23 @@ def _track_keyboard(user_id, title, artist):
 
 
 def _start_job(context, kind):
-    context.user_data["active_job"] = {"cancel": False, "kind": kind}
+    return jobs.start(context, kind)
 
 
-def _end_job(context):
-    context.user_data.pop("active_job", None)
+def _end_job(context, job):
+    jobs.end(context, job)
 
 
-def _cancel_check(context):
-    return bool(context.user_data.get("active_job", {}).get("cancel"))
+def _cancel_check(job):
+    return jobs.cancelled(job)
+
+
+async def _reject_if_busy(message, context):
+    """Guard against a user piling up more concurrent work than we allow."""
+    if jobs.has_slot(context):
+        return False
+    await message.reply_text(msg.too_many_jobs(jobs.MAX_ACTIVE_JOBS))
+    return True
 
 
 async def _await_with_progress(coro, reporter, cancel_check, pct_lo, pct_hi, detail):
@@ -447,7 +457,10 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg.discover_not_configured())
         return
 
-    _start_job(context, "discover")
+    if await _reject_if_busy(update.message, context):
+        return
+
+    job = _start_job(context, "discover")
     status = await update.message.reply_text(msg.discover_preparing())
     reporter = ProgressReporter(
         status,
@@ -471,13 +484,13 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await reporter.update(45, msg.discover_llm_phase(), force=True)
         else:
-            if _cancel_check(context):
+            if _cancel_check(job):
                 await reporter.fail(msg.work_cancelled())
                 return
             result, cancelled = await _await_with_progress(
                 recommend_songs(history, user_id=user_id, limit=10),
                 reporter,
-                lambda: _cancel_check(context),
+                lambda: _cancel_check(job),
                 12,
                 50,
                 msg.discover_llm_phase(),
@@ -511,7 +524,7 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_cands = max(len(candidates), 1)
 
         for idx, rec in enumerate(candidates):
-            if _cancel_check(context):
+            if _cancel_check(job):
                 await reporter.fail(msg.work_cancelled())
                 return
             title = rec.get("title", "").strip()
@@ -545,7 +558,7 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if len(suggestions) >= 10:
                 break
 
-        if _cancel_check(context):
+        if _cancel_check(job):
             await reporter.fail(msg.work_cancelled())
             return
 
@@ -572,7 +585,7 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Discover failed: {e}", exc_info=True)
         await reporter.fail(msg.discover_llm_error())
     finally:
-        _end_job(context)
+        _end_job(context, job)
 
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -613,16 +626,19 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    job = context.user_data.get("active_job")
-    if job:
-        job["cancel"] = True
-        kind = job.get("kind") or "work"
-        await log_system(
-            context.bot, "لغو کار کاربر", user=update.effective_user, kind=kind,
-        )
-        await update.message.reply_text(msg.cancel_ok())
-    else:
+    cancelled = jobs.cancel_all(context)
+    if not cancelled:
         await update.message.reply_text(msg.cancel_no_job())
+        return
+    kinds = ", ".join(sorted({j.get("kind") or "work" for j in cancelled}))
+    await log_system(
+        context.bot,
+        "لغو کار کاربر",
+        user=update.effective_user,
+        kind=kinds,
+        count=len(cancelled),
+    )
+    await update.message.reply_text(msg.cancel_ok(len(cancelled)))
 
 
 def _source_label(metadata):
@@ -793,7 +809,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(msg.pick_expired_short())
             return
         title, artist = ref
-        _start_job(context, "similar")
+        if await _reject_if_busy(query.message, context):
+            return
+        job = _start_job(context, "similar")
         status = await query.message.reply_text(msg.similar_preparing())
         reporter = ProgressReporter(
             status,
@@ -810,9 +828,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 artist,
                 update.effective_user.id,
                 reporter=reporter,
-                cancel_check=lambda: _cancel_check(context),
+                cancel_check=lambda: _cancel_check(job),
             )
-            if _cancel_check(context):
+            if _cancel_check(job):
                 await reporter.fail(msg.work_cancelled())
                 return
             if suggestions is None:
@@ -841,7 +859,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Similar tracks failed: {e}", exc_info=True)
             await reporter.fail(msg.similar_not_found())
         finally:
-            _end_job(context)
+            _end_job(context, job)
         return
 
     if data.startswith("reco:lyrics:"):
@@ -851,7 +869,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(msg.pick_expired_short())
             return
         title, artist = ref
-        _start_job(context, "lyrics")
+        if await _reject_if_busy(query.message, context):
+            return
+        job = _start_job(context, "lyrics")
         status = await query.message.reply_text(msg.searching())
         reporter = ProgressReporter(
             status,
@@ -865,13 +885,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await reporter.update(20, f"{title} — {artist or msg.UNKNOWN}", force=True)
             text = _lyrics_from_cache(title, artist)
             if not text:
-                if _cancel_check(context):
+                if _cancel_check(job):
                     await reporter.fail(msg.work_cancelled())
                     return
                 result, cancelled = await _await_with_progress(
                     fetch_lyrics(title, artist),
                     reporter,
-                    lambda: _cancel_check(context),
+                    lambda: _cancel_check(job),
                     25,
                     85,
                     "در حال دریافت متن آهنگ...",
@@ -880,7 +900,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await reporter.fail(msg.work_cancelled())
                     return
                 text = (result or {}).get("text") if result else None
-            if _cancel_check(context):
+            if _cancel_check(job):
                 await reporter.fail(msg.work_cancelled())
                 return
             if not text:
@@ -892,7 +912,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Lyrics failed: {e}", exc_info=True)
             await reporter.fail(msg.lyrics_not_found())
         finally:
-            _end_job(context)
+            _end_job(context, job)
         return
 
     if data.startswith("searchpick:"):
@@ -1039,7 +1059,10 @@ async def _download_and_send(message, user, metadata, context):
         await message.reply_text(msg.rate_limit(wait_time // 60))
         return
 
-    _start_job(context, "track")
+    if await _reject_if_busy(message, context):
+        return
+
+    job = _start_job(context, "track")
     status = await message.reply_text(msg.downloading())
     reporter = ProgressReporter(
         status,
@@ -1061,9 +1084,9 @@ async def _download_and_send(message, user, metadata, context):
             reporter,
             bot=context.bot,
             user=user,
-            cancel_check=lambda: _cancel_check(context),
+            cancel_check=lambda: _cancel_check(job),
         )
-        if _cancel_check(context):
+        if _cancel_check(job):
             await reporter.fail(msg.download_cancelled())
             return
         if not file_path:
@@ -1101,7 +1124,7 @@ async def _download_and_send(message, user, metadata, context):
             pass
         await log_error(context.bot, user, "Send failed", str(e))
     finally:
-        _end_job(context)
+        _end_job(context, job)
         await orchestrator.cleanup(file_path)
 
 
@@ -1116,6 +1139,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Collection URL?
     if await TrackMetadata.is_collection_url(text):
+        if await _reject_if_busy(update.message, context):
+            return
         name, tracks = await TrackMetadata.create_collection(text)
         if tracks:
             await process_playlist(
@@ -1132,12 +1157,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg.rate_limit(wait_time // 60))
         return
 
-    _start_job(context, "track")
+    if await _reject_if_busy(update.message, context):
+        return
+
+    job = _start_job(context, "track")
     status_message = await update.message.reply_text(msg.searching())
     metadata = await TrackMetadata.create(text)
 
     if not metadata.title:
-        _end_job(context)
+        _end_job(context, job)
         await status_message.edit_text(msg.metadata_not_found())
         await log_error(context.bot, user, "Metadata not found", text)
         return
@@ -1159,10 +1187,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reporter,
             bot=context.bot,
             user=user,
-            cancel_check=lambda: _cancel_check(context),
+            cancel_check=lambda: _cancel_check(job),
         )
 
-        if _cancel_check(context):
+        if _cancel_check(job):
             await reporter.fail(msg.download_cancelled())
             return
 
@@ -1194,8 +1222,96 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 _vip_failure_detail(text),
             )
     finally:
-        _end_job(context)
+        _end_job(context, job)
         await orchestrator.cleanup(file_path)
+
+
+_COOKIE_MAX_BYTES = 512 * 1024
+
+
+def _cookie_file_status():
+    """Return ``(ok, detail, updated)`` for the cookie jar currently on disk."""
+    path = downloader.cookies_path
+    if not os.path.exists(path):
+        return False, "cookies.txt missing", None
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            ok, detail = cookie_jar_status(f.read())
+    except OSError as e:
+        return False, f"cookies.txt unreadable: {e}", None
+    updated = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(os.path.getmtime(path)))
+    return ok, detail, updated
+
+
+def _youtube_auth_status():
+    """Return ``(healthy, detail)`` for the credentials yt-dlp will actually use."""
+    file_ok, file_detail, _updated = _cookie_file_status()
+    path = downloader.cookies_path
+    if file_ok:
+        return True, f"cookies.txt OK — {file_detail} ({path})"
+    browser = downloader.cookies_from_browser
+    if browser:
+        return True, (
+            f"cookies.txt unusable ({file_detail}); "
+            f"falling back to browser cookies ({browser})"
+        )
+    return False, (
+        f"cookies.txt unusable ({file_detail}) at {path}. "
+        "Send a fresh cookies.txt to the bot as a file to fix it — see /cookies."
+    )
+
+
+async def cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    _file_ok, file_detail, updated = _cookie_file_status()
+    healthy, _detail = _youtube_auth_status()
+    if downloader.cookies_from_browser:
+        file_detail += f"\nپشتیبان مرورگر: {downloader.cookies_from_browser}"
+    await update.message.reply_text(
+        msg.cookies_status(healthy, file_detail, downloader.cookies_path, updated)
+    )
+
+
+async def cookies_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Replace cookies.txt from an admin's uploaded file, if it validates."""
+    if not _is_admin(update.effective_user.id):
+        return
+    doc = update.message.document
+    if not doc:
+        return
+    if doc.file_size and doc.file_size > _COOKIE_MAX_BYTES:
+        await update.message.reply_text(msg.cookies_too_large(_COOKIE_MAX_BYTES // 1024))
+        return
+
+    tg_file = await context.bot.get_file(doc.file_id)
+    raw = bytes(await tg_file.download_as_bytearray())
+    text = raw.decode("utf-8", errors="ignore")
+    ok, detail = cookie_jar_status(text)
+    if not ok:
+        logger.warning("Rejected uploaded cookie file: %s", detail)
+        await update.message.reply_text(msg.cookies_rejected(detail))
+        return
+
+    path = downloader.cookies_path
+    backed_up = False
+    try:
+        if os.path.exists(path):
+            shutil.copy2(path, f"{path}.bak")
+            backed_up = True
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        os.replace(tmp_path, path)
+        os.chmod(path, 0o600)
+    except OSError as e:
+        logger.error("Could not write cookies.txt: %s", e)
+        await update.message.reply_text(msg.cookies_rejected(str(e)))
+        return
+
+    logger.info("cookies.txt replaced via admin upload (%s)", detail)
+    await update.message.reply_text(msg.cookies_accepted(detail, backed_up))
+    await _check_and_report_cookie_health(context.bot)
 
 
 async def _cache_sweep_job(context: ContextTypes.DEFAULT_TYPE):
@@ -1208,18 +1324,7 @@ async def _cookie_health_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _check_and_report_cookie_health(bot):
-    cookies_path = downloader.cookies_path
-    path_exists = os.path.exists(cookies_path)
-    healthy = path_exists and _cookies_look_authenticated(cookies_path)
-    if healthy:
-        detail = f"cookies.txt OK ({cookies_path})"
-    elif path_exists:
-        detail = (
-            f"cookies.txt incomplete/empty session cookies at {cookies_path}. "
-            "Re-export while signed into youtube.com (need non-empty SID/__Secure-*PSID)."
-        )
-    else:
-        detail = f"cookies.txt missing at {cookies_path}"
+    healthy, detail = _youtube_auth_status()
     await report_cookie_health_transition(bot, healthy, detail=detail)
     if not healthy:
         await maybe_alert_cookie_issue(bot, detail=detail)
@@ -1532,6 +1637,7 @@ def main():
         )
     )
     application.add_handler(CommandHandler("viplogtest", viplogtest_command))
+    application.add_handler(CommandHandler("cookies", cookies_command))
     application.add_handler(CommandHandler("report", report_command))
     application.add_handler(CommandHandler("users", users_command))
     application.add_handler(CommandHandler("user", user_command))
@@ -1546,6 +1652,15 @@ def main():
     application.add_handler(CallbackQueryHandler(report_callback, pattern=r"^rpt:"))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(InlineQueryHandler(inline_search))
+    if ADMIN_ID:
+        application.add_handler(
+            MessageHandler(
+                filters.Document.ALL
+                & filters.ChatType.PRIVATE
+                & filters.User(user_id=int(ADMIN_ID)),
+                cookies_document,
+            )
+        )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     status_text, yt_ok = get_credentials_status()

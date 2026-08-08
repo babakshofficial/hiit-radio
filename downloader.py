@@ -28,32 +28,48 @@ _YT_SESSION_COOKIE_NAMES = (
 )
 
 
-def _cookies_look_authenticated(cookies_path):
-    """Return True if cookies.txt has a usable logged-in YouTube session.
+def parse_cookie_jar(text):
+    """Map cookie name -> value for non-empty entries of a Netscape cookie jar."""
+    values_by_name = {}
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        name, value = parts[5], parts[6]
+        if value:
+            values_by_name[name] = value
+    return values_by_name
+
+
+def cookie_jar_status(text):
+    """Return ``(ok, detail)`` for a cookie jar's logged-in YouTube session.
 
     LOGIN_INFO/SAPISID alone are not enough — without SID / __Secure-*PSID,
     YouTube still returns the bot-check interstitial. Empty cookie values
     (common in broken exports) also count as missing.
     """
+    values_by_name = parse_cookie_jar(text)
+    if not values_by_name:
+        return False, "no cookies found (expected tab-separated Netscape format)"
+    missing = []
+    if not any(name in values_by_name for name in _YT_AUTH_HINT_NAMES):
+        missing.append("/".join(_YT_AUTH_HINT_NAMES))
+    if not any(name in values_by_name for name in _YT_SESSION_COOKIE_NAMES):
+        missing.append("/".join(_YT_SESSION_COOKIE_NAMES))
+    if missing:
+        return False, "missing or empty: " + ", ".join(missing)
+    return True, f"{len(values_by_name)} cookies, YouTube session present"
+
+
+def _cookies_look_authenticated(cookies_path):
+    """Return True if cookies.txt has a usable logged-in YouTube session."""
     try:
-        values_by_name = {}
         with open(cookies_path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split("\t")
-                if len(parts) < 7:
-                    continue
-                name = parts[5]
-                value = parts[6]
-                if not value:
-                    continue
-                # Prefer any non-empty value for this cookie name.
-                values_by_name[name] = value
-        has_hint = any(name in values_by_name for name in _YT_AUTH_HINT_NAMES)
-        has_session = any(name in values_by_name for name in _YT_SESSION_COOKIE_NAMES)
-        return has_hint and has_session
+            ok, _detail = cookie_jar_status(f.read())
+        return ok
     except OSError:
         return False
 
@@ -256,6 +272,15 @@ class MusicDownloader:
                 "Copy cookies.txt from your PC or export fresh cookies on desktop."
             )
         return ydl_opts
+
+    def youtube_auth_ok(self):
+        """True when yt-dlp has credentials that can pass YouTube's bot check."""
+        if self.cookies_from_browser:
+            return True
+        return (
+            os.path.exists(self.cookies_path)
+            and _cookies_look_authenticated(self.cookies_path)
+        )
 
     def _build_search_opts(self):
         """Fast flat search — no sleep, list results only."""
@@ -614,27 +639,54 @@ class MusicDownloader:
         if _is_cancelled():
             return None, "cancelled"
 
-        await _report(18, f"{metadata.title} — {metadata.artist}\nدر حال جستجو در یوتیوب...")
-        yt_best, yt_bot_blocked, cancelled = await gather_best(
-            "ytsearch", "YouTube", yt_search_strategies, 20, 38
-        )
-        if cancelled or _is_cancelled():
-            return None, "cancelled"
-        sc_best = None
-        sc_bot_blocked = False
-        best = yt_best
-        saw_bot_check = yt_bot_blocked
-        if not best or best[0] < MATCH_THRESHOLD:
-            yt_txt = f"{best[0]:.1f}%" if best else "n/a"
-            logger.warning(f"No valid YouTube match (best eligible: {yt_txt}) — trying SoundCloud fallback")
-            await _report(40, f"{metadata.title} — {metadata.artist}\nجستجو در ساندکلاود...")
-            sc_best, sc_bot_blocked, cancelled = await gather_best(
-                "scsearch", "SoundCloud", sc_search_strategies, 40, 48
+        _SOURCES = {
+            "YouTube": ("ytsearch", yt_search_strategies, "در حال جستجو در یوتیوب..."),
+            "SoundCloud": ("scsearch", sc_search_strategies, "جستجو در ساندکلاود..."),
+        }
+        found_by_source = {}
+        saw_bot_check = False
+
+        async def search_source(label, pct_start, pct_end):
+            """Search one source at most once per download; returns (best, cancelled)."""
+            nonlocal saw_bot_check
+            if label in found_by_source:
+                return found_by_source[label], False
+            prefix, strategies, note = _SOURCES[label]
+            await _report(
+                max(pct_start - 2, 0), f"{metadata.title} — {metadata.artist}\n{note}"
             )
+            found, blocked, cancelled = await gather_best(
+                prefix, label, strategies, pct_start, pct_end
+            )
+            found_by_source[label] = found
+            saw_bot_check = saw_bot_check or blocked
+            return found, cancelled
+
+        # Without usable cookies YouTube downloads hit the bot check anyway, so
+        # try SoundCloud first instead of burning every search strategy on it.
+        yt_usable = self.youtube_auth_ok()
+        source_order = ("YouTube", "SoundCloud") if yt_usable else ("SoundCloud", "YouTube")
+        if not yt_usable:
+            logger.warning(
+                "YouTube cookies are not usable — searching SoundCloud first"
+            )
+
+        best = None
+        for position, label in enumerate(source_order):
+            pct_start, pct_end = (20, 38) if position == 0 else (40, 48)
+            found, cancelled = await search_source(label, pct_start, pct_end)
             if cancelled or _is_cancelled():
                 return None, "cancelled"
-            best = sc_best
-            saw_bot_check = saw_bot_check or sc_bot_blocked
+            if found and (best is None or found[0] > best[0]):
+                best = found
+            if best and best[0] >= MATCH_THRESHOLD:
+                break
+            if position + 1 < len(source_order):
+                best_txt = f"{best[0]:.1f}%" if best else "n/a"
+                logger.warning(
+                    f"No valid {label} match (best eligible: {best_txt}) — "
+                    f"trying {source_order[position + 1]} fallback"
+                )
 
         if not best or best[0] < MATCH_THRESHOLD:
             score_txt = f"{best[0]:.1f}%" if best else "n/a"
@@ -733,28 +785,28 @@ class MusicDownloader:
             return None, "cancelled"
 
         best_score, best_video = best
+        primary_label = _source_label_for(best[1])
         file_path, best_video, dl_err = await _download_candidate(best)
-        used_youtube = _source_label_for(best[1]) == "YouTube"
         last_err = dl_err
 
-        # YouTube often finds a match then fails at download (bot-check / expired cookies).
-        # Fall through to SoundCloud instead of giving up.
-        if not file_path and used_youtube and not _is_cancelled():
-            if sc_best is None:
-                await _report(40, f"{metadata.title} — {metadata.artist}\nجستجو در ساندکلاود...")
-                sc_best, sc_bot_blocked, cancelled = await gather_best(
-                    "scsearch", "SoundCloud", sc_search_strategies, 40, 48
-                )
-                if cancelled:
+        # A source can match then fail at download (bot-check / expired cookies).
+        # Fall through to the other source instead of giving up.
+        if not file_path and not _is_cancelled():
+            other = "SoundCloud" if primary_label == "YouTube" else "YouTube"
+            alt = None
+            if other == "YouTube" and not yt_usable:
+                logger.warning("Skipping YouTube retry — cookies cannot pass bot check")
+            else:
+                alt, cancelled = await search_source(other, 40, 48)
+                if cancelled or _is_cancelled():
                     return None, "cancelled"
-                saw_bot_check = saw_bot_check or sc_bot_blocked
-            if sc_best and sc_best[0] >= MATCH_THRESHOLD:
+            if alt and alt[0] >= MATCH_THRESHOLD:
                 logger.warning(
-                    f"YouTube download failed — retrying with SoundCloud "
-                    f"(score {sc_best[0]:.1f}%)"
+                    f"{primary_label} download failed — retrying with {other} "
+                    f"(score {alt[0]:.1f}%)"
                 )
-                best_score, best_video = sc_best
-                file_path, best_video, dl_err = await _download_candidate(sc_best)
+                best_score, best_video = alt
+                file_path, best_video, dl_err = await _download_candidate(alt)
                 last_err = dl_err or last_err
 
         if _is_cancelled():

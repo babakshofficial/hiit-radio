@@ -3,6 +3,7 @@
 import logging
 import os
 
+import jobs
 from cache_manager import content_key
 from messages import (
     playlist_cancelled,
@@ -33,7 +34,7 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
         await update.message.reply_text(playlist_empty())
         return
 
-    context.user_data["active_job"] = {"cancel": False, "kind": "playlist", "type": "playlist"}
+    job = jobs.start(context, "playlist")
     status = await update.message.reply_text(playlist_start(collection_name, total))
     await admin_logger.log_playlist_start(bot, user, collection_name, total)
 
@@ -47,7 +48,7 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
     stop_reason = None
 
     for i, track in enumerate(tracks, 1):
-        if context.user_data.get("active_job", {}).get("cancel"):
+        if jobs.cancelled(job):
             cancelled = True
             stop_reason = "لغو توسط کاربر"
             await reporter.fail(playlist_cancelled(sent, total))
@@ -70,7 +71,7 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
 
         file_path, platform, cached, error_code = await orchestrator.get_or_download(
             track, reporter, bot=bot, user=user,
-            cancel_check=lambda: context.user_data.get("active_job", {}).get("cancel"),
+            cancel_check=lambda: jobs.cancelled(job),
         )
         is_file_id = bool(platform and str(platform).endswith("_cache_id"))
         if not file_path or (not is_file_id and not os.path.exists(file_path)):
@@ -81,7 +82,7 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
             )
             continue
 
-        if context.user_data.get("active_job", {}).get("cancel"):
+        if jobs.cancelled(job):
             cancelled = True
             stop_reason = "لغو توسط کاربر"
             await reporter.fail(playlist_cancelled(sent, total))
@@ -144,7 +145,7 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
         finally:
             await orchestrator.cleanup(file_path)
 
-    context.user_data.pop("active_job", None)
+    jobs.end(context, job)
 
     if cancelled or rate_limited:
         await admin_logger.log_playlist_done(

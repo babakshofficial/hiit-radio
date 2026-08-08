@@ -20,7 +20,7 @@ The user interface is in **Persian (Farsi)**. Admin tooling and this documentati
 - Charts — `/top` (`day` / `week` / `all`) from bot download stats
 - Recommendations — “More by artist”, “Similar songs”, and lyrics after each track
 - Discovery — `/discover` personalized picks via LLM from your download history
-- Cancel — `/cancel` stops the current single-track or playlist download
+- Cancel — `/cancel` stops every background job the user has running (downloads, playlists, LLM calls)
 - Rate limiting — 10 downloads per hour per user (each playlist track counts separately)
 - File cache — repeated requests served from disk without re-downloading
 
@@ -29,6 +29,7 @@ The user interface is in **Persian (Farsi)**. Admin tooling and this documentati
 - **VIP log channel** — every request, download event, startup/shutdown, and error logged to a private admin channel
 - **SQLite analytics** — users, downloads, cache stats, platform breakdown
 - **Admin broadcast** — `/broadcast` with optional confirmation token
+- **Cookie self-service** — send a fresh `cookies.txt` to the bot as a file; it is validated before replacing the old jar
 
 ## Prerequisites
 
@@ -71,6 +72,7 @@ All settings live in `.env`. See `.env.example` for the full list.
 | `VIP_LOG_CHANNEL_ID` | Private channel ID for admin logs (empty = disabled) |
 | `DATABASE_PATH` | SQLite database file (default: `hiit_radio.db`) |
 | `CACHE_DIR` / `CACHE_TTL_HOURS` | On-disk download cache |
+| `MAX_ACTIVE_JOBS` | Concurrent background jobs allowed per user (default: 3) |
 | `TG_*_TIMEOUT` | Telegram API/upload timeouts for slow VPS links |
 | `YTDLP_COOKIES_FROM_BROWSER` | e.g. `chrome` — read live browser cookies |
 | `YTDLP_COOKIES` | Path to exported `cookies.txt` |
@@ -195,6 +197,7 @@ Send a track link, album/playlist URL, or plain song name as a normal message to
 | `/user <id>` | User profile, downloads, requests, LLM usage |
 | `/export` | Download full database export as JSON |
 | `/creds` | YouTube credential readiness report |
+| `/cookies` | Cookie jar health; send a `cookies.txt` file to the bot to replace it |
 | `/channelid` | Resolve chat ID for VIP log channel setup |
 | `/viplogtest` | Test VIP log channel (admin) |
 | `/broadcast <message>` | Send a message to all known users (confirmation step) |
@@ -238,6 +241,7 @@ Users only see simple result messages. Technical details (credential status, bac
 | `database.py` | SQLite schema, analytics, download history |
 | `user_manager.py` | Users, rate limits, download recording |
 | `gates.py` | Required-channel membership check |
+| `jobs.py` | Per-user registry of cancellable background work |
 | `admin_logger.py` | VIP channel activity logging |
 | `progress.py` | Throttled in-chat progress updates |
 | `recommendations.py` | Post-download inline keyboard |
