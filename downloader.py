@@ -877,6 +877,20 @@ class MusicDownloader:
         except Exception:
             return False
 
+    def extract_cover(self, file_path):
+        """Return watermarked JPEG cover bytes from an MP3's APIC frame, or None."""
+        try:
+            audio = MutagenMP3(file_path, ID3=ID3)
+            if not audio.tags:
+                return None
+            apics = audio.tags.getall("APIC")
+            if not apics:
+                return None
+            data = getattr(apics[0], "data", None)
+            return bytes(data) if data else None
+        except Exception:
+            return None
+
     def file_is_source_enriched(self, file_path):
         """True when tags were written from the downloaded YouTube/SoundCloud title."""
         try:
