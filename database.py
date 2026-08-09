@@ -131,6 +131,64 @@ CREATE TABLE IF NOT EXISTS favorites (
 
 CREATE INDEX IF NOT EXISTS idx_favorites_user_time
     ON favorites(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    tier TEXT NOT NULL,
+    starts_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    source TEXT,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_subscriptions_user_expires
+    ON subscriptions(user_id, expires_at DESC);
+
+CREATE TABLE IF NOT EXISTS quota_bonuses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    day TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    source TEXT,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_quota_bonuses_user_day
+    ON quota_bonuses(user_id, day);
+
+CREATE TABLE IF NOT EXISTS payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    amount INTEGER DEFAULT 0,
+    currency TEXT,
+    telegram_charge_id TEXT,
+    status TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id),
+    UNIQUE(telegram_charge_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_payments_user_time
+    ON payments(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS referrals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    inviter_id TEXT NOT NULL,
+    invited_id TEXT NOT NULL,
+    credited INTEGER DEFAULT 0,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (inviter_id) REFERENCES users(user_id),
+    FOREIGN KEY (invited_id) REFERENCES users(user_id),
+    UNIQUE(invited_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_referrals_inviter
+    ON referrals(inviter_id, credited);
 """
 
 EXPORT_EVENT_LIMIT = 10000
@@ -204,26 +262,49 @@ class Database:
     # --- Rate limiting ---
 
     def check_rate_limit(self, user_id, limit=10, period=3600):
+        """Legacy rolling-window check (kept for compatibility). Prunes only very
+        old rows so calendar-day quota counting still works."""
         user_id = str(user_id)
         now = time.time()
-        cutoff = now - period
+        # Keep at least 3 days of events for daily quota accounting.
+        prune_before = now - max(period, 3 * 86400)
         with self._conn() as conn:
             conn.execute(
                 "DELETE FROM rate_limit_events WHERE user_id=? AND created_at < ?",
-                (user_id, cutoff),
+                (user_id, prune_before),
             )
             count = conn.execute(
-                "SELECT COUNT(*) AS c FROM rate_limit_events WHERE user_id=?",
-                (user_id,),
+                """SELECT COUNT(*) AS c FROM rate_limit_events
+                   WHERE user_id=? AND created_at >= ?""",
+                (user_id, now - period),
             ).fetchone()["c"]
             if count >= limit:
                 oldest = conn.execute(
-                    "SELECT MIN(created_at) AS t FROM rate_limit_events WHERE user_id=?",
-                    (user_id,),
+                    """SELECT MIN(created_at) AS t FROM rate_limit_events
+                       WHERE user_id=? AND created_at >= ?""",
+                    (user_id, now - period),
                 ).fetchone()["t"]
                 wait = int(period - (now - oldest)) if oldest else period
                 return False, max(wait, 0)
         return True, 0
+
+    def count_rate_events_between(self, user_id, start_ts, end_ts=None):
+        user_id = str(user_id)
+        end_ts = end_ts if end_ts is not None else time.time()
+        with self._conn() as conn:
+            return conn.execute(
+                """SELECT COUNT(*) AS c FROM rate_limit_events
+                   WHERE user_id=? AND created_at >= ? AND created_at < ?""",
+                (user_id, float(start_ts), float(end_ts)),
+            ).fetchone()["c"]
+
+    def prune_rate_events_older_than(self, older_than_ts):
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM rate_limit_events WHERE created_at < ?",
+                (float(older_than_ts),),
+            )
+            return cur.rowcount
 
     def record_rate_event(self, user_id):
         user_id = str(user_id)
@@ -887,4 +968,202 @@ class Database:
                 "user_artist_stats": self._rows_to_dicts(conn, "user_artist_stats"),
                 "cache_files": self._rows_to_dicts(conn, "cache_files"),
                 "broadcast_pending": self._rows_to_dicts(conn, "broadcast_pending"),
+                "subscriptions": self._rows_to_dicts(conn, "subscriptions"),
+                "quota_bonuses": self._rows_to_dicts(conn, "quota_bonuses"),
+                "payments": self._rows_to_dicts(conn, "payments"),
+                "referrals": self._rows_to_dicts(conn, "referrals"),
             }
+
+    # --- Subscriptions / quotas / payments / referrals ---
+
+    def user_exists(self, user_id):
+        user_id = str(user_id)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 AS ok FROM users WHERE user_id=?", (user_id,)
+            ).fetchone()
+            return bool(row)
+
+    def get_active_subscription(self, user_id, now=None):
+        user_id = str(user_id)
+        now = time.time() if now is None else float(now)
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT * FROM subscriptions
+                   WHERE user_id=? AND expires_at > ?
+                   ORDER BY
+                     CASE tier WHEN 'unlimited' THEN 2 WHEN 'premium' THEN 1 ELSE 0 END DESC,
+                     expires_at DESC
+                   LIMIT 1""",
+                (user_id, now),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def grant_subscription(self, user_id, tier, days, source="manual", now=None):
+        """Extend tier by ``days`` from max(now, current expiry of same or lower tier)."""
+        user_id = str(user_id)
+        tier = (tier or "premium").strip().lower()
+        if tier not in ("premium", "unlimited"):
+            raise ValueError(f"unsupported tier: {tier}")
+        days = max(int(days), 1)
+        now = time.time() if now is None else float(now)
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT expires_at FROM subscriptions
+                   WHERE user_id=? AND tier=? AND expires_at > ?
+                   ORDER BY expires_at DESC LIMIT 1""",
+                (user_id, tier, now),
+            ).fetchone()
+            base = float(row["expires_at"]) if row else now
+            starts_at = now
+            expires_at = base + days * 86400
+            cur = conn.execute(
+                """INSERT INTO subscriptions
+                   (user_id, tier, starts_at, expires_at, source, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (user_id, tier, starts_at, expires_at, source, now),
+            )
+            return {
+                "id": cur.lastrowid,
+                "user_id": user_id,
+                "tier": tier,
+                "starts_at": starts_at,
+                "expires_at": expires_at,
+                "source": source,
+            }
+
+    def add_quota_bonus(self, user_id, day, amount, source="manual"):
+        user_id = str(user_id)
+        amount = int(amount)
+        now = time.time()
+        with self._conn() as conn:
+            cur = conn.execute(
+                """INSERT INTO quota_bonuses (user_id, day, amount, source, created_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (user_id, day, amount, source, now),
+            )
+            return cur.lastrowid
+
+    def sum_quota_bonuses(self, user_id, day):
+        user_id = str(user_id)
+        with self._conn() as conn:
+            return conn.execute(
+                """SELECT COALESCE(SUM(amount), 0) AS s FROM quota_bonuses
+                   WHERE user_id=? AND day=?""",
+                (user_id, day),
+            ).fetchone()["s"]
+
+    def record_payment(
+        self,
+        user_id,
+        provider,
+        kind,
+        amount,
+        currency,
+        telegram_charge_id=None,
+        status="paid",
+    ):
+        user_id = str(user_id)
+        now = time.time()
+        with self._conn() as conn:
+            if telegram_charge_id:
+                existing = conn.execute(
+                    "SELECT * FROM payments WHERE telegram_charge_id=?",
+                    (telegram_charge_id,),
+                ).fetchone()
+                if existing:
+                    return dict(existing), False
+            cur = conn.execute(
+                """INSERT INTO payments
+                   (user_id, provider, kind, amount, currency, telegram_charge_id, status, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    user_id,
+                    provider,
+                    kind,
+                    int(amount or 0),
+                    currency,
+                    telegram_charge_id,
+                    status,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM payments WHERE id=?", (cur.lastrowid,)
+            ).fetchone()
+            return dict(row), True
+
+    def create_referral(self, inviter_id, invited_id):
+        """Insert a pending referral. Returns True if created, False if rejected."""
+        inviter_id = str(inviter_id)
+        invited_id = str(invited_id)
+        if inviter_id == invited_id:
+            return False
+        now = time.time()
+        with self._conn() as conn:
+            existing = conn.execute(
+                "SELECT 1 FROM referrals WHERE invited_id=?", (invited_id,)
+            ).fetchone()
+            if existing:
+                return False
+            # Invited user must be brand-new (no prior downloads and no prior first_seen
+            # older than a few seconds is handled by caller). Here we reject if they
+            # already appear in download_history.
+            history = conn.execute(
+                "SELECT 1 FROM download_history WHERE user_id=? LIMIT 1",
+                (invited_id,),
+            ).fetchone()
+            if history:
+                return False
+            try:
+                conn.execute(
+                    """INSERT INTO referrals (inviter_id, invited_id, credited, created_at)
+                       VALUES (?, ?, 0, ?)""",
+                    (inviter_id, invited_id, now),
+                )
+            except sqlite3.IntegrityError:
+                return False
+            return True
+
+    def get_pending_referral_for_invitee(self, invited_id):
+        invited_id = str(invited_id)
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT * FROM referrals WHERE invited_id=? AND credited=0""",
+                (invited_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def credit_referral(self, invited_id):
+        """Mark referral credited. Returns inviter_id or None."""
+        invited_id = str(invited_id)
+        now = time.time()
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM referrals WHERE invited_id=? AND credited=0",
+                (invited_id,),
+            ).fetchone()
+            if not row:
+                return None
+            conn.execute(
+                "UPDATE referrals SET credited=1 WHERE id=?",
+                (row["id"],),
+            )
+            return str(row["inviter_id"])
+
+    def count_credited_referrals(self, inviter_id):
+        inviter_id = str(inviter_id)
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) AS c FROM referrals WHERE inviter_id=? AND credited=1",
+                (inviter_id,),
+            ).fetchone()["c"]
+
+    def count_pending_referrals(self, inviter_id):
+        inviter_id = str(inviter_id)
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) AS c FROM referrals WHERE inviter_id=? AND credited=0",
+                (inviter_id,),
+            ).fetchone()["c"]
+

@@ -71,8 +71,11 @@ from llm_service import (
 from cache_manager import content_key
 from downloader import cookie_jar_status
 from preview import PreviewSender
+import entitlements
 import jobs
 import messages as msg
+import payments
+import referrals
 import reporting as rpt
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -86,6 +89,7 @@ TG_POOL_TIMEOUT = float(os.getenv("TG_POOL_TIMEOUT", "30"))
 _ADMIN_COMMANDS = {
     "/stats", "/analytics", "/creds", "/channelid", "/viplogtest",
     "/broadcast", "/report", "/users", "/user", "/export", "/cookies",
+    "/grant", "/topup",
 }
 
 logging.basicConfig(
@@ -196,6 +200,43 @@ def _lyrics_from_cache(title, artist):
     return None
 
 
+def _cover_from_cache(title, artist):
+    """Return watermarked JPEG bytes from a cached MP3's APIC frame."""
+    for source in ("youtube", "spotify", "apple"):
+        path = orchestrator.cache.get(title, artist, source)
+        if not path:
+            continue
+        data = downloader.extract_cover(path)
+        if data:
+            return data
+    return None
+
+
+async def _build_watermarked_artwork(title, artist):
+    """Fallback: resolve cover via iTunes and apply the HiiT watermark."""
+    query = f"{title} {artist}".strip() if artist else (title or "")
+    if not query:
+        return None
+    resolved = await AppleMusicMetadata.search_by_query(query)
+    url = getattr(resolved, "artwork_url", None) if resolved else None
+    if not url:
+        return None
+    try:
+        response = await asyncio.to_thread(
+            lambda: __import__("requests").get(
+                url,
+                timeout=15,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+        )
+        if response.status_code != 200 or not response.content:
+            return None
+        return downloader._process_itunes_query_artwork(response.content)
+    except Exception as e:
+        logger.debug("Artwork fallback failed: %s", e)
+        return None
+
+
 async def _reply_lyrics(message, title, artist, text):
     header = msg.lyrics_header(title, artist)
     body = (text or "").strip()
@@ -236,9 +277,103 @@ async def _touch_user(update):
         user_manager.touch_user(u.id, u.username, u.first_name)
 
 
+async def _deny_quota(message, bot, user):
+    allowed, used, limit, tier = entitlements.check_quota(
+        user_manager.database, user.id,
+    )
+    if allowed:
+        return False
+    await log_rate_limit(bot, user, 0)
+    await message.reply_text(
+        msg.quota_exceeded(used, limit, tier),
+        reply_markup=payments.quota_upsell_keyboard(),
+    )
+    return True
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    inviter = referrals.parse_start_payload(context.args)
+    existed = user_manager.database.user_exists(user.id) if user else True
     await _touch_user(update)
+    if inviter and user and not existed:
+        status = referrals.record_pending(
+            user_manager.database, inviter, user.id, is_new_user=True,
+        )
+        logger.info("Referral pending inviter=%s invited=%s status=%s", inviter, user.id, status)
+    # If channel gate is disabled, credit immediately on start.
+    from gates import REQUIRED_CHANNEL
+    if user and not REQUIRED_CHANNEL:
+        referrals.maybe_credit_on_membership(user_manager.database, user.id)
     await update.message.reply_text(msg.start_text())
+
+
+async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    await _touch_user(update)
+    snap = entitlements.status_snapshot(
+        user_manager.database, update.effective_user.id,
+    )
+    await update.message.reply_text(
+        msg.premium_status(snap),
+        reply_markup=payments.premium_keyboard(),
+    )
+
+
+async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    await _touch_user(update)
+    prog = referrals.progress(user_manager.database, update.effective_user.id)
+    await update.message.reply_text(msg.invite_status(prog))
+
+
+async def grant_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    # /grant <user_id> <premium|unlimited> <days>
+    args = context.args or []
+    if len(args) < 3:
+        await update.message.reply_text("نحوه استفاده: /grant <user_id> <premium|unlimited> <days>")
+        return
+    target, tier, days_s = args[0], args[1].lower(), args[2]
+    if tier not in ("premium", "unlimited"):
+        await update.message.reply_text("tier باید premium یا unlimited باشد.")
+        return
+    try:
+        days = int(days_s)
+    except ValueError:
+        await update.message.reply_text("days باید عدد باشد.")
+        return
+    user_manager.touch_user(target)
+    sub = payments.apply_manual_grant(
+        user_manager.database, target, tier, days, admin_id=update.effective_user.id,
+    )
+    await update.message.reply_text(msg.grant_ok(target, tier, sub["expires_at"]))
+
+
+async def topup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    # /topup <user_id> [amount]
+    args = context.args or []
+    if not args:
+        await update.message.reply_text("نحوه استفاده: /topup <user_id> [amount]")
+        return
+    target = args[0]
+    amount = None
+    if len(args) > 1:
+        try:
+            amount = int(args[1])
+        except ValueError:
+            await update.message.reply_text("amount باید عدد باشد.")
+            return
+    user_manager.touch_user(target)
+    granted, day = payments.apply_manual_topup(
+        user_manager.database, target, amount=amount, admin_id=update.effective_user.id,
+    )
+    await update.message.reply_text(msg.topup_ok(target, granted, day))
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -724,6 +859,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     data = query.data or ""
 
+    if data.startswith("pay:"):
+        action = data.split(":", 1)[1]
+        if action == "invite":
+            prog = referrals.progress(user_manager.database, update.effective_user.id)
+            await query.message.reply_text(msg.invite_status(prog))
+            return
+        try:
+            await payments.send_stars_invoice(
+                context.bot,
+                query.message.chat_id,
+                update.effective_user.id,
+                action,
+            )
+        except Exception as e:
+            logger.error("Invoice failed: %s", e, exc_info=True)
+            await query.message.reply_text(msg.payment_failed())
+        return
+
     if data.startswith("redownload:"):
         hist_id = int(data.split(":", 1)[1])
         row = user_manager.get_history_by_id(hist_id)
@@ -916,6 +1069,55 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _end_job(context, job)
         return
 
+    if data.startswith("reco:art:"):
+        token = data.split(":", 2)[2]
+        ref = resolve_track_ref(token)
+        if not ref:
+            await query.message.reply_text(msg.pick_expired_short())
+            return
+        title, artist = ref
+        if await _reject_if_busy(query.message, context):
+            return
+        job = _start_job(context, "artwork")
+        status = await query.message.reply_text(msg.artwork_sending())
+        try:
+            cover = _cover_from_cache(title, artist)
+            if not cover:
+                if _cancel_check(job):
+                    await status.edit_text(msg.work_cancelled())
+                    return
+                cover = await _build_watermarked_artwork(title, artist)
+            if _cancel_check(job):
+                await status.edit_text(msg.work_cancelled())
+                return
+            if not cover:
+                await status.edit_text(msg.artwork_not_found())
+                return
+            safe_artist = (artist or msg.UNKNOWN).replace("/", "-").strip()
+            safe_title = (title or msg.UNKNOWN).replace("/", "-").strip()
+            filename = f"{safe_artist} - {safe_title}.jpg"[:180]
+            from io import BytesIO
+            bio = BytesIO(cover)
+            bio.name = filename
+            await query.message.reply_document(
+                document=bio,
+                filename=filename,
+                caption=f"🖼 {title} — {_unknown_artist(artist)}",
+            )
+            try:
+                await status.delete()
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Artwork send failed: {e}", exc_info=True)
+            try:
+                await status.edit_text(msg.artwork_not_found())
+            except Exception:
+                pass
+        finally:
+            _end_job(context, job)
+        return
+
     if data.startswith("searchpick:"):
         idx = data.split(":", 1)[1]
         meta = (
@@ -1054,10 +1256,7 @@ async def _resolve_similar_tracks(
 
 async def _download_and_send(message, user, metadata, context):
     user_id = user.id
-    allowed, wait_time = user_manager.check_rate_limit(user_id)
-    if not allowed:
-        await log_rate_limit(context.bot, user, wait_time // 60)
-        await message.reply_text(msg.rate_limit(wait_time // 60))
+    if await _deny_quota(message, context.bot, user):
         return
 
     if await _reject_if_busy(message, context):
@@ -1156,10 +1355,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg.collection_not_found())
         return
 
-    allowed, wait_time = user_manager.check_rate_limit(user_id)
-    if not allowed:
-        await log_rate_limit(context.bot, user, wait_time // 60)
-        await update.message.reply_text(msg.rate_limit(wait_time // 60))
+    if await _deny_quota(update.message, context.bot, user):
         return
 
     if await _reject_if_busy(update.message, context):
@@ -1655,12 +1851,17 @@ def main():
     application.add_handler(CommandHandler("liked", liked_command))
     application.add_handler(CommandHandler("top", top_command))
     application.add_handler(CommandHandler("discover", discover_command))
+    application.add_handler(CommandHandler("premium", premium_command))
+    application.add_handler(CommandHandler("invite", invite_command))
+    application.add_handler(CommandHandler("grant", grant_command))
+    application.add_handler(CommandHandler("topup", topup_command))
     application.add_handler(CommandHandler("aboutme", aboutme_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(CallbackQueryHandler(report_callback, pattern=r"^rpt:"))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(InlineQueryHandler(inline_search))
+    payments.register_handlers(application)
     if ADMIN_ID:
         application.add_handler(
             MessageHandler(

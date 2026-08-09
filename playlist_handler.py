@@ -4,6 +4,8 @@ import logging
 import os
 
 import jobs
+import entitlements
+import payments
 from cache_manager import content_key
 from messages import (
     playlist_cancelled,
@@ -11,6 +13,7 @@ from messages import (
     playlist_rate_limited,
     playlist_start,
     playlist_summary,
+    quota_exceeded,
     unknown_artist,
 )
 from progress import ProgressReporter
@@ -55,13 +58,17 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
                 await reporter.fail(playlist_cancelled(sent, total))
                 break
 
-            allowed, wait_time = user_manager.check_rate_limit(user_id)
+            allowed, used, limit, tier = entitlements.check_quota(
+                user_manager.database, user_id,
+            )
             if not allowed:
                 rate_limited = True
-                stop_reason = f"محدودیت نرخ ({wait_time // 60} دقیقه)"
-                await admin_logger.log_rate_limit(bot, user, wait_time // 60)
-                await reporter.fail(
-                    playlist_rate_limited(wait_time // 60, sent, total)
+                stop_reason = f"سقف روزانه ({used}/{limit})"
+                await admin_logger.log_rate_limit(bot, user, 0)
+                await reporter.fail(playlist_rate_limited(0, sent, total))
+                await update.message.reply_text(
+                    quota_exceeded(used, limit, tier),
+                    reply_markup=payments.quota_upsell_keyboard(),
                 )
                 break
 

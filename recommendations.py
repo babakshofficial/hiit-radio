@@ -11,6 +11,7 @@ from messages import (
     BTN_SIMILAR,
     BTN_FAVORITE_ADD,
     BTN_FAVORITE_REMOVE,
+    BTN_ARTWORK,
 )
 
 # Short callback tokens → (title, artist). Bounded; single-process bot.
@@ -85,5 +86,13 @@ def recommendation_keyboard(artist, track_title=None, favorited=False):
             )
     if row2:
         buttons.append(row2)
+
+    if track_title:
+        buttons.append([
+            InlineKeyboardButton(
+                BTN_ARTWORK,
+                callback_data=f"reco:art:{token}",
+            )
+        ])
 
     return InlineKeyboardMarkup(buttons) if buttons else None

@@ -60,6 +60,8 @@ def start_text():
         "/liked — علاقه‌مندی‌ها\n"
         "/top — محبوب‌ترین آهنگ‌ها\n"
         "/discover — پیشنهاد شخصی\n"
+        "/premium — اشتراک و سقف دانلود روزانه\n"
+        "/invite — دعوت دوست و دریافت سقف بیشتر\n"
         "/aboutme — درباره ربات و سازنده\n"
         "/cancel — توقف کار جاری"
     )
@@ -75,10 +77,12 @@ def help_text():
         "/liked — آهنگ‌های ذخیره‌شده\n"
         "/top — جدول محبوب‌ها (day / week / all)\n"
         "/discover — بر اساس تاریخچه‌ات، ۱۰ آهنگ پیشنهاد می‌دم\n"
+        "/premium — اشتراک پریمیوم / خرید سقف روزانه\n"
+        "/invite — لینک دعوت دوست\n"
         "/cancel — توقف هر کار جاری (دانلود، پیشنهاد، …)\n"
         "/aboutme — درباره ربات و سازنده\n\n"
-        "محدودیت: ۱۰ دانلود در ساعت "
-        "(هر آهنگ توی پلی‌لیست جدا حساب می‌شه)."
+        "سقف روزانه رایگان: ۱۰ دانلود "
+        f"(پریمیوم: {os.getenv('PREMIUM_DAILY_LIMIT', '100')})."
     )
 
 
@@ -194,6 +198,121 @@ def work_cancelled():
 
 def rate_limit(minutes):
     return f"فعلاً به سقف دانلود رسیدی — {minutes} دقیقه دیگه برگرد 🙏"
+
+
+def quota_exceeded(used, limit, tier):
+    tier_fa = {"free": "رایگان", "premium": "پریمیوم", "unlimited": "نامحدود"}.get(
+        tier, tier
+    )
+    return (
+        f"به سقف دانلود امروز رسیدی ({used}/{limit}) — طرح: {tier_fa}.\n"
+        "می‌تونی با ستاره تلگرام سقف امروز رو بالا ببری، "
+        "پریمیوم بگیری، یا ۳ دوست دعوت کنی."
+    )
+
+
+def premium_status(snapshot):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    import entitlements as ent
+
+    tier = snapshot["tier"]
+    tier_fa = {"free": "رایگان", "premium": "پریمیوم", "unlimited": "نامحدود"}.get(
+        tier, tier
+    )
+    lines = [
+        "⭐ وضعیت اشتراک",
+        f"طرح: {tier_fa}",
+    ]
+    sub = snapshot.get("subscription")
+    if sub and sub.get("expires_at"):
+        exp = datetime.fromtimestamp(
+            float(sub["expires_at"]), ZoneInfo(os.getenv("QUOTA_TZ", "Asia/Tehran"))
+        )
+        lines.append(f"انقضا: {exp.strftime('%Y-%m-%d %H:%M')}")
+    if snapshot.get("limit") is None:
+        lines.append("سقف امروز: نامحدود")
+    else:
+        lines.append(
+            f"دانلود امروز: {snapshot.get('used', 0)}/{snapshot.get('limit')}"
+        )
+    lines.append(f"تاریخ: {snapshot.get('day')}")
+    lines.append("")
+    lines.append(
+        f"روزپس: +{ent.TOPUP_AMOUNT} دانلود | "
+        f"پریمیوم هفتگی/ماهانه: {ent.PREMIUM_DAILY_LIMIT} در روز"
+    )
+    return "\n".join(lines)
+
+
+def invite_status(progress):
+    return (
+        "🎁 دعوت دوست\n"
+        f"پیشرفت: {progress['toward']}/{progress['needed']} "
+        f"(مجموع تأییدشده: {progress['credited']})\n"
+        f"در انتظار عضویت کانال: {progress['pending']}\n\n"
+        "با هر ۳ دوست جدید که از لینک تو وارد بشن و عضو کانال بشن، "
+        f"+{os.getenv('TOPUP_AMOUNT', '10')} دانلود امروز بهت اضافه می‌شه.\n\n"
+        f"لینک دعوت:\n{progress['link']}"
+    )
+
+
+def payment_failed():
+    return "پرداخت ثبت نشد — دوباره از /premium تلاش کن."
+
+
+def payment_already_processed():
+    return "این پرداخت قبلاً اعمال شده."
+
+
+def payment_bonus_ok(amount, day):
+    return f"✅ +{amount} دانلود برای امروز ({day}) فعال شد."
+
+
+def referral_topup_granted():
+    amount = os.getenv("TOPUP_AMOUNT", "10")
+    return (
+        f"🎉 سه دعوتت تکمیل شد — +{amount} دانلود امروز به حسابت اضافه شد.\n"
+        "با /invite پیشرفت بعدیت رو ببین."
+    )
+
+
+def payment_premium_ok(tier, expires_at):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    exp = datetime.fromtimestamp(
+        float(expires_at), ZoneInfo(os.getenv("QUOTA_TZ", "Asia/Tehran"))
+    )
+    tier_fa = "پریمیوم" if tier == "premium" else "نامحدود"
+    return f"✅ اشتراک {tier_fa} فعال شد تا {exp.strftime('%Y-%m-%d %H:%M')}."
+
+
+def btn_buy_daypass(stars, amount):
+    return f"🔓 +{amount} دانلود امروز — {stars}⭐"
+
+
+def btn_buy_weekly(stars):
+    return f"⭐ پریمیوم ۷ روزه — {stars}⭐"
+
+
+def btn_buy_monthly(stars):
+    return f"⭐ پریمیوم ۳۰ روزه — {stars}⭐"
+
+
+BTN_INVITE = "🎁 دعوت دوست"
+
+
+def grant_ok(user_id, tier, expires_at):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    exp = datetime.fromtimestamp(
+        float(expires_at), ZoneInfo(os.getenv("QUOTA_TZ", "Asia/Tehran"))
+    )
+    return f"✅ کاربر {user_id}: {tier} تا {exp.strftime('%Y-%m-%d %H:%M')}"
+
+
+def topup_ok(user_id, amount, day):
+    return f"✅ کاربر {user_id}: +{amount} برای {day}"
 
 
 def searching():
@@ -451,5 +570,14 @@ def cookies_too_large(limit_kb):
 BTN_MORE_BY_ARTIST = "آهنگ‌های بیشتر"
 BTN_SIMILAR = "آهنگ‌های مشابه"
 BTN_LYRICS = "متن آهنگ"
+BTN_ARTWORK = "🖼 کاور آهنگ"
 BTN_FAVORITE_ADD = "❤️ علاقه‌مندی"
 BTN_FAVORITE_REMOVE = "💔 حذف علاقه‌مندی"
+
+
+def artwork_not_found():
+    return "کاور این آهنگ پیدا نشد."
+
+
+def artwork_sending():
+    return "در حال آماده‌سازی کاور..."

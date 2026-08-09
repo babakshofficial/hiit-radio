@@ -94,6 +94,21 @@ async def ensure_access(update, context, allow_start=False):
         return True
 
     if await is_member(context.bot, user.id):
+        try:
+            from database import Database
+            import referrals
+            import messages as msg
+            inviter, topups = referrals.maybe_credit_on_membership(Database(), user.id)
+            if inviter and topups:
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(inviter),
+                        text=msg.referral_topup_granted(),
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            logger.debug("referral credit skipped", exc_info=True)
         return True
 
     channel = REQUIRED_CHANNEL_RAW.lstrip("@")

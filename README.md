@@ -21,8 +21,10 @@ The user interface is in **Persian (Farsi)**. Admin tooling and this documentati
 - Recommendations — “More by artist”, “Similar songs”, and lyrics after each track
 - Discovery — `/discover` personalized picks via LLM from your download history
 - Cancel — `/cancel` stops every background job the user has running (downloads, playlists, LLM calls)
-- Rate limiting — 10 downloads per hour per user (each playlist track counts separately)
+- Rate limiting — daily per-tier quotas (free 10, premium 100, unlimited)
 - Instant preview — if the full download takes more than a few seconds, a 30s voice note plays while you wait
+- Artwork download — button under each track sends the watermarked cover as a JPEG file
+- Subscriptions — free 10/day, premium 100/day, unlimited for admins; buy with Telegram Stars or earn +10 via 3 invites
 - File cache — repeated requests served from disk without re-downloading
 
 ### Access & admin
@@ -75,6 +77,9 @@ All settings live in `.env`. See `.env.example` for the full list.
 | `CACHE_DIR` / `CACHE_TTL_HOURS` | On-disk download cache |
 | `MAX_ACTIVE_JOBS` | Concurrent background jobs allowed per user (default: 3) |
 | `PREVIEW_ENABLED` / `PREVIEW_DELAY_SEC` | 30s preview voice note while a full track downloads |
+| `QUOTA_TZ` / `FREE_DAILY_LIMIT` / `PREMIUM_DAILY_LIMIT` | Daily download quota timezone and caps |
+| `TOPUP_AMOUNT` / `REFERRALS_PER_TOPUP` | Day-pass size and invites needed for a free top-up |
+| `STARS_DAYPASS` / `STARS_WEEKLY` / `STARS_MONTHLY` | Telegram Stars prices |
 | `TG_*_TIMEOUT` | Telegram API/upload timeouts for slow VPS links |
 | `YTDLP_COOKIES_FROM_BROWSER` | e.g. `chrome` — read live browser cookies |
 | `YTDLP_COOKIES` | Path to exported `cookies.txt` |
@@ -183,8 +188,12 @@ Restart the bot whenever you update cookies or environment variables.
 | `/help` | Usage, inline mode, rate limits |
 | `/history` | Recent downloads with re-download buttons |
 | `/discover` | Personalized song recommendations (LLM + download history) |
+| `/premium` | View tier/quota and buy day-pass or premium with Stars |
+| `/invite` | Personal invite link (3 verified joins = +10 today) |
+| `/liked` | Saved favorites |
+| `/top` | Charts |
 | `/aboutme` | About the bot and developer (Persian) |
-| `/cancel` | Stop an in-progress playlist download |
+| `/cancel` | Stop any background job |
 
 Send a track link, album/playlist URL, or plain song name as a normal message to download.
 
@@ -202,6 +211,8 @@ Send a track link, album/playlist URL, or plain song name as a normal message to
 | `/cookies` | Cookie jar health; send a `cookies.txt` file to the bot to replace it |
 | `/channelid` | Resolve chat ID for VIP log channel setup |
 | `/viplogtest` | Test VIP log channel (admin) |
+| `/grant <user_id> <premium\|unlimited> <days>` | Manually activate a subscription |
+| `/topup <user_id> [amount]` | Manually add today's download bonus |
 | `/broadcast <message>` | Send a message to all known users (confirmation step) |
 
 ## Download flow
@@ -247,6 +258,9 @@ Users only see simple result messages. Technical details (credential status, bac
 | `admin_logger.py` | VIP channel activity logging |
 | `progress.py` | Throttled in-chat progress updates |
 | `preview.py` | Delayed 30s preview voice notes during slow downloads |
+| `entitlements.py` | Daily quotas, tiers, and day-pass bonuses |
+| `payments.py` | Telegram Stars invoices and manual grants |
+| `referrals.py` | Invite deep-links and top-up rewards |
 | `recommendations.py` | Post-download inline keyboard |
 | `llm_service.py` | LLM recommendations for `/discover` |
 | `reporting.py` | Admin report formatters and pagination keyboards |
