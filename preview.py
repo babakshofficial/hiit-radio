@@ -106,8 +106,8 @@ class PreviewSender:
         except Exception as e:
             logger.info("Preview skipped: %s", e)
 
-    async def finish(self, delete=True):
-        """Stop the delayed send. delete=True removes a preview that already posted."""
+    async def finish(self, delete=False):
+        """Stop the delayed send. Leave any posted preview in the chat by default."""
         if self._done:
             return
         self._done = True

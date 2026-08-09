@@ -1120,7 +1120,6 @@ async def _download_and_send(message, user, metadata, context):
         )
         await log_download(context.bot, user, metadata.title, metadata.artist, platform, cached=cached)
         await status.delete()
-        await preview.finish(delete=True)
     except Exception as e:
         logger.error(f"Send failed: {e}")
         try:
@@ -1220,7 +1219,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     context.bot, user, metadata.title, metadata.artist, platform, cached=cached,
                 )
                 await status_message.delete()
-                await preview.finish(delete=True)
             except Exception as e:
                 logger.error(f"Send failed: {e}")
                 await status_message.edit_text(msg.send_failed())
