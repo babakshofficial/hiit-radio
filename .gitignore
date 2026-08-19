@@ -4,6 +4,7 @@ venv
 *.db
 *.zip
 *test*
+.cursor
 downloads
 __pycache__
 credentials.json
@@ -15,3 +16,6 @@ cache/
 hiit_radio.db
 *.bak.*
 *cookies.txt*
+web/node_modules/
+web/.next/
+web/.env.local

@@ -139,14 +139,14 @@ python3 -m venv .venv
 .venv/bin/python -c "from dotenv import load_dotenv; print('OK')"
 ```
 
-Example `/etc/systemd/system/hiit-radio-bot.service`:
+Example `/etc/systemd/system/hiit-radio.service` (bot + API + web — see [deploy/hiit-radio.service](deploy/hiit-radio.service)):
 
 ```ini
 [Service]
 User=babak
-WorkingDirectory=/home/babak/hiit-radio
-EnvironmentFile=/home/babak/hiit-radio/.env
-ExecStart=/home/babak/hiit-radio/.venv/bin/python /home/babak/hiit-radio/main.py
+WorkingDirectory=/home/babak/Desktop/Projects/hiit-radio-bot
+EnvironmentFile=-/home/babak/Desktop/Projects/hiit-radio-bot/.env
+ExecStart=/home/babak/Desktop/Projects/hiit-radio-bot/scripts/hiit-radio-stack.sh
 Restart=on-failure
 RestartSec=10
 ```
@@ -161,10 +161,11 @@ grep BOT_TOKEN /home/babak/hiit-radio/.env   # must show BOT_TOKEN=123456:ABC...
 Then:
 
 ```bash
+sudo cp /home/babak/Desktop/Projects/hiit-radio-bot/deploy/hiit-radio.service /etc/systemd/system/hiit-radio.service
 sudo systemctl daemon-reload
-sudo systemctl enable hiit-radio-bot.service
-sudo systemctl restart hiit-radio-bot.service
-sudo journalctl -u hiit-radio-bot.service -f
+sudo systemctl enable hiit-radio.service
+sudo systemctl restart hiit-radio.service
+sudo journalctl -u hiit-radio.service -f
 ```
 
 **Common mistake:** running `pip install python-dotenv` or `pip3 install -r requirements.txt` without activating the venv (or without using `.venv/bin/pip`). That installs packages for system Python while systemd runs `.venv/bin/python`, which causes `ModuleNotFoundError: No module named 'dotenv'`.
@@ -266,8 +267,24 @@ Users only see simple result messages. Technical details (credential status, bac
 | `reporting.py` | Admin report formatters and pagination keyboards |
 | `messages.py` | User-facing Persian copy and `/aboutme` text |
 | `cred_status.py` | Credential health report for `/creds` |
+| `api/` | FastAPI backend for web + Telegram Mini App |
+| `web/` | Next.js Persian RTL frontend (Mini App + browser) |
 
 Runtime directories (gitignored): `downloads/`, `cache/`, `hiit_radio.db`, `cookies.txt`.
+
+## Web app & Telegram Mini App
+
+See **[WEBAPP.md](WEBAPP.md)** for running the API + Next.js UI, BotFather setup, Login Widget domain, and systemd.
+
+Quick start (after `.env` and `web/.env.local`):
+
+```bash
+# Terminal 1 — API
+.venv/bin/uvicorn api.main:app --reload --port 8000
+
+# Terminal 2 — Web / Mini App UI
+cd web && npm run dev
+```
 
 ## Migrating from users.json
 
