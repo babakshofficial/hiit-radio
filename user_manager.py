@@ -78,6 +78,12 @@ class UserManager:
     def list_favorites(self, user_id, limit=30):
         return self.db.list_favorites(user_id, limit)
 
+    def get_audio_quality(self, user_id):
+        return self.db.get_audio_quality(user_id)
+
+    def set_audio_quality(self, user_id, quality):
+        self.db.set_audio_quality(user_id, quality)
+
     def get_favorite_by_id(self, favorite_id, user_id=None):
         return self.db.get_favorite_by_id(favorite_id, user_id)
 

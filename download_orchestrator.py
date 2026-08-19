@@ -6,6 +6,7 @@ import os
 import shutil
 
 from cache_manager import CacheManager, content_key
+from downloader import DEFAULT_QUALITY, QUALITIES
 from lyrics_service import fetch_lyrics_fast
 
 logger = logging.getLogger(__name__)
@@ -20,11 +21,28 @@ class DownloadOrchestrator:
         os.makedirs(download_dir, exist_ok=True)
 
     def _source_label(self, metadata):
-        if metadata.url and "spotify.com" in metadata.url:
-            return "spotify"
-        if metadata.url and "music.apple.com" in metadata.url:
-            return "apple"
+        if getattr(metadata, "source_url", None):
+            url = metadata.source_url.lower()
+            if "soundcloud" in url:
+                return "soundcloud"
+            if "youtube" in url or "youtu.be" in url:
+                return "youtube"
+        if metadata.url:
+            url = metadata.url.lower()
+            if "spotify.com" in url:
+                return "spotify"
+            if "music.apple.com" in url:
+                return "apple"
+            if "deezer.com" in url:
+                return "deezer"
+            if "soundcloud.com" in url:
+                return "soundcloud"
+            if "youtube.com" in url or "youtu.be" in url:
+                return "youtube"
         return "youtube"
+
+    def _cache_source(self, metadata, quality):
+        return f"{self._source_label(metadata)}:{quality}"
 
     def _file_hash(self, path):
         h = hashlib.sha256()
@@ -40,6 +58,7 @@ class DownloadOrchestrator:
         bot=None,
         user=None,
         cancel_check=None,
+        quality=None,
     ):
         """Return ``(file_path, platform, cached, error_code)``.
 
@@ -47,6 +66,11 @@ class DownloadOrchestrator:
         ``file_id`` when ``platform`` ends with ``_cache_id``.
         """
         source = self._source_label(metadata)
+        if quality is None and user is not None:
+            quality = self.db.get_audio_quality(user.id)
+        if quality not in QUALITIES:
+            quality = DEFAULT_QUALITY
+        cache_source = self._cache_source(metadata, quality)
         self.db.log_event("download_start", payload={
             "title": metadata.title, "artist": metadata.artist, "source": source,
         })
@@ -65,11 +89,11 @@ class DownloadOrchestrator:
         if _cancelled():
             return None, None, False, "cancelled"
 
-        cached_path = self.cache.get(metadata.title, metadata.artist, source)
+        cached_path = self.cache.get(metadata.title, metadata.artist, cache_source)
         if cached_path:
             # Fast path: if Telegram already has this audio, skip re-upload entirely.
             file_id = self.cache.get_telegram_file_id(
-                metadata.title, metadata.artist, source,
+                metadata.title, metadata.artist, cache_source,
             )
             if file_id:
                 self.music_downloader.sync_metadata_from_file(cached_path, metadata)
@@ -92,10 +116,10 @@ class DownloadOrchestrator:
                     await admin_logger.log_cache_hit(
                         bot, user, metadata.title, metadata.artist, source,
                     )
-                return file_id, f"{source}_cache_id", True, None
+                return file_id, f"{cache_source}_cache_id", True, None
 
             send_copy = os.path.join(self.download_dir, f"{metadata.id}_send.mp3")
-            if self.cache.copy_for_send(metadata.title, metadata.artist, source, send_copy):
+            if self.cache.copy_for_send(metadata.title, metadata.artist, cache_source, send_copy):
                 self.music_downloader.sync_metadata_from_file(send_copy, metadata)
                 try:
                     self.music_downloader.rewatermark_from_file(send_copy)
@@ -119,7 +143,7 @@ class DownloadOrchestrator:
                     await admin_logger.log_cache_hit(
                         bot, user, metadata.title, metadata.artist, source,
                     )
-                return send_copy, f"{source}_cache", True, None
+                return send_copy, f"{cache_source}_cache", True, None
 
         if _cancelled():
             return None, None, False, "cancelled"
@@ -137,8 +161,9 @@ class DownloadOrchestrator:
             metadata,
             progress_reporter=progress_reporter,
             cancel_check=cancel_check,
+            quality=quality,
         )
-        platform = "youtube" if file_path else source
+        platform = source if file_path else source
 
         if not file_path or not os.path.exists(file_path):
             code = error_code or "unknown"
@@ -193,7 +218,7 @@ class DownloadOrchestrator:
 
         # Store under enriched tags AND under the original query guess so the
         # next identical search hits this watermarked file.
-        self.cache.put(metadata.title, metadata.artist, source, file_path)
+        self.cache.put(metadata.title, metadata.artist, cache_source, file_path)
         search_q = getattr(metadata, "search_query", None)
         if search_q:
             from metadata import guess_title_artist
@@ -201,7 +226,7 @@ class DownloadOrchestrator:
             if guess_title and (
                 guess_title != metadata.title or guess_artist != metadata.artist
             ):
-                self.cache.put(guess_title, guess_artist or "", source, file_path)
+                self.cache.put(guess_title, guess_artist or "", cache_source, file_path)
 
         self.db.log_event("download_success", payload={
             "title": metadata.title, "artist": metadata.artist, "platform": platform,

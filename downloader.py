@@ -15,6 +15,9 @@ from metadata import score_query_coverage
 
 logger = logging.getLogger(__name__)
 
+QUALITIES = ("128", "192", "256", "320", "original")
+DEFAULT_QUALITY = "256"
+
 # Soft signals that a YouTube cookie jar was exported while signed in.
 _YT_AUTH_HINT_NAMES = (
     "LOGIN_INFO",
@@ -304,16 +307,11 @@ class MusicDownloader:
         }
         return self._apply_auth(ydl_opts)
 
-    def _build_ydl_opts(self, output_template, progress_hooks=None):
+    def _build_ydl_opts(self, output_template, progress_hooks=None, quality=DEFAULT_QUALITY):
         """Build yt-dlp options for the final audio download."""
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': output_template,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '256',
-            }],
             'quiet': True,
             'no_warnings': True,
             'socket_timeout': 30,
@@ -335,11 +333,18 @@ class MusicDownloader:
                 }
             },
         }
+        if quality != "original":
+            ydl_opts['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': str(quality),
+            }]
         if progress_hooks:
             ydl_opts['progress_hooks'] = list(progress_hooks)
         return self._apply_auth(ydl_opts)
 
-    async def download_song(self, metadata, progress_reporter=None, cancel_check=None):
+    async def download_song(self, metadata, progress_reporter=None, cancel_check=None,
+                          quality=DEFAULT_QUALITY):
         """Download song with multi-candidate search and multi-layer validation.
 
         Flat YouTube searches score candidates on title + artist + duration/topic
@@ -538,6 +543,72 @@ class MusicDownloader:
                 await progress_reporter.update(pct, detail)
             except Exception:
                 pass
+
+        if quality not in QUALITIES:
+            quality = DEFAULT_QUALITY
+
+        source_url = getattr(metadata, "source_url", None)
+        if source_url:
+            if _is_cancelled():
+                return None, "cancelled"
+            await _report(
+                25,
+                f"{metadata.title} — {metadata.artist}\nدانلود مستقیم از منبع...",
+            )
+            direct_pct = {"value": 0.0}
+
+            def _direct_hook(d):
+                try:
+                    if d.get("status") == "downloading":
+                        total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                        done = d.get("downloaded_bytes") or 0
+                        if total:
+                            direct_pct["value"] = min(done / float(total), 0.99)
+                        else:
+                            direct_pct["value"] = min(direct_pct["value"] + 0.02, 0.85)
+                    elif d.get("status") == "finished":
+                        direct_pct["value"] = 1.0
+                except Exception:
+                    pass
+
+            ydl_opts = self._build_ydl_opts(
+                output_template, progress_hooks=[_direct_hook], quality=quality,
+            )
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    await loop.run_in_executor(None, ydl.download, [source_url])
+            except Exception as e:
+                logger.error("Direct URL download failed: %s", e, exc_info=True)
+                return None, _classify_error(e)
+
+            file_path = os.path.join(self.download_dir, f"{metadata.id}.mp3")
+            if not os.path.exists(file_path):
+                prefix = f"{metadata.id}."
+                for name in os.listdir(self.download_dir):
+                    if name.startswith(prefix) and not name.endswith(".part"):
+                        file_path = os.path.join(self.download_dir, name)
+                        break
+            if not os.path.exists(file_path):
+                return None, "invalid_file"
+
+            try:
+                audio_file = MutagenMP3(file_path)
+                duration = audio_file.info.length
+                if duration < 30 or duration > 900:
+                    logger.warning("Direct download unusual duration (%.1fs)", duration)
+            except Exception:
+                pass
+
+            file_size = os.path.getsize(file_path)
+            if file_size < 200_000:
+                os.remove(file_path)
+                return None, "invalid_file"
+
+            await _report(
+                82, f"{metadata.title} — {metadata.artist}\nبرچسب‌گذاری و کاور...",
+            )
+            self._apply_metadata(file_path, metadata)
+            return file_path, None
 
         async def gather_best(search_prefix, source_label, strategies, pct_start=20, pct_end=40):
             best_local = None
@@ -747,7 +818,9 @@ class MusicDownloader:
                 return None, None, "cancelled"
 
             download_pct["value"] = 0.0
-            ydl_opts = self._build_ydl_opts(output_template, progress_hooks=[_yt_hook])
+            ydl_opts = self._build_ydl_opts(
+                output_template, progress_hooks=[_yt_hook], quality=quality,
+            )
 
             async def _heartbeat():
                 base = 52

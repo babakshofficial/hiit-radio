@@ -221,6 +221,12 @@ class Database:
                 )
             except sqlite3.OperationalError:
                 pass
+            try:
+                conn.execute(
+                    "ALTER TABLE users ADD COLUMN audio_quality TEXT DEFAULT '256'"
+                )
+            except sqlite3.OperationalError:
+                pass
 
     # --- Users ---
 
@@ -243,6 +249,25 @@ class Database:
                        VALUES (?, ?, ?, ?, ?)""",
                     (user_id, username, first_name, now, now),
                 )
+
+    def get_audio_quality(self, user_id, default="256"):
+        user_id = str(user_id)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT audio_quality FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        if not row or not row["audio_quality"]:
+            return default
+        return row["audio_quality"]
+
+    def set_audio_quality(self, user_id, quality):
+        user_id = str(user_id)
+        self.touch_user(user_id)
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE users SET audio_quality = ? WHERE user_id = ?",
+                (quality, user_id),
+            )
 
     def get_all_user_ids(self):
         with self._conn() as conn:
