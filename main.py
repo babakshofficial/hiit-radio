@@ -35,7 +35,8 @@ from telegram.ext import (
 )
 
 from metadata import TrackMetadata, AppleMusicMetadata
-from downloader import MusicDownloader
+from downloader import MusicDownloader, QUALITIES, DEFAULT_QUALITY
+import catalog
 from user_manager import UserManager
 from cred_status import get_credentials_status
 from gates import ensure_access, validate_channel_gate
@@ -103,6 +104,10 @@ user_manager = UserManager()
 orchestrator = DownloadOrchestrator(
     downloader, user_manager.database, download_dir=downloader.download_dir
 )
+
+
+def _ydl_opts_factory():
+    return downloader._build_search_opts()
 
 
 def _is_admin(user_id):
@@ -305,7 +310,60 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from gates import REQUIRED_CHANNEL
     if user and not REQUIRED_CHANNEL:
         referrals.maybe_credit_on_membership(user_manager.database, user.id)
-    await update.message.reply_text(msg.start_text())
+    args = context.args or []
+    if args and str(args[0]).lower().startswith("premium"):
+        if await ensure_access(update, context):
+            snap = entitlements.status_snapshot(
+                user_manager.database, update.effective_user.id,
+            )
+            await update.message.reply_text(
+                msg.premium_status(snap),
+                reply_markup=payments.premium_keyboard(),
+            )
+        return
+    first_name = user.first_name if user else ""
+    await update.message.reply_text(
+        msg.start_text(first_name), reply_markup=_start_menu_keyboard(),
+    )
+
+
+def _start_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔎 جستجوی آهنگ", callback_data="menu:search"),
+            InlineKeyboardButton("🎙 مرور هنرمند", callback_data="menu:artist"),
+        ],
+        [
+            InlineKeyboardButton("🎛 کیفیت صدا", callback_data="menu:quality"),
+            InlineKeyboardButton("📚 راهنمای کامل", callback_data="menu:help"),
+        ],
+        [
+            InlineKeyboardButton("🕐 تاریخچه دانلود", callback_data="menu:history"),
+            InlineKeyboardButton("💖 علاقه‌مندی‌ها", callback_data="menu:liked"),
+        ],
+        [
+            InlineKeyboardButton("🔥 محبوب‌ترین‌ها", callback_data="menu:top"),
+            InlineKeyboardButton("🎯 پیشنهاد شخصی", callback_data="menu:discover"),
+        ],
+        [
+            InlineKeyboardButton("💠 پریمیوم", callback_data="menu:premium"),
+            InlineKeyboardButton("🎁 دعوت دوست", callback_data="menu:invite"),
+        ],
+        [
+            InlineKeyboardButton("🤖 درباره ربات", callback_data="menu:aboutme"),
+            InlineKeyboardButton("⛔ لغو کار جاری", callback_data="menu:cancel"),
+        ],
+    ])
+
+
+def _back_button():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="menu:back")],
+    ])
+
+
+def _back_row():
+    return [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="menu:back")]
 
 
 async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -778,11 +836,171 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _source_label(metadata):
-    if metadata.url and "spotify.com" in metadata.url:
-        return "spotify"
-    if metadata.url and "music.apple.com" in metadata.url:
-        return "apple"
+    if getattr(metadata, "source_url", None):
+        url = metadata.source_url.lower()
+        if "soundcloud" in url:
+            return "soundcloud"
+        if "youtube" in url or "youtu.be" in url:
+            return "youtube"
+    if metadata.url:
+        url = metadata.url.lower()
+        if "spotify.com" in url:
+            return "spotify"
+        if "music.apple.com" in url:
+            return "apple"
+        if "deezer.com" in url:
+            return "deezer"
+        if "soundcloud.com" in url:
+            return "soundcloud"
+        if "youtube.com" in url or "youtu.be" in url:
+            return "youtube"
     return "youtube"
+
+
+def _catalog_pick_label(hit):
+    kind_fa = {"track": "🎵", "album": "💿", "playlist": "📋", "artist": "🎤"}.get(hit.kind, "•")
+    name = (hit.name or "")[:28]
+    return f"{kind_fa} {name}"
+
+
+async def _show_search_results(message, query, hits, context):
+    lines = [msg.search_header(query)]
+    buttons = []
+    context.user_data["search_cache"] = {}
+    for i, hit in enumerate(hits, 1):
+        lines.append(msg.search_hit_line(i, hit.name, hit.subtitle, hit.kind, hit.source))
+        context.user_data["search_cache"][str(i)] = hit
+        buttons.append([
+            InlineKeyboardButton(
+                _catalog_pick_label(hit),
+                callback_data=f"catpick:{i}",
+            )
+        ])
+    await message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def _show_artist_page(message, artist_id, context, edit=False):
+    try:
+        data = await catalog.fetch_artist(artist_id)
+    except catalog.CatalogError as exc:
+        text = str(exc)
+        if edit:
+            await message.edit_text(text)
+        else:
+            await message.reply_text(text)
+        return
+    name = data.get("name") or msg.UNKNOWN
+    lines = [msg.artist_header(name), "", msg.artist_top_header()]
+    buttons = []
+    context.user_data["artist_cache"] = {"id": artist_id, "tracks": {}, "albums": {}}
+    for i, track in enumerate(data.get("top") or [], 1):
+        lines.append(f"{i}. {track.title} — {track.artist or name}")
+        context.user_data["artist_cache"]["tracks"][str(i)] = track
+        buttons.append([
+            InlineKeyboardButton(
+                _btn_download(track.title, i),
+                callback_data=f"artistpick:track:{i}",
+            )
+        ])
+    albums = data.get("albums") or []
+    if albums:
+        lines.extend(["", msg.artist_albums_header()])
+        for j, album in enumerate(albums[:8], 1):
+            title = album.get("title") or msg.UNKNOWN
+            year = (album.get("release_date") or "")[:4]
+            sub = f" ({year})" if year else ""
+            lines.append(f"{j}. {title}{sub}")
+            link = album.get("link") or f"https://www.deezer.com/album/{album.get('id')}"
+            context.user_data["artist_cache"]["albums"][str(j)] = link
+            buttons.append([
+                InlineKeyboardButton(
+                    f"💿 {title[:26]}",
+                    callback_data=f"artistpick:album:{j}",
+                )
+            ])
+    text = "\n".join(lines)
+    markup = InlineKeyboardMarkup(buttons) if buttons else None
+    if edit:
+        await message.edit_text(text, reply_markup=markup)
+    else:
+        await message.reply_text(text, reply_markup=markup)
+
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    query = " ".join(context.args or []).strip()
+    if len(query) < 2:
+        await update.message.reply_text(msg.search_usage())
+        return
+    status = await update.message.reply_text(msg.searching())
+    hits = await catalog.search_all(query, limit=10)
+    await status.delete()
+    if not hits:
+        await update.message.reply_text(msg.search_empty())
+        return
+    await _show_search_results(update.message, query, hits, context)
+
+
+async def quality_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    user_id = update.effective_user.id
+    if context.args:
+        value = context.args[0].strip().lower()
+        if value not in QUALITIES:
+            await update.message.reply_text(msg.quality_invalid())
+            return
+        user_manager.set_audio_quality(user_id, value)
+        await update.message.reply_text(msg.quality_set(value))
+        return
+    current = user_manager.get_audio_quality(user_id)
+    buttons = [
+        [
+            InlineKeyboardButton(
+                f"{'✓ ' if q == current else ''}{q}",
+                callback_data=f"qual:{q}",
+            )
+            for q in ("128", "192", "256", "320")
+        ],
+        [InlineKeyboardButton(
+            f"{'✓ ' if current == 'original' else ''}original",
+            callback_data="qual:original",
+        )],
+    ]
+    await update.message.reply_text(
+        msg.quality_status(current),
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def artist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    query = " ".join(context.args or []).strip()
+    if len(query) < 2:
+        await update.message.reply_text(msg.artist_usage())
+        return
+    status = await update.message.reply_text(msg.searching())
+    hits = await catalog.search_all(query, limit=8)
+    artists = [h for h in hits if h.kind == "artist"]
+    await status.delete()
+    if not artists:
+        await update.message.reply_text(msg.artist_not_found(query))
+        return
+    if len(artists) == 1:
+        await _show_artist_page(update.message, artists[0].id, context)
+        return
+    lines = [msg.search_header(query)]
+    buttons = []
+    context.user_data["artist_search_cache"] = {}
+    for i, hit in enumerate(artists[:6], 1):
+        lines.append(msg.search_hit_line(i, hit.name, hit.subtitle, hit.kind, hit.source))
+        context.user_data["artist_search_cache"][str(i)] = hit.id
+        buttons.append([
+            InlineKeyboardButton(hit.name[:30], callback_data=f"artistpick:profile:{i}")
+        ])
+    await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
 
 
 def _store_audio_file_id(metadata, platform, msg):
@@ -822,12 +1040,23 @@ async def inline_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_access(update, context):
         return
 
-    results = await AppleMusicMetadata.search_many(query, limit=5)
+    hits = await catalog.search_all(query, limit=8)
     inline_results = []
-    for i, r in enumerate(results):
-        meta = TrackMetadata()._copy_from(r)
+    for i, hit in enumerate(hits):
+        if hit.kind != "track":
+            continue
+        meta = catalog.hit_to_track_metadata(hit)
+        if hit.source == "apple" and hit.url:
+            try:
+                resolved = await TrackMetadata.create(hit.url, _ydl_opts_factory)
+                if resolved and resolved.title:
+                    meta = resolved
+            except Exception:
+                pass
         source = _source_label(meta)
-        file_id = orchestrator.cache.get_telegram_file_id(meta.title, meta.artist, source)
+        file_id = orchestrator.cache.get_telegram_file_id(meta.title, meta.artist, f"{source}:{DEFAULT_QUALITY}")
+        if not file_id:
+            file_id = orchestrator.cache.get_telegram_file_id(meta.title, meta.artist, source)
         if file_id:
             inline_results.append(
                 InlineQueryResultCachedAudio(
@@ -839,6 +1068,8 @@ async def inline_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             continue
         desc = msg.inline_description(meta.artist)
+        if hit.source:
+            desc = f"{msg.platform_fa(hit.source)} · {desc}"
         inline_results.append(
             InlineQueryResultArticle(
                 id=f"{meta.id}_{i}",
@@ -849,7 +1080,8 @@ async def inline_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ),
             )
         )
-    await update.inline_query.answer(inline_results, cache_time=30)
+    if inline_results:
+        await update.inline_query.answer(inline_results, cache_time=30)
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -858,6 +1090,148 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_access(update, context):
         return
     data = query.data or ""
+
+    if data.startswith("menu:"):
+        action = data.split(":", 1)[1]
+        user = update.effective_user
+        chat_id = query.message.chat_id
+
+        if action == "back":
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+            first_name = user.first_name if user else ""
+            await context.bot.send_message(
+                chat_id, msg.start_text(first_name),
+                reply_markup=_start_menu_keyboard(),
+            )
+            return
+
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+        if action == "search":
+            await context.bot.send_message(
+                chat_id, msg.search_usage(), reply_markup=_back_button(),
+            )
+        elif action == "artist":
+            await context.bot.send_message(
+                chat_id, msg.artist_usage(), reply_markup=_back_button(),
+            )
+        elif action == "quality":
+            current = user_manager.get_audio_quality(user.id)
+            buttons = [
+                [
+                    InlineKeyboardButton(
+                        f"{'✅ ' if q == current else '🔘 '}{q} kbps",
+                        callback_data=f"qual:{q}",
+                    )
+                    for q in ("128", "192")
+                ],
+                [
+                    InlineKeyboardButton(
+                        f"{'✅ ' if q == current else '🔘 '}{q} kbps",
+                        callback_data=f"qual:{q}",
+                    )
+                    for q in ("256", "320")
+                ],
+                [InlineKeyboardButton(
+                    f"{'✅ ' if current == 'original' else '🔘 '}original (بدون تبدیل)",
+                    callback_data="qual:original",
+                )],
+                _back_row(),
+            ]
+            await context.bot.send_message(
+                chat_id, msg.quality_status(current),
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        elif action == "help":
+            await context.bot.send_message(
+                chat_id, msg.help_text(), reply_markup=_back_button(),
+            )
+        elif action == "history":
+            rows = user_manager.get_user_history(user.id, limit=10)
+            if not rows:
+                await context.bot.send_message(
+                    chat_id, msg.history_empty(), reply_markup=_back_button(),
+                )
+            else:
+                lines = [msg.history_header()]
+                buttons = []
+                for row in rows:
+                    ts = time.strftime("%m/%d %H:%M", time.localtime(row["created_at"]))
+                    lines.append(
+                        f"• {row['title']} — {row['artist']} "
+                        f"({_platform_fa(row['platform'])}) [{ts}]"
+                    )
+                    buttons.append([
+                        InlineKeyboardButton(
+                            _btn_redownload(row["title"]),
+                            callback_data=f"redownload:{row['id']}",
+                        )
+                    ])
+                buttons.append(_back_row())
+                await context.bot.send_message(
+                    chat_id, "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+        elif action == "liked":
+            rows = user_manager.list_favorites(user.id, limit=30)
+            if not rows:
+                await context.bot.send_message(
+                    chat_id, msg.liked_empty(), reply_markup=_back_button(),
+                )
+            else:
+                lines = [msg.liked_header()]
+                buttons = []
+                for row in rows:
+                    artist = row.get("artist") or msg.UNKNOWN
+                    lines.append(f"• {row['title']} — {artist}")
+                    buttons.append([
+                        InlineKeyboardButton(
+                            msg.btn_download(row["title"]),
+                            callback_data=f"liked:{row['id']}",
+                        )
+                    ])
+                buttons.append(_back_row())
+                await context.bot.send_message(
+                    chat_id, "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+        elif action == "top":
+            context.args = []
+            await top_command(update, context)
+        elif action == "discover":
+            context.args = []
+            await discover_command(update, context)
+        elif action == "premium":
+            snap = entitlements.status_snapshot(user_manager.database, user.id)
+            kb = payments.premium_keyboard()
+            rows = list(kb.inline_keyboard) if kb else []
+            rows.append(_back_row())
+            await context.bot.send_message(
+                chat_id, msg.premium_status(snap),
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+        elif action == "invite":
+            prog = referrals.progress(user_manager.database, user.id)
+            await context.bot.send_message(
+                chat_id, msg.invite_status(prog), reply_markup=_back_button(),
+            )
+        elif action == "aboutme":
+            await context.bot.send_message(
+                chat_id, msg.aboutme_text(), reply_markup=_back_button(),
+            )
+        elif action == "cancel":
+            cancelled = jobs.cancel_all(context)
+            text = msg.cancel_ok(len(cancelled)) if cancelled else msg.cancel_no_job()
+            await context.bot.send_message(
+                chat_id, text, reply_markup=_back_button(),
+            )
+        return
 
     if data.startswith("pay:"):
         action = data.split(":", 1)[1]
@@ -1118,6 +1492,110 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _end_job(context, job)
         return
 
+    if data.startswith("qual:"):
+        value = data.split(":", 1)[1]
+        if value not in QUALITIES:
+            await query.message.reply_text(msg.quality_invalid())
+            return
+        user_manager.set_audio_quality(update.effective_user.id, value)
+        current = value
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    f"{'✅ ' if q == current else '🔘 '}{q} kbps",
+                    callback_data=f"qual:{q}",
+                )
+                for q in ("128", "192")
+            ],
+            [
+                InlineKeyboardButton(
+                    f"{'✅ ' if q == current else '🔘 '}{q} kbps",
+                    callback_data=f"qual:{q}",
+                )
+                for q in ("256", "320")
+            ],
+            [InlineKeyboardButton(
+                f"{'✅ ' if current == 'original' else '🔘 '}original (بدون تبدیل)",
+                callback_data="qual:original",
+            )],
+            _back_row(),
+        ]
+        try:
+            await query.message.edit_text(
+                msg.quality_set(value) + "\n\n" + msg.quality_status(current),
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except Exception:
+            await query.message.reply_text(msg.quality_set(value))
+        return
+
+    if data.startswith("catpick:"):
+        idx = data.split(":", 1)[1]
+        hit = context.user_data.get("search_cache", {}).get(idx)
+        if not hit:
+            await query.message.reply_text(msg.pick_expired())
+            return
+        if hit.kind == "track":
+            if hit.source == "apple" and hit.url:
+                meta = await TrackMetadata.create(hit.url, ydl_opts_factory=_ydl_opts_factory)
+            else:
+                meta = catalog.hit_to_track_metadata(hit)
+            await _download_and_send(query.message, update.effective_user, meta, context)
+            return
+        if hit.kind in ("album", "playlist"):
+            try:
+                name, tracks = await catalog.resolve_url(hit.url, _ydl_opts_factory)
+            except catalog.CatalogError as exc:
+                await query.message.reply_text(str(exc))
+                return
+            if not tracks:
+                await query.message.reply_text(msg.collection_not_found())
+                return
+            await process_playlist(
+                update, context, tracks, name or hit.name, orchestrator,
+                user_manager, admin_logger,
+            )
+            return
+        if hit.kind == "artist":
+            await _show_artist_page(query.message, hit.id, context)
+            return
+        return
+
+    if data.startswith("artistpick:"):
+        parts = data.split(":")
+        action = parts[1] if len(parts) > 1 else ""
+        idx = parts[2] if len(parts) > 2 else ""
+        if action == "profile":
+            artist_id = context.user_data.get("artist_search_cache", {}).get(idx)
+            if not artist_id:
+                await query.message.reply_text(msg.pick_expired())
+                return
+            await _show_artist_page(query.message, artist_id, context)
+            return
+        cache = context.user_data.get("artist_cache") or {}
+        if action == "track":
+            meta = cache.get("tracks", {}).get(idx)
+            if not meta:
+                await query.message.reply_text(msg.pick_expired())
+                return
+            await _download_and_send(query.message, update.effective_user, meta, context)
+            return
+        if action == "album":
+            url = cache.get("albums", {}).get(idx)
+            if not url:
+                await query.message.reply_text(msg.pick_expired())
+                return
+            name, tracks = await TrackMetadata.create_collection(url, _ydl_opts_factory)
+            if not tracks:
+                await query.message.reply_text(msg.collection_not_found())
+                return
+            await process_playlist(
+                update, context, tracks, name, orchestrator,
+                user_manager, admin_logger,
+            )
+            return
+        return
+
     if data.startswith("searchpick:"):
         idx = data.split(":", 1)[1]
         meta = (
@@ -1345,7 +1823,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await TrackMetadata.is_collection_url(text):
         if await _reject_if_busy(update.message, context):
             return
-        name, tracks = await TrackMetadata.create_collection(text)
+        name, tracks = await TrackMetadata.create_collection(text, _ydl_opts_factory)
         if tracks:
             await process_playlist(
                 update, context, tracks, name, orchestrator,
@@ -1363,7 +1841,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     job = _start_job(context, "track")
     status_message = await update.message.reply_text(msg.searching())
-    metadata = await TrackMetadata.create(text)
+    metadata = await TrackMetadata.create(text, _ydl_opts_factory)
 
     if not metadata.title:
         _end_job(context, job)
@@ -1558,6 +2036,11 @@ async def _on_startup(application):
     removed = orchestrator.sweep_cache()
     await log_system(application.bot, "پاکسازی کش (startup)", removed=removed)
     await _check_and_report_cookie_health(application.bot)
+    try:
+        from api.webapp_menu import configure_webapp_menu
+        await configure_webapp_menu(application.bot)
+    except Exception:
+        logger.exception("Mini App menu setup skipped")
     if application.job_queue:
         application.job_queue.run_repeating(_cache_sweep_job, interval=3600, first=60)
         application.job_queue.run_repeating(_cookie_health_job, interval=3600, first=120)
@@ -1851,6 +2334,9 @@ def main():
     application.add_handler(CommandHandler("liked", liked_command))
     application.add_handler(CommandHandler("top", top_command))
     application.add_handler(CommandHandler("discover", discover_command))
+    application.add_handler(CommandHandler("search", search_command))
+    application.add_handler(CommandHandler("quality", quality_command))
+    application.add_handler(CommandHandler("artist", artist_command))
     application.add_handler(CommandHandler("premium", premium_command))
     application.add_handler(CommandHandler("invite", invite_command))
     application.add_handler(CommandHandler("grant", grant_command))
