@@ -1002,6 +1002,7 @@ class TrackMetadata:
         self.type = None
         self.id = None
         self.url = None
+        self.source_url = None  # direct YouTube/SoundCloud page — skip search
         self.search_query = None  # original free-text query when iTunes is skipped
 
     def _copy_from(self, source, url=None):
@@ -1014,15 +1015,31 @@ class TrackMetadata:
         self.type = getattr(source, "type", None)
         self.id = getattr(source, "id", None)
         self.url = url if url is not None else getattr(source, "url", None)
+        self.source_url = getattr(source, "source_url", None)
         self.search_query = getattr(source, "search_query", None)
         return self
 
     @classmethod
-    async def create(cls, text):
+    async def create(cls, text, ydl_opts_factory=None):
         meta = cls()
         if not text:
             return meta
         text = text.strip()
+
+        import catalog
+
+        if catalog.is_deezer_url(text) or catalog.is_direct_media_url(text):
+            try:
+                name, tracks = await catalog.resolve_url(text, ydl_opts_factory or (lambda: {}))
+                if len(tracks) == 1:
+                    meta._copy_from(tracks[0], url=tracks[0].url)
+                    return meta
+            except catalog.CatalogError as exc:
+                logger.error("Catalog resolve failed: %s", exc)
+                return meta
+            except Exception as exc:
+                logger.error("Catalog resolve error: %s", exc)
+                return meta
 
         # SPOTIFY LINK
         if "spotify.com" in text:
@@ -1083,11 +1100,23 @@ class TrackMetadata:
         return meta
 
     @classmethod
-    async def create_collection(cls, text):
+    async def create_collection(cls, text, ydl_opts_factory=None):
         """Return (collection_name, list[TrackMetadata]) for album/playlist URLs, else ([], [])."""
         text = (text or "").strip()
         if not text:
             return None, []
+
+        import catalog
+
+        if catalog.is_collection_url(text):
+            try:
+                return await catalog.resolve_url(text, ydl_opts_factory or (lambda: {}))
+            except catalog.CatalogError as exc:
+                logger.error("Collection resolve failed: %s", exc)
+                return None, []
+            except Exception as exc:
+                logger.error("Collection resolve error: %s", exc)
+                return None, []
 
         # Spotify album/playlist
         if "spotify.com" in text and ("/album/" in text or "/playlist/" in text):
@@ -1132,6 +1161,9 @@ class TrackMetadata:
     @classmethod
     async def is_collection_url(cls, text):
         text = (text or "").strip()
+        import catalog
+        if catalog.is_collection_url(text):
+            return True
         if "spotify.com" in text and ("/album/" in text or "/playlist/" in text):
             return True
         if "music.apple.com" in text and ("/album/" in text or "/playlist/" in text):
