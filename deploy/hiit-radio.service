@@ -1,0 +1,28 @@
+[Unit]
+Description=HiiT Radio (bot + API + web)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=babak
+Group=babak
+WorkingDirectory=/home/babak/Desktop/Projects/hiit-radio-bot
+EnvironmentFile=-/home/babak/Desktop/Projects/hiit-radio-bot/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/babak/Desktop/Projects/hiit-radio-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin
+
+# Bot (Telegram via proxychains) + FastAPI :8000 + Next.js :3000
+ExecStart=/home/babak/Desktop/Projects/hiit-radio-bot/scripts/hiit-radio-stack.sh
+
+KillMode=control-group
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hiit-radio
+
+[Install]
+WantedBy=multi-user.target
