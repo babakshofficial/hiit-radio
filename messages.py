@@ -28,6 +28,8 @@ def platform_fa(platform):
         return "یوتیوب"
     if "soundcloud" in p:
         return "ساندکلاود"
+    if "deezer" in p:
+        return "دیزر"
     if "cache" in p:
         return "کش"
     return platform
@@ -49,21 +51,15 @@ def btn_download(title, index=None):
     return f"دانلود «{label}»"
 
 
-def start_text():
+def start_text(first_name=""):
+    name = first_name or "دوست عزیز"
     return (
-        "سلام! خوش اومدی به HiiT Radio 🎵\n\n"
-        "من اینجام تا موزیک موردعلاقه‌ات رو دانلود کنم — "
-        "لینک اسپاتیفای، اپل موزیک، آلبوم، پلی‌لیست، یا فقط اسم آهنگ رو بفرست.\n\n"
-        "دستورها:\n"
-        "/help — راهنمای استفاده\n"
-        "/history — دانلودهای اخیر\n"
-        "/liked — علاقه‌مندی‌ها\n"
-        "/top — محبوب‌ترین آهنگ‌ها\n"
-        "/discover — پیشنهاد شخصی\n"
-        "/premium — اشتراک و سقف دانلود روزانه\n"
-        "/invite — دعوت دوست و دریافت سقف بیشتر\n"
-        "/aboutme — درباره ربات و سازنده\n"
-        "/cancel — توقف کار جاری"
+        f"سلام {name}! 🎶\n\n"
+        "به HiiT Radio خوش اومدی — ربات دانلود موزیک بدون محدودیت!\n\n"
+        "فقط کافیه لینک آهنگ، آلبوم یا پلی‌لیست رو بفرستی "
+        "(اسپاتیفای · اپل موزیک · دیزر · یوتیوب · ساندکلاود) "
+        "یا اسم آهنگ رو بنویسی — بقیه‌اش با من.\n\n"
+        "از دکمه‌های زیر شروع کن 👇"
     )
 
 
@@ -71,8 +67,12 @@ def help_text():
     return (
         "چطور استفاده کنم؟\n\n"
         "۱. لینک آهنگ، آلبوم یا پلی‌لیست بفرست\n"
+        "   (اسپاتیفای · اپل موزیک · دیزر · یوتیوب · ساندکلاود)\n"
         "۲. یا اسم آهنگ و هنرمند رو بنویس\n"
-        "۳. یا اینلاین: "
+        "۳. /search نام آهنگ — جستجو در دیزر و اپل\n"
+        "۴. /artist نام هنرمند — آلبوم‌ها و برترین‌ها\n"
+        "۵. /quality — انتخاب کیفیت MP3\n"
+        "۶. یا اینلاین: "
         f"{BOT_INLINE} نام آهنگ — توی هر چتی\n\n"
         "/liked — آهنگ‌های ذخیره‌شده\n"
         "/top — جدول محبوب‌ها (day / week / all)\n"
@@ -105,8 +105,9 @@ def aboutme_text():
     lines.extend([
         "",
         "چی کار می‌کنه؟",
-        "• لینک اسپاتیفای / اپل موزیک / آلبوم و پلی‌لیست",
-        "• جستجو با نام آهنگ",
+        "• لینک اسپاتیفای / اپل / دیزر / یوتیوب / ساندکلاود",
+        "• جستجو با نام آهنگ (/search)",
+        "• مرور هنرمند (/artist) و کیفیت صدا (/quality)",
         "• پیشنهاد شخصی با /discover",
         "",
         "اگه ایده یا باگی داشتی، پیام بده — خوشحال می‌شم بشنوم 😊",
@@ -581,3 +582,80 @@ def artwork_not_found():
 
 def artwork_sending():
     return "در حال آماده‌سازی کاور..."
+
+
+def search_usage():
+    return "نحوه استفاده:\n/search نام آهنگ یا هنرمند"
+
+
+def search_empty():
+    return "نتیجه‌ای پیدا نشد — عبارت دیگه‌ای امتحان کن."
+
+
+def search_header(query):
+    return f"🔍 نتایج جستجو برای «{query}»:"
+
+
+def search_hit_line(index, name, subtitle, kind, source):
+    kind_fa = {
+        "track": "آهنگ",
+        "album": "آلبوم",
+        "playlist": "پلی‌لیست",
+        "artist": "هنرمند",
+    }.get(kind, kind)
+    source_fa = platform_fa(source)
+    sub = f" — {subtitle}" if subtitle else ""
+    return f"{index}. [{kind_fa}/{source_fa}] {name}{sub}"
+
+
+def artist_usage():
+    return "نحوه استفاده:\n/artist نام هنرمند"
+
+
+def artist_not_found(name):
+    return f"هنرمند «{name}» پیدا نشد."
+
+
+def artist_header(name):
+    return f"🎤 {name}"
+
+
+def artist_top_header():
+    return "برترین آهنگ‌ها:"
+
+
+def artist_albums_header():
+    return "آلبوم‌ها:"
+
+
+def quality_status(current):
+    hint = {
+        "128": "کم‌حجم — مناسب فضای کم",
+        "192": "متعادل — کیفیت خوب",
+        "256": "پیش‌فرض ربات",
+        "320": "بهترین MP3",
+        "original": "بدون تبدیل — همان فایل منبع",
+    }.get(current, "")
+    return (
+        f"🎚 کیفیت فعلی: {current} kbps"
+        if current != "original"
+        else "🎚 کیفیت فعلی: original (بدون تبدیل)"
+    ) + (f"\n{hint}" if hint else "") + "\n\nیکی از دکمه‌ها رو بزن یا بنویس: /quality 320"
+
+
+def quality_set(value):
+    if value == "original":
+        return "✅ کیفیت روی original (بدون تبدیل) تنظیم شد."
+    return f"✅ کیفیت روی {value} kbps تنظیم شد."
+
+
+def quality_invalid():
+    return "کیفیت نامعتبر. گزینه‌ها: 128 · 192 · 256 · 320 · original"
+
+
+def playlist_zip_sending(name, count):
+    return f"📦 در حال ساخت ZIP ({count} آهنگ) — {name}..."
+
+
+def playlist_zip_caption(name, count):
+    return f"📦 {name} — {count} آهنگ"
