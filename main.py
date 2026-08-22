@@ -79,6 +79,7 @@ import payments
 import referrals
 import reporting as rpt
 import error_report
+import support_chat
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
@@ -2463,9 +2464,11 @@ async def _show_global_section(message, section, page, edit=False):
     elif section == "bugs":
         rows, total, total_pages = db.list_error_reports(page, rpt.PER_PAGE)
         text = rpt.format_error_reports_page(rows, page, total_pages, total)
-        scope = "bugs"
         await _send_report(
-            message, text, rpt.build_pagination_keyboard(scope, page, total_pages), edit=edit,
+            message,
+            text,
+            rpt.build_error_reports_keyboard(rows, page, total_pages),
+            edit=edit,
         )
         return
     else:
@@ -2550,6 +2553,110 @@ async def error_report_callback(update: Update, context: ContextTypes.DEFAULT_TY
         pass
 
 
+async def support_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = update.effective_user
+    if not user or not query or not _is_admin(user.id):
+        if query:
+            await query.answer()
+        return
+
+    parts = (query.data or "").split(":")
+    if len(parts) < 3:
+        await query.answer()
+        return
+
+    action = parts[1]
+    db = user_manager.database
+
+    if action == "reply":
+        try:
+            report_id = int(parts[2])
+        except ValueError:
+            await query.answer()
+            return
+        ok, text = await support_chat.start_admin_compose(
+            context.bot, db, user.id, report_id,
+        )
+        await query.answer("✅" if ok else text[:200], show_alert=not ok)
+        if ok:
+            await query.message.reply_text(text)
+        return
+
+    if action == "end":
+        try:
+            thread_id = int(parts[2])
+        except ValueError:
+            await query.answer()
+            return
+        ok, text = await support_chat.end_thread(
+            context.bot, db, thread_id, admin_id=user.id,
+        )
+        await query.answer(text[:200], show_alert=True)
+
+
+async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+    if _is_admin(user.id):
+        await update.message.reply_text(msg.support_usage())
+        return
+
+    body = " ".join(context.args).strip() if context.args else ""
+    if not body:
+        await update.message.reply_text(msg.support_usage())
+        return
+
+    ok, text = await support_chat.forward_user_support_message(
+        context.bot, user_manager.database, user.id, body,
+    )
+    await update.message.reply_text(text)
+
+
+async def supportend_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not _is_admin(user.id):
+        return
+
+    ok, text = await support_chat.end_admin_session(
+        context.bot, user_manager.database, user.id,
+    )
+    await update.message.reply_text(text)
+
+
+async def admin_support_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Forward admin private text to user while compose session is active."""
+    user = update.effective_user
+    if not user or not _is_admin(user.id):
+        return
+
+    session = user_manager.database.get_admin_support_session(user.id)
+    if not session:
+        await handle_message(update, context)
+        return
+
+    text = (update.message.text or "").strip()
+    if not text:
+        return
+
+    ok, reply = await support_chat.forward_admin_message(
+        context.bot,
+        user_manager.database,
+        user.id,
+        text,
+        notify_opened=True,
+    )
+    thread_id = session["thread_id"]
+    if ok:
+        await update.message.reply_text(
+            reply,
+            reply_markup=support_chat.build_admin_active_keyboard(thread_id),
+        )
+    else:
+        await update.message.reply_text(reply)
+
+
 async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2606,6 +2713,8 @@ def _describe_user_request(update):
         if data.startswith("rpt:"):
             return None
         if data.startswith("err:"):
+            return None
+        if data.startswith("sup:"):
             return None
         return "callback", data[:500]
     if update.inline_query:
@@ -2706,7 +2815,10 @@ def main():
     application.add_handler(CommandHandler("aboutme", aboutme_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(CommandHandler("support", support_command))
+    application.add_handler(CommandHandler("supportend", supportend_command))
     application.add_handler(CallbackQueryHandler(error_report_callback, pattern=r"^err:\d+$"))
+    application.add_handler(CallbackQueryHandler(support_callback, pattern=r"^sup:"))
     application.add_handler(CallbackQueryHandler(report_callback, pattern=r"^rpt:"))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(InlineQueryHandler(inline_search))
@@ -2719,6 +2831,16 @@ def main():
                 & filters.User(user_id=int(ADMIN_ID)),
                 cookies_document,
             )
+        )
+        application.add_handler(
+            MessageHandler(
+                filters.TEXT
+                & ~filters.COMMAND
+                & filters.ChatType.PRIVATE
+                & filters.User(user_id=int(ADMIN_ID)),
+                admin_support_message_handler,
+            ),
+            group=0,
         )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 

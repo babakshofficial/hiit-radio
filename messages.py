@@ -551,6 +551,88 @@ def error_report_rate_limited():
     return "محدودیت گزارش — فردا دوباره امتحان کن."
 
 
+def support_admin_prompt(report_id, user_id):
+    return (
+        f"حالت پاسخ فعال — گزارش #{report_id} (کاربر {user_id})\n"
+        "هر پیامی بفرستی مستقیم به کاربر می‌رسد.\n"
+        "پایان گفتگو: /supportend"
+    )
+
+
+def support_user_message(admin_text):
+    return (
+        "📩 پیام از پشتیبان HiiT Radio\n\n"
+        f"{admin_text}\n\n"
+        "برای پاسخ: /support متن پیام"
+    )
+
+
+def support_user_opened():
+    return (
+        "پشتیبان درباره گزارش خطایت باهات تماس گرفت.\n"
+        "برای پاسخ از /support استفاده کن — بقیه پیام‌ها مثل همیشه برای دانلود آهنگه."
+    )
+
+
+def support_user_closed():
+    return "گفتگو با پشتیبان پایان یافت. اگر باز هم مشکلی داری، دوباره گزارش بده."
+
+
+def support_no_thread():
+    return "گفتگوی فعالی با پشتیبان نداری — یا تمام شده یا هنوز پیامی نیومده."
+
+
+def support_usage():
+    return "نحوه استفاده: /support متن پیام"
+
+
+def support_empty_message():
+    return "پیام خالی — بعد از /support متن بنویس."
+
+
+def support_sent_admin(user_id):
+    return f"✅ پیام به کاربر {user_id} ارسال شد."
+
+
+def support_sent_user():
+    return "✅ پیامت به پشتیبان رسید."
+
+
+def support_forward_to_admin(user_label, report_id, text):
+    return (
+        f"💬 پاسخ کاربر ({user_label}) — گزارش #{report_id}\n\n"
+        f"{text}"
+    )
+
+
+def support_send_failed_blocked():
+    return "ارسال ناموفق — کاربر ربات را block کرده."
+
+
+def support_send_failed():
+    return "ارسال ناموفق — بعداً دوباره امتحان کن."
+
+
+def support_thread_ended_admin(thread_id):
+    return f"گفتگو #{thread_id} بسته شد."
+
+
+def support_thread_ended_no_open():
+    return "گفتگوی باز فعالی نیست."
+
+
+def support_reply_button():
+    return "💬 پاسخ به کاربر"
+
+
+def support_end_button():
+    return "⏹ پایان گفتگو"
+
+
+def support_report_not_found():
+    return "گزارش پیدا نشد یا هنوز ارسال نشده."
+
+
 def cookies_status(ok, detail, path, updated=None):
     """Admin-facing cookie jar health report."""
     lines = [

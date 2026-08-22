@@ -210,6 +210,28 @@ def format_error_reports_page(rows, page, total_pages, total):
     return "\n".join(lines)
 
 
+def build_error_reports_keyboard(rows, page, total_pages):
+    """Reply buttons for each report on the current page."""
+    import messages as msg
+
+    buttons = []
+    for row in rows[:5]:
+        rid = row.get("id")
+        if rid is None:
+            continue
+        buttons.append([
+            InlineKeyboardButton(
+                f"{msg.support_reply_button()} #{rid}",
+                callback_data=f"sup:reply:{rid}",
+            ),
+        ])
+    nav = _page_row("bugs", page, total_pages)
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton("منوی گزارش", callback_data="rpt:menu")])
+    return InlineKeyboardMarkup(buttons)
+
+
 def _page_row(scope, page, total_pages):
     buttons = []
     if page > 0:

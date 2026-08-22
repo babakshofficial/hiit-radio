@@ -235,6 +235,39 @@ CREATE INDEX IF NOT EXISTS idx_user_error_reports_submitted
 
 CREATE INDEX IF NOT EXISTS idx_user_error_reports_user_time
     ON user_error_reports(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS support_threads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id INTEGER NOT NULL,
+    user_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    opened_at REAL NOT NULL,
+    closed_at REAL,
+    FOREIGN KEY (report_id) REFERENCES user_error_reports(id),
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_support_threads_user_status
+    ON support_threads(user_id, status);
+
+CREATE TABLE IF NOT EXISTS support_admin_sessions (
+    admin_id TEXT PRIMARY KEY,
+    thread_id INTEGER NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY (thread_id) REFERENCES support_threads(id)
+);
+
+CREATE TABLE IF NOT EXISTS support_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_id INTEGER NOT NULL,
+    from_role TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (thread_id) REFERENCES support_threads(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_support_messages_thread
+    ON support_messages(thread_id, created_at);
 """
 
 EXPORT_EVENT_LIMIT = 10000
@@ -1012,6 +1045,111 @@ class Database:
             page,
             per_page,
         )
+
+    # --- Support threads ---
+
+    def open_support_thread(self, report_id, user_id):
+        user_id = str(user_id)
+        now = time.time()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE support_threads SET status='closed', closed_at=?
+                   WHERE user_id=? AND status='open'""",
+                (now, user_id),
+            )
+            cur = conn.execute(
+                """INSERT INTO support_threads
+                   (report_id, user_id, status, opened_at)
+                   VALUES (?, ?, 'open', ?)""",
+                (int(report_id), user_id, now),
+            )
+            return cur.lastrowid
+
+    def get_thread(self, thread_id):
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM support_threads WHERE id=?", (int(thread_id),)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_open_thread_for_user(self, user_id):
+        user_id = str(user_id)
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT * FROM support_threads
+                   WHERE user_id=? AND status='open'
+                   ORDER BY opened_at DESC LIMIT 1""",
+                (user_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_open_thread_for_report(self, report_id):
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT * FROM support_threads
+                   WHERE report_id=? AND status='open'
+                   ORDER BY opened_at DESC LIMIT 1""",
+                (int(report_id),),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def close_support_thread(self, thread_id):
+        now = time.time()
+        with self._conn() as conn:
+            conn.execute(
+                """UPDATE support_threads SET status='closed', closed_at=?
+                   WHERE id=? AND status='open'""",
+                (now, int(thread_id)),
+            )
+
+    def set_admin_support_session(self, admin_id, thread_id):
+        admin_id = str(admin_id)
+        now = time.time()
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO support_admin_sessions
+                   (admin_id, thread_id, updated_at)
+                   VALUES (?, ?, ?)""",
+                (admin_id, int(thread_id), now),
+            )
+
+    def clear_admin_support_session(self, admin_id):
+        admin_id = str(admin_id)
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM support_admin_sessions WHERE admin_id=?",
+                (admin_id,),
+            )
+
+    def get_admin_support_session(self, admin_id):
+        admin_id = str(admin_id)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM support_admin_sessions WHERE admin_id=?",
+                (admin_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def add_support_message(self, thread_id, from_role, text):
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO support_messages (thread_id, from_role, text, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (int(thread_id), from_role, text, time.time()),
+            )
+
+    def count_support_messages(self, thread_id, from_role=None):
+        with self._conn() as conn:
+            if from_role:
+                return conn.execute(
+                    """SELECT COUNT(*) AS c FROM support_messages
+                       WHERE thread_id=? AND from_role=?""",
+                    (int(thread_id), from_role),
+                ).fetchone()["c"]
+            return conn.execute(
+                "SELECT COUNT(*) AS c FROM support_messages WHERE thread_id=?",
+                (int(thread_id),),
+            ).fetchone()["c"]
 
     def global_report_summary(self):
         with self._conn() as conn:

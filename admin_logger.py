@@ -140,12 +140,16 @@ async def send_test_message(bot):
         return False, str(e)
 
 
-async def notify_admin_vip_issue(bot, message):
+async def notify_admin_vip_issue(bot, message, reply_markup=None):
     admin_id = os.getenv("ADMIN_ID", "").strip()
     if not admin_id or not bot:
         return
     try:
-        await bot.send_message(chat_id=int(admin_id), text=message)
+        await bot.send_message(
+            chat_id=int(admin_id),
+            text=message,
+            reply_markup=reply_markup,
+        )
     except Exception as e:
         logger.error(f"Could not notify admin about VIP logging: {e}")
 
@@ -325,8 +329,11 @@ async def log_error(bot, user, message, detail=None):
 async def log_user_report(bot, user, report_row):
     """Notify admin when a user submits an error report."""
     import error_report
+    import support_chat
 
     summary = error_report.format_admin_summary(report_row)
+    report_id = report_row.get("id")
+    keyboard = support_chat.build_admin_report_keyboard(report_id)
     await log_vip(
         bot,
         "گزارش خطا — کاربر",
@@ -337,7 +344,7 @@ async def log_user_report(bot, user, report_row):
             "جزئیات": summary[:800],
         },
     )
-    await notify_admin_vip_issue(bot, summary)
+    await notify_admin_vip_issue(bot, summary, reply_markup=keyboard)
 
 
 async def log_playlist_start(bot, user, name, track_count):
