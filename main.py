@@ -34,7 +34,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from metadata import TrackMetadata, AppleMusicMetadata
+from metadata import TrackMetadata, AppleMusicMetadata, looks_like_music_query, is_music_url
 from downloader import MusicDownloader, QUALITIES, DEFAULT_QUALITY
 import catalog
 from user_manager import UserManager
@@ -78,6 +78,7 @@ import messages as msg
 import payments
 import referrals
 import reporting as rpt
+import error_report
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
@@ -266,6 +267,58 @@ def _vip_failure_detail(context=""):
         parts.append(str(context)[:300])
     parts.append(f"youtube={'OK' if yt_ok else 'FAIL'}")
     return " | ".join(parts)
+
+
+def _error_report_ctx(metadata=None, query=None, **extra):
+    _, yt_ok = get_credentials_status()
+    ctx = {"cookies_ok": yt_ok}
+    if metadata:
+        ctx["title"] = getattr(metadata, "title", None)
+        ctx["artist"] = getattr(metadata, "artist", None)
+        ctx["search_query"] = getattr(metadata, "search_query", None)
+        trail = getattr(metadata, "last_failure_trail", None)
+        if trail:
+            ctx["failure_trail"] = trail
+    if query:
+        ctx["query"] = query
+    ctx.update({k: v for k, v in extra.items() if v is not None})
+    return ctx
+
+
+async def _fail_job(reporter, user, *, kind, code, reason, **ctx):
+    rid = error_report.create_context(
+        user_manager.database,
+        user,
+        kind=kind,
+        code=code,
+        user_message=reason,
+        **ctx,
+    )
+    await reporter.fail(reason, reply_markup=error_report.build_keyboard(rid))
+
+
+async def _edit_error(message, user, text, *, kind, code, **ctx):
+    rid = error_report.create_context(
+        user_manager.database,
+        user,
+        kind=kind,
+        code=code,
+        user_message=text,
+        **ctx,
+    )
+    await message.edit_text(text, reply_markup=error_report.build_keyboard(rid))
+
+
+async def _reply_error(message, user, text, *, kind, code, **ctx):
+    rid = error_report.create_context(
+        user_manager.database,
+        user,
+        kind=kind,
+        code=code,
+        user_message=text,
+        **ctx,
+    )
+    await message.reply_text(text, reply_markup=error_report.build_keyboard(rid))
 
 
 def _btn_redownload(title):
@@ -707,7 +760,11 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 recommendations_count=usage.get("recommendations_count", 0),
             )
             if recs is None:
-                await reporter.fail(msg.discover_llm_error())
+                await _fail_job(
+                    reporter, update.effective_user,
+                    kind="discover", code="llm_error",
+                    reason=msg.discover_llm_error(),
+                )
                 return
             set_cached_recommendations(user_id, recs)
 
@@ -760,7 +817,11 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if not suggestions:
-            await reporter.fail(msg.discover_no_results())
+            await _fail_job(
+                reporter, update.effective_user,
+                kind="discover", code="no_results",
+                reason=msg.discover_no_results(),
+            )
             return
 
         lines = [msg.discover_header()]
@@ -780,7 +841,11 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await status.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
     except Exception as e:
         logger.error(f"Discover failed: {e}", exc_info=True)
-        await reporter.fail(msg.discover_llm_error())
+        await _fail_job(
+            reporter, update.effective_user,
+            kind="discover", code="exception",
+            reason=msg.discover_llm_error(),
+        )
     finally:
         _end_job(context, job)
 
@@ -1374,7 +1439,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error("Invoice failed: %s", e, exc_info=True)
-            await query.message.reply_text(msg.payment_failed())
+            await _reply_error(
+                query.message, update.effective_user,
+                msg.payment_failed(), kind="payment", code="invoice_failed",
+            )
         return
 
     if data.startswith("redownload:"):
@@ -1491,7 +1559,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await reporter.fail(msg.work_cancelled())
                 return
             if not suggestions:
-                await reporter.fail(msg.similar_not_found())
+                await _fail_job(
+                    reporter, update.effective_user,
+                    kind="similar", code="not_found",
+                    reason=msg.similar_not_found(),
+                    title=title, artist=artist,
+                )
                 return
             lines = [msg.similar_header(title, artist)]
             buttons = []
@@ -1511,7 +1584,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error(f"Similar tracks failed: {e}", exc_info=True)
-            await reporter.fail(msg.similar_not_found())
+            await _fail_job(
+                reporter, update.effective_user,
+                kind="similar", code="exception",
+                reason=msg.similar_not_found(),
+                title=title, artist=artist,
+            )
         finally:
             _end_job(context, job)
         return
@@ -1558,13 +1636,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await reporter.fail(msg.work_cancelled())
                 return
             if not text:
-                await reporter.fail(msg.lyrics_not_found())
+                await _fail_job(
+                    reporter, update.effective_user,
+                    kind="lyrics", code="not_found",
+                    reason=msg.lyrics_not_found(),
+                    title=title, artist=artist,
+                )
                 return
             await status.delete()
             await _reply_lyrics(query.message, title, artist, text)
         except Exception as e:
             logger.error(f"Lyrics failed: {e}", exc_info=True)
-            await reporter.fail(msg.lyrics_not_found())
+            await _fail_job(
+                reporter, update.effective_user,
+                kind="lyrics", code="exception",
+                reason=msg.lyrics_not_found(),
+                title=title, artist=artist,
+            )
         finally:
             _end_job(context, job)
         return
@@ -1944,14 +2032,27 @@ async def _download_and_send(message, user, metadata, context):
             await reporter.fail(msg.download_cancelled())
             return
         if not file_path:
-            await reporter.fail(msg.download_fail_message(error_code))
+            reason = msg.download_fail_message(error_code)
+            await _fail_job(
+                reporter, user,
+                kind="download", code=error_code or "unknown",
+                reason=reason,
+                **_error_report_ctx(metadata=metadata),
+            )
             await log_error(
                 context.bot, user, f"Download failed ({error_code})",
                 _vip_failure_detail(metadata.title),
             )
             return
         if not (platform and str(platform).endswith("_cache_id")) and not os.path.exists(file_path):
-            await reporter.fail(msg.download_fail_message(error_code or "invalid_file"))
+            code = error_code or "invalid_file"
+            reason = msg.download_fail_message(code)
+            await _fail_job(
+                reporter, user,
+                kind="download", code=code,
+                reason=reason,
+                **_error_report_ctx(metadata=metadata),
+            )
             await log_error(
                 context.bot, user, "Download failed",
                 _vip_failure_detail(metadata.title),
@@ -1973,7 +2074,11 @@ async def _download_and_send(message, user, metadata, context):
     except Exception as e:
         logger.error(f"Send failed: {e}")
         try:
-            await status.edit_text(msg.send_failed())
+            await _edit_error(
+                status, user, msg.send_failed(),
+                kind="download", code="send_failed",
+                **_error_report_ctx(metadata=metadata),
+            )
         except Exception:
             pass
         await log_error(context.bot, user, "Send failed", str(e))
@@ -2003,7 +2108,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_manager, admin_logger,
             )
             return
-        await update.message.reply_text(msg.collection_not_found())
+        await _reply_error(
+            update.message, user,
+            msg.collection_not_found(),
+            kind="collection", code="not_found",
+            query=text,
+        )
+        return
+
+    if not is_music_url(text) and not looks_like_music_query(text):
+        await update.message.reply_text(msg.not_music_query())
         return
 
     if await _deny_quota(update.message, context.bot, user):
@@ -2018,7 +2132,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not metadata.title:
         _end_job(context, job)
-        await status_message.edit_text(msg.metadata_not_found())
+        await _edit_error(
+            status_message, user, msg.metadata_not_found(),
+            kind="metadata", code="not_found",
+            query=text,
+        )
         await log_error(context.bot, user, "Metadata not found", text)
         return
 
@@ -2068,10 +2186,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await status_message.delete()
             except Exception as e:
                 logger.error(f"Send failed: {e}")
-                await status_message.edit_text(msg.send_failed())
+                await _edit_error(
+                    status_message, user, msg.send_failed(),
+                    kind="download", code="send_failed",
+                    **_error_report_ctx(metadata=metadata, query=text),
+                )
                 await log_error(context.bot, user, "Send failed", str(e))
         else:
-            await reporter.fail(msg.download_fail_message(error_code))
+            reason = msg.download_fail_message(error_code)
+            await _fail_job(
+                reporter, user,
+                kind="download", code=error_code or "unknown",
+                reason=reason,
+                **_error_report_ctx(metadata=metadata, query=text),
+            )
             await log_error(
                 context.bot, user, f"No full track found ({error_code})",
                 _vip_failure_detail(text),
@@ -2332,6 +2460,14 @@ async def _show_global_section(message, section, page, edit=False):
     elif section == "cache":
         rows, total, total_pages = db.list_cache_entries(page, rpt.PER_PAGE)
         text = rpt.format_cache_page(rows, page, total_pages, total)
+    elif section == "bugs":
+        rows, total, total_pages = db.list_error_reports(page, rpt.PER_PAGE)
+        text = rpt.format_error_reports_page(rows, page, total_pages, total)
+        scope = "bugs"
+        await _send_report(
+            message, text, rpt.build_pagination_keyboard(scope, page, total_pages), edit=edit,
+        )
+        return
     else:
         return
     scope = f"global:{section}"
@@ -2379,6 +2515,41 @@ async def _show_user_section(message, user_id, section, page, edit=False):
     )
 
 
+async def error_report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = update.effective_user
+    if not user or not query:
+        return
+    try:
+        report_id = int((query.data or "").split(":", 1)[1])
+    except (IndexError, ValueError):
+        await query.answer()
+        return
+
+    status, _row = await error_report.submit_and_notify(
+        context.bot, user_manager.database, report_id, user,
+    )
+    if status == "rate_limited":
+        await query.answer(msg.error_report_rate_limited(), show_alert=True)
+        return
+    if status == "already":
+        await query.answer(msg.error_report_already_sent(), show_alert=True)
+        return
+    if status in ("forbidden", "not_found"):
+        await query.answer()
+        return
+
+    await query.answer("✅")
+    try:
+        base = query.message.text or ""
+        sent_note = msg.error_report_sent().strip()
+        if sent_note not in base:
+            base += msg.error_report_sent()
+        await query.message.edit_text(base, reply_markup=None)
+    except Exception:
+        pass
+
+
 async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2397,6 +2568,10 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data[1] == "users":
         page = int(data[2]) if len(data) > 2 else 0
         await _show_users_page(message, page, edit=True)
+        return
+    if data[1] == "bugs":
+        page = int(data[2]) if len(data) > 2 else 0
+        await _show_global_section(message, "bugs", page, edit=True)
         return
     if data[1] == "global" and len(data) >= 4:
         section, page = data[2], int(data[3])
@@ -2429,6 +2604,8 @@ def _describe_user_request(update):
     if update.callback_query:
         data = update.callback_query.data or ""
         if data.startswith("rpt:"):
+            return None
+        if data.startswith("err:"):
             return None
         return "callback", data[:500]
     if update.inline_query:
@@ -2529,6 +2706,7 @@ def main():
     application.add_handler(CommandHandler("aboutme", aboutme_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(CallbackQueryHandler(error_report_callback, pattern=r"^err:\d+$"))
     application.add_handler(CallbackQueryHandler(report_callback, pattern=r"^rpt:"))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(InlineQueryHandler(inline_search))

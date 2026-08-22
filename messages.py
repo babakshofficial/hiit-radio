@@ -328,6 +328,10 @@ def metadata_not_found():
     return "نتیجه‌ای پیدا نشد — لینک یا نام آهنگ رو دوباره بفرست 🙏"
 
 
+def not_music_query():
+    return "این شبیه نام آهنگ نیست — لینک موزیک یا «هنرمند - آهنگ» بفرست"
+
+
 def collection_not_found():
     return "نتونستم این آلبوم یا پلی‌لیست رو بشناسم — لینک رو چک کن و دوباره بفرست."
 
@@ -529,6 +533,22 @@ def progress_fail(label, reason=""):
     if reason:
         text += f"\n{reason}"
     return text
+
+
+def error_report_button():
+    return "📩 گزارش به پشتیبان"
+
+
+def error_report_sent():
+    return "\n\n✅ گزارشت ثبت شد. ممنون!"
+
+
+def error_report_already_sent():
+    return "این خطا قبلاً گزارش شده."
+
+
+def error_report_rate_limited():
+    return "محدودیت گزارش — فردا دوباره امتحان کن."
 
 
 def cookies_status(ok, detail, path, updated=None):
