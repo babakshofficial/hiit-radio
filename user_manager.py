@@ -87,6 +87,18 @@ class UserManager:
     def get_favorite_by_id(self, favorite_id, user_id=None):
         return self.db.get_favorite_by_id(favorite_id, user_id)
 
+    def follow_artist(self, user_id, artist_name, deezer_artist_id, image_url=None):
+        return self.db.follow_artist(user_id, artist_name, deezer_artist_id, image_url)
+
+    def unfollow_artist(self, user_id, deezer_artist_id):
+        return self.db.unfollow_artist(user_id, deezer_artist_id)
+
+    def is_following(self, user_id, deezer_artist_id):
+        return self.db.is_following(user_id, deezer_artist_id)
+
+    def list_followed_artists(self, user_id):
+        return self.db.list_followed_artists(user_id)
+
     @property
     def database(self):
         return self.db

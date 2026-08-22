@@ -353,5 +353,15 @@ def hit_to_track_metadata(hit: CatalogHit) -> TrackMetadata:
     return meta
 
 
+def _deezer_artist_latest_albums(artist_id: str, limit: int = 5) -> list[dict]:
+    """Fetch the most recent albums sorted by release_date desc."""
+    data = _deezer_get(f"/artist/{artist_id}/albums", limit=limit, order="DATE")
+    return data.get("data") or []
+
+
 async def fetch_artist(artist_id: str) -> dict:
     return await asyncio.to_thread(_deezer_artist_sync, artist_id)
+
+
+async def fetch_artist_latest_albums(artist_id: str, limit: int = 5) -> list[dict]:
+    return await asyncio.to_thread(_deezer_artist_latest_albums, artist_id, limit)

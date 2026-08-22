@@ -659,3 +659,42 @@ def playlist_zip_sending(name, count):
 
 def playlist_zip_caption(name, count):
     return f"📦 {name} — {count} آهنگ"
+
+
+# --- Artist follow ---
+
+def follow_success(artist_name):
+    return f"✅ هنرمند «{artist_name}» دنبال شد — وقتی آلبوم جدید بذاره بهت خبر می‌دم!"
+
+
+def unfollow_success(artist_name):
+    return f"🔕 دنبال‌کردن «{artist_name}» لغو شد."
+
+
+def already_following(artist_name):
+    return f"قبلاً «{artist_name}» رو دنبال کردی."
+
+
+def not_following():
+    return "هنوز هیچ هنرمندی رو دنبال نکردی — با /follow شروع کن!"
+
+
+def following_header():
+    return "🎙 هنرمندان دنبال‌شده:"
+
+
+def follow_usage():
+    return "نحوه استفاده:\n/follow نام هنرمند"
+
+
+def new_release_notification(artist, album, date=""):
+    lines = [
+        "🔔 انتشار جدید!",
+        "",
+        f"🎤 {artist}",
+        f"💿 {album}",
+    ]
+    if date:
+        lines.append(f"📅 {date}")
+    lines.extend(["", "برای دانلود آلبوم دکمه زیر رو بزن 👇"])
+    return "\n".join(lines)

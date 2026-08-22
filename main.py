@@ -346,11 +346,14 @@ def _start_menu_keyboard():
             InlineKeyboardButton("🎯 پیشنهاد شخصی", callback_data="menu:discover"),
         ],
         [
-            InlineKeyboardButton("💠 پریمیوم", callback_data="menu:premium"),
+            InlineKeyboardButton("🔔 هنرمندان من", callback_data="menu:following"),
             InlineKeyboardButton("🎁 دعوت دوست", callback_data="menu:invite"),
         ],
         [
+            InlineKeyboardButton("💠 پریمیوم", callback_data="menu:premium"),
             InlineKeyboardButton("🤖 درباره ربات", callback_data="menu:aboutme"),
+        ],
+        [
             InlineKeyboardButton("⛔ لغو کار جاری", callback_data="menu:cancel"),
         ],
     ])
@@ -879,7 +882,7 @@ async def _show_search_results(message, query, hits, context):
     await message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
 
 
-async def _show_artist_page(message, artist_id, context, edit=False):
+async def _show_artist_page(message, artist_id, context, edit=False, user_id=None):
     try:
         data = await catalog.fetch_artist(artist_id)
     except catalog.CatalogError as exc:
@@ -893,6 +896,22 @@ async def _show_artist_page(message, artist_id, context, edit=False):
     lines = [msg.artist_header(name), "", msg.artist_top_header()]
     buttons = []
     context.user_data["artist_cache"] = {"id": artist_id, "tracks": {}, "albums": {}}
+
+    following = False
+    if user_id:
+        following = user_manager.is_following(user_id, str(artist_id))
+    safe_name = (name or "")[:40]
+    if following:
+        buttons.append([InlineKeyboardButton(
+            f"🔕 لغو دنبال‌کردن {safe_name[:20]}",
+            callback_data=f"unfollow:{artist_id}",
+        )])
+    else:
+        buttons.append([InlineKeyboardButton(
+            f"🔔 دنبال‌کردن {safe_name[:20]}",
+            callback_data=f"follow:{artist_id}:{safe_name}",
+        )])
+
     for i, track in enumerate(data.get("top") or [], 1):
         lines.append(f"{i}. {track.title} — {track.artist or name}")
         context.user_data["artist_cache"]["tracks"][str(i)] = track
@@ -989,7 +1008,7 @@ async def artist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg.artist_not_found(query))
         return
     if len(artists) == 1:
-        await _show_artist_page(update.message, artists[0].id, context)
+        await _show_artist_page(update.message, artists[0].id, context, user_id=update.effective_user.id)
         return
     lines = [msg.search_header(query)]
     buttons = []
@@ -1001,6 +1020,86 @@ async def artist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton(hit.name[:30], callback_data=f"artistpick:profile:{i}")
         ])
     await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def follow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    query = " ".join(context.args or []).strip()
+    if len(query) < 2:
+        await update.message.reply_text(msg.follow_usage())
+        return
+    status = await update.message.reply_text(msg.searching())
+    hits = await catalog.search_all(query, limit=8)
+    artists = [h for h in hits if h.kind == "artist"]
+    await status.delete()
+    if not artists:
+        await update.message.reply_text(msg.artist_not_found(query))
+        return
+    if len(artists) == 1:
+        a = artists[0]
+        ok = user_manager.follow_artist(
+            update.effective_user.id, a.name, a.id, a.cover_url,
+        )
+        if ok:
+            await update.message.reply_text(msg.follow_success(a.name))
+        else:
+            await update.message.reply_text(msg.already_following(a.name))
+        return
+    lines = [msg.search_header(query)]
+    buttons = []
+    for i, hit in enumerate(artists[:5], 1):
+        lines.append(msg.search_hit_line(i, hit.name, hit.subtitle, hit.kind, hit.source))
+        safe_name = (hit.name or "")[:40]
+        buttons.append([
+            InlineKeyboardButton(
+                f"🔔 دنبال‌کردن {safe_name[:22]}",
+                callback_data=f"follow:{hit.id}:{safe_name}",
+            )
+        ])
+    await update.message.reply_text(
+        "\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def unfollow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    await _show_following_list(update.message, update.effective_user.id, context)
+
+
+async def following_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    await _show_following_list(update.message, update.effective_user.id, context)
+
+
+async def _show_following_list(message, user_id, context, reply_markup_extra=None):
+    rows = user_manager.list_followed_artists(user_id)
+    if not rows:
+        kb = _back_button() if reply_markup_extra else None
+        await message.reply_text(msg.not_following(), reply_markup=kb)
+        return
+    lines = [msg.following_header()]
+    buttons = []
+    for r in rows:
+        lines.append(f"• {r['artist_name']}")
+        safe_name = (r["artist_name"] or "")[:20]
+        buttons.append([
+            InlineKeyboardButton(
+                f"🔕 لغو {safe_name}",
+                callback_data=f"unfollow:{r['deezer_artist_id']}",
+            ),
+            InlineKeyboardButton(
+                f"🎙 {safe_name}",
+                callback_data=f"artistpick:profile:follow:{r['deezer_artist_id']}",
+            ),
+        ])
+    if reply_markup_extra:
+        buttons.append(_back_row())
+    await message.reply_text(
+        "\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons),
+    )
 
 
 def _store_audio_file_id(metadata, platform, msg):
@@ -1225,6 +1324,33 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id, msg.aboutme_text(), reply_markup=_back_button(),
             )
+        elif action == "following":
+            rows = user_manager.list_followed_artists(user.id)
+            if not rows:
+                await context.bot.send_message(
+                    chat_id, msg.not_following(), reply_markup=_back_button(),
+                )
+            else:
+                lines = [msg.following_header()]
+                buttons = []
+                for r in rows:
+                    lines.append(f"• {r['artist_name']}")
+                    safe_name = (r["artist_name"] or "")[:20]
+                    buttons.append([
+                        InlineKeyboardButton(
+                            f"🔕 لغو {safe_name}",
+                            callback_data=f"unfollow:{r['deezer_artist_id']}",
+                        ),
+                        InlineKeyboardButton(
+                            f"🎙 {safe_name}",
+                            callback_data=f"artistpick:profile:follow:{r['deezer_artist_id']}",
+                        ),
+                    ])
+                buttons.append(_back_row())
+                await context.bot.send_message(
+                    chat_id, "\n".join(lines),
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
         elif action == "cancel":
             cancelled = jobs.cancel_all(context)
             text = msg.cancel_ok(len(cancelled)) if cancelled else msg.cancel_no_job()
@@ -1529,6 +1655,50 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(msg.quality_set(value))
         return
 
+    if data.startswith("follow:"):
+        parts = data.split(":", 2)
+        deezer_id = parts[1] if len(parts) > 1 else ""
+        artist_name = parts[2] if len(parts) > 2 else ""
+        if not deezer_id:
+            return
+        ok = user_manager.follow_artist(
+            update.effective_user.id, artist_name, deezer_id,
+        )
+        if ok:
+            await query.message.reply_text(msg.follow_success(artist_name))
+        else:
+            await query.message.reply_text(msg.already_following(artist_name))
+        return
+
+    if data.startswith("unfollow:"):
+        deezer_id = data.split(":", 1)[1]
+        rows = user_manager.list_followed_artists(update.effective_user.id)
+        name = ""
+        for r in rows:
+            if r["deezer_artist_id"] == deezer_id:
+                name = r["artist_name"]
+                break
+        removed = user_manager.unfollow_artist(update.effective_user.id, deezer_id)
+        if removed:
+            await query.message.reply_text(msg.unfollow_success(name or "هنرمند"))
+        else:
+            await query.message.reply_text(msg.not_following())
+        return
+
+    if data.startswith("newrel:"):
+        url = data.split(":", 1)[1]
+        if not url:
+            return
+        name, tracks = await TrackMetadata.create_collection(url, _ydl_opts_factory)
+        if not tracks:
+            await query.message.reply_text(msg.collection_not_found())
+            return
+        await process_playlist(
+            update, context, tracks, name, orchestrator,
+            user_manager, admin_logger,
+        )
+        return
+
     if data.startswith("catpick:"):
         idx = data.split(":", 1)[1]
         hit = context.user_data.get("search_cache", {}).get(idx)
@@ -1557,7 +1727,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         if hit.kind == "artist":
-            await _show_artist_page(query.message, hit.id, context)
+            await _show_artist_page(query.message, hit.id, context, user_id=update.effective_user.id)
             return
         return
 
@@ -1566,11 +1736,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action = parts[1] if len(parts) > 1 else ""
         idx = parts[2] if len(parts) > 2 else ""
         if action == "profile":
-            artist_id = context.user_data.get("artist_search_cache", {}).get(idx)
+            if idx == "follow" and len(parts) > 3:
+                artist_id = parts[3]
+            else:
+                artist_id = context.user_data.get("artist_search_cache", {}).get(idx)
             if not artist_id:
                 await query.message.reply_text(msg.pick_expired())
                 return
-            await _show_artist_page(query.message, artist_id, context)
+            await _show_artist_page(query.message, artist_id, context, user_id=update.effective_user.id)
             return
         cache = context.user_data.get("artist_cache") or {}
         if action == "track":
@@ -2006,6 +2179,14 @@ async def _cookie_health_job(context: ContextTypes.DEFAULT_TYPE):
     await _check_and_report_cookie_health(context.bot)
 
 
+async def _release_check_job(context: ContextTypes.DEFAULT_TYPE):
+    from release_checker import check_new_releases
+    try:
+        await check_new_releases(context.bot, user_manager.database)
+    except Exception as exc:
+        logger.error("Release check job failed: %s", exc, exc_info=True)
+
+
 async def _check_and_report_cookie_health(bot):
     healthy, detail = _youtube_auth_status()
     await report_cookie_health_transition(bot, healthy, detail=detail)
@@ -2044,6 +2225,7 @@ async def _on_startup(application):
     if application.job_queue:
         application.job_queue.run_repeating(_cache_sweep_job, interval=3600, first=60)
         application.job_queue.run_repeating(_cookie_health_job, interval=3600, first=120)
+        application.job_queue.run_repeating(_release_check_job, interval=6 * 3600, first=300)
         return
     logger.warning(
         "JobQueue unavailable; using asyncio fallback for cache sweep. "
@@ -2337,6 +2519,9 @@ def main():
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("quality", quality_command))
     application.add_handler(CommandHandler("artist", artist_command))
+    application.add_handler(CommandHandler("follow", follow_command))
+    application.add_handler(CommandHandler("unfollow", unfollow_command))
+    application.add_handler(CommandHandler("following", following_command))
     application.add_handler(CommandHandler("premium", premium_command))
     application.add_handler(CommandHandler("invite", invite_command))
     application.add_handler(CommandHandler("grant", grant_command))

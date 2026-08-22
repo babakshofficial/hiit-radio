@@ -189,6 +189,32 @@ CREATE TABLE IF NOT EXISTS referrals (
 
 CREATE INDEX IF NOT EXISTS idx_referrals_inviter
     ON referrals(inviter_id, credited);
+
+CREATE TABLE IF NOT EXISTS followed_artists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    artist_name TEXT NOT NULL,
+    deezer_artist_id TEXT NOT NULL,
+    artist_image_url TEXT,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id),
+    UNIQUE(user_id, deezer_artist_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_followed_artists_user
+    ON followed_artists(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_followed_artists_deezer
+    ON followed_artists(deezer_artist_id);
+
+CREATE TABLE IF NOT EXISTS artist_releases (
+    deezer_artist_id TEXT NOT NULL,
+    deezer_album_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    release_date TEXT,
+    notified_at REAL NOT NULL,
+    PRIMARY KEY (deezer_artist_id, deezer_album_id)
+);
 """
 
 EXPORT_EVENT_LIMIT = 10000
@@ -1191,4 +1217,84 @@ class Database:
                 "SELECT COUNT(*) AS c FROM referrals WHERE inviter_id=? AND credited=0",
                 (inviter_id,),
             ).fetchone()["c"]
+
+    # --- Followed artists ---
+
+    def follow_artist(self, user_id, artist_name, deezer_artist_id, image_url=None):
+        user_id = str(user_id)
+        now = time.time()
+        with self._conn() as conn:
+            try:
+                conn.execute(
+                    """INSERT INTO followed_artists
+                       (user_id, artist_name, deezer_artist_id, artist_image_url, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (user_id, artist_name, deezer_artist_id, image_url, now),
+                )
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def unfollow_artist(self, user_id, deezer_artist_id):
+        user_id = str(user_id)
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM followed_artists WHERE user_id=? AND deezer_artist_id=?",
+                (user_id, deezer_artist_id),
+            )
+            return cur.rowcount > 0
+
+    def is_following(self, user_id, deezer_artist_id):
+        user_id = str(user_id)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM followed_artists WHERE user_id=? AND deezer_artist_id=?",
+                (user_id, deezer_artist_id),
+            ).fetchone()
+            return bool(row)
+
+    def list_followed_artists(self, user_id):
+        user_id = str(user_id)
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM followed_artists WHERE user_id=?
+                   ORDER BY created_at DESC""",
+                (user_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_all_followed_artist_ids(self):
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT deezer_artist_id FROM followed_artists",
+            ).fetchall()
+            return [r["deezer_artist_id"] for r in rows]
+
+    def get_followers(self, deezer_artist_id):
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT user_id FROM followed_artists WHERE deezer_artist_id=?",
+                (deezer_artist_id,),
+            ).fetchall()
+            return [r["user_id"] for r in rows]
+
+    def is_release_notified(self, deezer_artist_id, deezer_album_id):
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT 1 FROM artist_releases
+                   WHERE deezer_artist_id=? AND deezer_album_id=?""",
+                (deezer_artist_id, deezer_album_id),
+            ).fetchone()
+            return bool(row)
+
+    def mark_release_notified(self, deezer_artist_id, deezer_album_id, title,
+                              release_date=None):
+        now = time.time()
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO artist_releases
+                   (deezer_artist_id, deezer_album_id, title, release_date, notified_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (deezer_artist_id, deezer_album_id, title, release_date, now),
+            )
 
