@@ -14,6 +14,14 @@ async def configure_webapp_menu(bot) -> None:
     if not url:
         logger.info("WEBAPP_URL not set — skipping Mini App menu button")
         return
+    if not url.startswith("https://"):
+        logger.info(
+            "WEBAPP_URL is not HTTPS (%s) — skipping Mini App menu button "
+            "(Telegram only accepts https:// URLs; set WEBAPP_URL empty for local dev "
+            "or use a public HTTPS domain)",
+            url,
+        )
+        return
     try:
         from telegram import MenuButtonWebApp, WebAppInfo
 
