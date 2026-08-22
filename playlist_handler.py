@@ -23,6 +23,7 @@ from messages import (
 )
 from progress import ProgressReporter
 from recommendations import recommendation_keyboard
+import error_report
 
 logger = logging.getLogger(__name__)
 TG_CONNECT_TIMEOUT = float(os.getenv("TG_CONNECT_TIMEOUT", "30"))
@@ -235,7 +236,22 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
                 bot, user, collection_name, sent, total, failed, reason=stop_reason,
             )
         elif not rate_limited and not cancelled:
-            await reporter.done(playlist_summary(sent, total, failed))
+            summary = playlist_summary(sent, total, failed)
+            report_kb = None
+            if failed > 0:
+                rid = error_report.create_context(
+                    user_manager.database,
+                    user,
+                    kind="playlist",
+                    code="partial_fail" if sent else "all_failed",
+                    user_message=summary,
+                    collection=collection_name,
+                    sent=sent,
+                    total=total,
+                    failed=failed,
+                )
+                report_kb = error_report.build_keyboard(rid)
+            await reporter.done(summary, reply_markup=report_kb)
             await admin_logger.log_playlist_done(
                 bot, user, collection_name, sent, total, failed,
             )

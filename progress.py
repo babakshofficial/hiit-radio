@@ -94,18 +94,18 @@ class ProgressReporter:
         except Exception as e:
             logger.debug(f"Progress edit skipped: {e}")
 
-    async def done(self, summary=""):
+    async def done(self, summary="", reply_markup=None):
         text = progress_done(self.label, summary)
         await self._vip_status(summary or "تمام شد")
         try:
-            await self.status_message.edit_text(text)
+            await self.status_message.edit_text(text, reply_markup=reply_markup)
         except Exception:
             pass
 
-    async def fail(self, reason=""):
+    async def fail(self, reason="", reply_markup=None):
         text = progress_fail(self.label, reason)
         await self._vip_status(reason or "ناموفق")
         try:
-            await self.status_message.edit_text(text)
+            await self.status_message.edit_text(text, reply_markup=reply_markup)
         except Exception:
             pass

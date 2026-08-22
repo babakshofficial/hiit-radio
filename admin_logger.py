@@ -322,6 +322,24 @@ async def log_error(bot, user, message, detail=None):
     await log_vip(bot, "خطا", user=user, **fields)
 
 
+async def log_user_report(bot, user, report_row):
+    """Notify admin when a user submits an error report."""
+    import error_report
+
+    summary = error_report.format_admin_summary(report_row)
+    await log_vip(
+        bot,
+        "گزارش خطا — کاربر",
+        user=user,
+        **{
+            "نوع": report_row.get("error_kind") or "?",
+            "کد": report_row.get("error_code") or "—",
+            "جزئیات": summary[:800],
+        },
+    )
+    await notify_admin_vip_issue(bot, summary)
+
+
 async def log_playlist_start(bot, user, name, track_count):
     await log_vip(bot, "شروع پلی‌لیست", user=user, **{
         "مجموعه": name or "?", "تعداد": track_count,

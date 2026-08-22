@@ -215,6 +215,26 @@ CREATE TABLE IF NOT EXISTS artist_releases (
     notified_at REAL NOT NULL,
     PRIMARY KEY (deezer_artist_id, deezer_album_id)
 );
+
+CREATE TABLE IF NOT EXISTS user_error_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    username TEXT,
+    first_name TEXT,
+    error_kind TEXT NOT NULL,
+    error_code TEXT,
+    user_message TEXT,
+    context_json TEXT,
+    created_at REAL NOT NULL,
+    submitted_at REAL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_error_reports_submitted
+    ON user_error_reports(submitted_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_user_error_reports_user_time
+    ON user_error_reports(user_id, created_at DESC);
 """
 
 EXPORT_EVENT_LIMIT = 10000
@@ -906,6 +926,89 @@ class Database:
                FROM cache_files WHERE expires_at > ?
                ORDER BY hit_count DESC, created_at DESC""",
             (now,),
+            page,
+            per_page,
+        )
+
+    # --- User error reports ---
+
+    def create_error_report(
+        self,
+        user_id,
+        error_kind,
+        error_code=None,
+        user_message=None,
+        context=None,
+        username=None,
+        first_name=None,
+    ):
+        user_id = str(user_id)
+        now = time.time()
+        with self._conn() as conn:
+            cur = conn.execute(
+                """INSERT INTO user_error_reports
+                   (user_id, username, first_name, error_kind, error_code,
+                    user_message, context_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    user_id,
+                    username,
+                    first_name,
+                    error_kind,
+                    error_code,
+                    user_message,
+                    json.dumps(context or {}, ensure_ascii=False),
+                    now,
+                ),
+            )
+            return cur.lastrowid
+
+    def get_error_report(self, report_id):
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM user_error_reports WHERE id=?", (int(report_id),)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def submit_error_report(self, report_id, user_id):
+        user_id = str(user_id)
+        now = time.time()
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM user_error_reports WHERE id=?", (int(report_id),)
+            ).fetchone()
+            if not row or str(row["user_id"]) != user_id:
+                return None
+            if row["submitted_at"]:
+                return dict(row)
+            conn.execute(
+                "UPDATE user_error_reports SET submitted_at=? WHERE id=?",
+                (now, int(report_id)),
+            )
+            row = conn.execute(
+                "SELECT * FROM user_error_reports WHERE id=?", (int(report_id),)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def count_user_submitted_reports_since(self, user_id, since_ts):
+        user_id = str(user_id)
+        with self._conn() as conn:
+            return conn.execute(
+                """SELECT COUNT(*) AS c FROM user_error_reports
+                   WHERE user_id=? AND submitted_at IS NOT NULL AND submitted_at >= ?""",
+                (user_id, since_ts),
+            ).fetchone()["c"]
+
+    def list_error_reports(self, page=0, per_page=10, submitted_only=True):
+        where = "WHERE submitted_at IS NOT NULL" if submitted_only else ""
+        return self._paginate(
+            f"SELECT COUNT(*) FROM user_error_reports {where}",
+            (),
+            f"""SELECT id, user_id, username, first_name, error_kind, error_code,
+                       user_message, context_json, created_at, submitted_at
+                FROM user_error_reports {where}
+                ORDER BY COALESCE(submitted_at, created_at) DESC""",
+            (),
             page,
             per_page,
         )

@@ -187,6 +187,29 @@ def format_cache_page(rows, page, total_pages, total):
     return "\n".join(lines)
 
 
+def format_error_reports_page(rows, page, total_pages, total):
+    lines = [f"گزارش‌های کاربران (صفحه {page + 1}/{total_pages} — {total})\n"]
+    for row in rows:
+        user = _user_label(row)
+        kind = row.get("error_kind") or "?"
+        code = row.get("error_code") or "—"
+        ctx = {}
+        raw = row.get("context_json")
+        if raw:
+            try:
+                ctx = json.loads(raw)
+            except json.JSONDecodeError:
+                pass
+        title = ctx.get("title") or "—"
+        lines.append(
+            f"• #{row.get('id')} [{user}] {kind}/{code}\n"
+            f"  {title} | {_ts(row.get('submitted_at'))}"
+        )
+    if not rows:
+        lines.append("موردی نیست.")
+    return "\n".join(lines)
+
+
 def _page_row(scope, page, total_pages):
     buttons = []
     if page > 0:
@@ -210,6 +233,7 @@ def build_global_menu_keyboard():
             InlineKeyboardButton("LLM", callback_data="rpt:global:llm:0"),
             InlineKeyboardButton("کش", callback_data="rpt:global:cache:0"),
         ],
+        [InlineKeyboardButton("گزارش‌های کاربران", callback_data="rpt:bugs:0")],
         [InlineKeyboardButton("بازگشت به خلاصه", callback_data="rpt:menu")],
     ])
 
