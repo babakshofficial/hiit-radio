@@ -40,6 +40,36 @@ def score_query_coverage(query, title, artist):
     return 100.0 * hits / len(q_tokens)
 
 
+def is_music_url(text):
+    """True if text looks like a Spotify/Apple/Deezer/YouTube/SoundCloud link."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    import catalog
+    if catalog.is_deezer_url(t) or catalog.is_direct_media_url(t):
+        return True
+    tl = t.lower()
+    return "spotify.com" in tl or "music.apple.com" in tl
+
+
+def looks_like_music_query(text):
+    """Reject prose / pasted articles; allow short queries and music URLs."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if is_music_url(t):
+        return True
+    if len(t) > 150:
+        return False
+    if len(t.split()) > 12:
+        if re.search(r"\sby\s", t, re.I):
+            return True
+        if " - " in t:
+            return True
+        return False
+    return True
+
+
 def guess_title_artist(query):
     """Split free-text into (title, artist) without trusting a single orientation.
 
