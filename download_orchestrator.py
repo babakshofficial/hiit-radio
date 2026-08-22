@@ -157,12 +157,13 @@ class DownloadOrchestrator:
                 f"{metadata.title} — {metadata.artist}\nدر حال جستجو و دانلود...",
                 force=True,
             )
-        file_path, error_code = await self.music_downloader.download_song(
+        file_path, error_code, failure_trail = await self.music_downloader.download_song(
             metadata,
             progress_reporter=progress_reporter,
             cancel_check=cancel_check,
             quality=quality,
         )
+        metadata.last_failure_trail = failure_trail or []
         platform = source if file_path else source
 
         if not file_path or not os.path.exists(file_path):
@@ -172,6 +173,7 @@ class DownloadOrchestrator:
                 "artist": metadata.artist,
                 "source": source,
                 "error_code": code,
+                "failure_trail": failure_trail,
             })
             if bot:
                 import admin_logger

@@ -350,9 +350,9 @@ class MusicDownloader:
         Flat YouTube searches score candidates on title + artist + duration/topic
         signals, then a single best URL is downloaded.
 
-        Returns ``(file_path, error_code)``. On success ``error_code`` is ``None``.
+        Returns ``(file_path, error_code, failure_trail)``. On success ``error_code`` is ``None``.
         Failure codes: ``no_match``, ``bot_check``, ``timeout``, ``invalid_file``,
-        ``cancelled``, ``unknown``.
+        ``cancelled``, ``drm``, ``unknown``.
         """
 
         MATCH_THRESHOLD = 65.0
@@ -371,6 +371,10 @@ class MusicDownloader:
             text = str(err or "").lower()
             if "confirm you're not a bot" in text or "sign in to confirm" in text:
                 return "bot_check"
+            if "drm" in text:
+                return "drm"
+            if "404" in text or "not found" in text:
+                return "not_found"
             if "timed out" in text or "timeout" in text:
                 return "timeout"
             return "unknown"
@@ -549,8 +553,9 @@ class MusicDownloader:
 
         source_url = getattr(metadata, "source_url", None)
         if source_url:
+            direct_trail = []
             if _is_cancelled():
-                return None, "cancelled"
+                return None, "cancelled", direct_trail
             await _report(
                 25,
                 f"{metadata.title} — {metadata.artist}\nدانلود مستقیم از منبع...",
@@ -579,7 +584,9 @@ class MusicDownloader:
                     await loop.run_in_executor(None, ydl.download, [source_url])
             except Exception as e:
                 logger.error("Direct URL download failed: %s", e, exc_info=True)
-                return None, _classify_error(e)
+                code = _classify_error(e)
+                direct_trail.append({"source": "direct", "error": code})
+                return None, code, direct_trail
 
             file_path = os.path.join(self.download_dir, f"{metadata.id}.mp3")
             if not os.path.exists(file_path):
@@ -589,7 +596,8 @@ class MusicDownloader:
                         file_path = os.path.join(self.download_dir, name)
                         break
             if not os.path.exists(file_path):
-                return None, "invalid_file"
+                direct_trail.append({"source": "direct", "error": "invalid_file"})
+                return None, "invalid_file", direct_trail
 
             try:
                 audio_file = MutagenMP3(file_path)
@@ -602,23 +610,27 @@ class MusicDownloader:
             file_size = os.path.getsize(file_path)
             if file_size < 200_000:
                 os.remove(file_path)
-                return None, "invalid_file"
+                direct_trail.append({"source": "direct", "error": "invalid_file"})
+                return None, "invalid_file", direct_trail
 
             await _report(
                 82, f"{metadata.title} — {metadata.artist}\nبرچسب‌گذاری و کاور...",
             )
             self._apply_metadata(file_path, metadata)
-            return file_path, None
+            return file_path, None, direct_trail
+
+        MAX_CANDIDATES_PER_SOURCE = 5
+        failure_trail = []
 
         async def gather_best(search_prefix, source_label, strategies, pct_start=20, pct_end=40):
-            best_local = None
+            ranked = []
             seen_ids = set()
             bot_blocked = False
             n = max(len(strategies), 1)
             with yt_dlp.YoutubeDL(search_opts) as ydl:
                 for strategy_idx, search_query in enumerate(strategies):
                     if _is_cancelled():
-                        return None, False, True
+                        return [], False, True
                     pct = pct_start + int((pct_end - pct_start) * (strategy_idx / n))
                     await _report(
                         pct,
@@ -671,19 +683,21 @@ class MusicDownloader:
                                 )
                                 if not topic_ok:
                                     continue
-                            if best_local is None or combined > best_local[0]:
-                                best_local = (combined, video)
+                            ranked.append((combined, video))
 
-                        if best_local and best_local[0] >= EARLY_ACCEPT:
+                        ranked.sort(key=lambda x: x[0], reverse=True)
+                        ranked = ranked[:MAX_CANDIDATES_PER_SOURCE]
+                        best_score = ranked[0][0] if ranked else 0
+
+                        if best_score >= EARLY_ACCEPT:
                             logger.info(
-                                f"[{source_label}] Early accept at {best_local[0]:.1f}% "
+                                f"[{source_label}] Early accept at {best_score:.1f}% "
                                 f"(strategy {strategy_idx + 1})"
                             )
                             break
-                        # After first two strategies, stop if we already cleared the bar.
-                        if strategy_idx >= 1 and best_local and best_local[0] >= MATCH_THRESHOLD:
+                        if strategy_idx >= 1 and best_score >= MATCH_THRESHOLD:
                             logger.info(
-                                f"[{source_label}] Stopping early — best {best_local[0]:.1f}% "
+                                f"[{source_label}] Stopping early — best {best_score:.1f}% "
                                 f"after strategy {strategy_idx + 1}"
                             )
                             break
@@ -700,15 +714,17 @@ class MusicDownloader:
                         else:
                             logger.error(f"[{source_label}] Strategy {strategy_idx + 1} failed: {e}")
                         continue
-            if bot_blocked and source_label == "YouTube" and not best_local:
+            ranked.sort(key=lambda x: x[0], reverse=True)
+            ranked = ranked[:MAX_CANDIDATES_PER_SOURCE]
+            if bot_blocked and source_label == "YouTube" and not ranked:
                 logger.error(
                     "YouTube bot-check blocked all strategies — falling through to SoundCloud. "
                     "Fix cookies to restore YouTube downloads."
                 )
-            return best_local, bot_blocked, False
+            return ranked, bot_blocked, False
 
         if _is_cancelled():
-            return None, "cancelled"
+            return None, "cancelled", failure_trail
 
         _SOURCES = {
             "YouTube": ("ytsearch", yt_search_strategies, "در حال جستجو در یوتیوب..."),
@@ -718,7 +734,7 @@ class MusicDownloader:
         saw_bot_check = False
 
         async def search_source(label, pct_start, pct_end):
-            """Search one source at most once per download; returns (best, cancelled)."""
+            """Search one source at most once per download; returns (candidates, cancelled)."""
             nonlocal saw_bot_check
             if label in found_by_source:
                 return found_by_source[label], False
@@ -726,12 +742,12 @@ class MusicDownloader:
             await _report(
                 max(pct_start - 2, 0), f"{metadata.title} — {metadata.artist}\n{note}"
             )
-            found, blocked, cancelled = await gather_best(
+            ranked, blocked, cancelled = await gather_best(
                 prefix, label, strategies, pct_start, pct_end
             )
-            found_by_source[label] = found
+            found_by_source[label] = ranked
             saw_bot_check = saw_bot_check or blocked
-            return found, cancelled
+            return ranked, cancelled
 
         # Without usable cookies YouTube downloads hit the bot check anyway, so
         # try SoundCloud first instead of burning every search strategy on it.
@@ -745,27 +761,38 @@ class MusicDownloader:
         best = None
         for position, label in enumerate(source_order):
             pct_start, pct_end = (20, 38) if position == 0 else (40, 48)
-            found, cancelled = await search_source(label, pct_start, pct_end)
+            ranked, cancelled = await search_source(label, pct_start, pct_end)
             if cancelled or _is_cancelled():
-                return None, "cancelled"
-            if found and (best is None or found[0] > best[0]):
-                best = found
-            if best and best[0] >= MATCH_THRESHOLD:
-                break
+                return None, "cancelled", failure_trail
+            if ranked and (best is None or ranked[0][0] > best[0]):
+                best = ranked[0]
             if position + 1 < len(source_order):
-                best_txt = f"{best[0]:.1f}%" if best else "n/a"
-                logger.warning(
-                    f"No valid {label} match (best eligible: {best_txt}) — "
-                    f"trying {source_order[position + 1]} fallback"
-                )
+                source_best = ranked[0][0] if ranked else 0.0
+                if source_best >= MATCH_THRESHOLD:
+                    logger.info(
+                        f"Found {label} match ({source_best:.1f}%) — "
+                        f"also searching {source_order[position + 1]}"
+                    )
+                else:
+                    best_txt = f"{best[0]:.1f}%" if best else "n/a"
+                    logger.warning(
+                        f"No valid {label} match (best eligible: {best_txt}) — "
+                        f"trying {source_order[position + 1]} fallback"
+                    )
 
-        if not best or best[0] < MATCH_THRESHOLD:
+        download_queue = []
+        for label in ("YouTube", "SoundCloud"):
+            for cand in found_by_source.get(label) or []:
+                if cand[0] >= MATCH_THRESHOLD:
+                    download_queue.append(cand)
+
+        if not download_queue:
             score_txt = f"{best[0]:.1f}%" if best else "n/a"
             logger.error(
                 f"No candidate passed validation on any source (title >= {TITLE_THRESHOLD:.0f}% and "
                 f"combined >= {MATCH_THRESHOLD:.0f}%). Best eligible: {score_txt}"
             )
-            return None, ("bot_check" if saw_bot_check else "no_match")
+            return None, ("bot_check" if saw_bot_check else "no_match"), failure_trail
 
         def _source_label_for(video):
             extractor = (video.get("extractor") or "").lower()
@@ -839,7 +866,9 @@ class MusicDownloader:
                     await loop.run_in_executor(None, ydl.download, [url])
             except Exception as e:
                 code = _classify_error(e)
-                logger.error(f"Download of {source_label} match failed: {e}", exc_info=True)
+                logger.warning(
+                    f"Download of {source_label} match failed ({code}): {e}"
+                )
                 return None, None, code
             finally:
                 heartbeat.cancel()
@@ -855,38 +884,37 @@ class MusicDownloader:
             return path, video, None
 
         if _is_cancelled():
-            return None, "cancelled"
+            return None, "cancelled", failure_trail
 
-        best_score, best_video = best
-        primary_label = _source_label_for(best[1])
-        file_path, best_video, dl_err = await _download_candidate(best)
-        last_err = dl_err
-
-        # A source can match then fail at download (bot-check / expired cookies).
-        # Fall through to the other source instead of giving up.
-        if not file_path and not _is_cancelled():
-            other = "SoundCloud" if primary_label == "YouTube" else "YouTube"
-            alt = None
-            if other == "YouTube" and not yt_usable:
-                logger.warning("Skipping YouTube retry — cookies cannot pass bot check")
-            else:
-                alt, cancelled = await search_source(other, 40, 48)
-                if cancelled or _is_cancelled():
-                    return None, "cancelled"
-            if alt and alt[0] >= MATCH_THRESHOLD:
-                logger.warning(
-                    f"{primary_label} download failed — retrying with {other} "
-                    f"(score {alt[0]:.1f}%)"
-                )
-                best_score, best_video = alt
-                file_path, best_video, dl_err = await _download_candidate(alt)
-                last_err = dl_err or last_err
+        file_path = None
+        best_video = None
+        best_score = 0.0
+        last_err = None
+        for candidate in download_queue:
+            if _is_cancelled():
+                return None, "cancelled", failure_trail
+            score, _video = candidate
+            file_path, best_video, dl_err = await _download_candidate(candidate)
+            if file_path:
+                best_score = score
+                break
+            last_err = dl_err
+            src = _source_label_for(_video)
+            failure_trail.append({
+                "source": src,
+                "score": score,
+                "error": dl_err,
+                "title": (_video.get("title") or "")[:120],
+            })
+            logger.warning(
+                f"{src} candidate failed ({dl_err}, score {score:.1f}%) — trying next"
+            )
 
         if _is_cancelled():
-            return None, "cancelled"
+            return None, "cancelled", failure_trail
 
         if not file_path:
-            return None, last_err or ("bot_check" if saw_bot_check else "no_match")
+            return None, last_err or ("bot_check" if saw_bot_check else "no_match"), failure_trail
 
         try:
             audio_file = MutagenMP3(file_path)
@@ -894,7 +922,7 @@ class MusicDownloader:
             if duration < 60 or duration > 600:
                 logger.warning(f"Invalid duration ({duration:.1f}s) - likely wrong track")
                 os.remove(file_path)
-                return None, "invalid_file"
+                return None, "invalid_file", failure_trail
             if duration < 90 or duration > 420:
                 logger.warning(f"Unusual duration ({duration:.1f}s) - proceeding anyway")
         except Exception as e:
@@ -904,13 +932,13 @@ class MusicDownloader:
         if file_size < 1_000_000:
             logger.warning(f"File too small ({file_size/1024:.0f}KB) - likely wrong track")
             os.remove(file_path)
-            return None, "invalid_file"
+            return None, "invalid_file", failure_trail
 
         logger.info(f"Download successful (match {best_score:.1f}%)")
         await _report(82, f"{metadata.title} — {metadata.artist}\nبرچسب‌گذاری و کاور...")
         self._enrich_metadata_from_source(metadata, best_video)
         self._apply_metadata(file_path, metadata)
-        return file_path, None
+        return file_path, None, failure_trail
 
     async def _hydrate_video_info(self, download_url, flat_video, loop):
         """Replace flat-search stub with full metadata (title, uploader, thumbnail)."""

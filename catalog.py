@@ -140,6 +140,34 @@ def _squash(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
 
 
+def _deezer_track_preview_sync(title: str, artist: str) -> Optional[str]:
+    """Return a Deezer 30s MP3 preview URL for a title/artist pair, if found."""
+    q = f"{artist} {title}".strip()
+    if len(q) < 3:
+        return None
+    try:
+        data = _deezer_get("/search/track", q=q, limit=5)
+    except CatalogError:
+        return None
+    want_t = _squash(title)
+    want_a = _squash(artist)
+    for item in data.get("data") or []:
+        preview = item.get("preview")
+        if not preview:
+            continue
+        got_t = _squash(item.get("title", ""))
+        got_a = _squash((item.get("artist") or {}).get("name", ""))
+        if got_t == want_t and got_a == want_a:
+            return preview
+        if want_t and want_a and want_t in got_t and want_a in got_a:
+            return preview
+    return None
+
+
+async def fetch_track_preview(title: str, artist: str) -> Optional[str]:
+    return await asyncio.to_thread(_deezer_track_preview_sync, title, artist)
+
+
 def _relevance(hit: CatalogHit, query: str) -> float:
     q = _squash(query)
     name = _squash(hit.name)

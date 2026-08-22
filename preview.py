@@ -1,25 +1,27 @@
 """30-second preview clips sent while the full track downloads.
 
-Uses the Apple/iTunes/Spotify preview_url already attached to metadata.
-A voice note is only posted when the real download is taking a while —
-cache hits and fast downloads cancel the timer before anything is sent.
+Uses the Apple/Deezer preview_url already attached to metadata.
+Sent as audio (not voice) to preserve quality. A preview is only posted
+when the real download is taking a while — cache hits and fast downloads
+cancel the timer before anything is sent.
 """
 
 import asyncio
 import logging
 import os
-import subprocess
 import tempfile
+from io import BytesIO
 
 import aiohttp
 
+import catalog
 import messages as msg
 
 logger = logging.getLogger(__name__)
 
 PREVIEW_ENABLED = os.getenv("PREVIEW_ENABLED", "1").lower() not in ("0", "false", "no")
 PREVIEW_DELAY_SEC = float(os.getenv("PREVIEW_DELAY_SEC", "4"))
-PREVIEW_MAX_BYTES = 3 * 1024 * 1024
+PREVIEW_MAX_BYTES = 8 * 1024 * 1024
 
 
 async def _fetch(url):
@@ -37,18 +39,17 @@ async def _fetch(url):
             return data
 
 
-def _to_opus(src_path, dest_path):
-    """Telegram voice notes must be OGG/Opus; iTunes previews are AAC in m4a."""
-    subprocess.run(
-        [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-            "-i", src_path, "-vn", "-ac", "1", "-ar", "48000",
-            "-c:a", "libopus", "-b:a", "48k", dest_path,
-        ],
-        check=True,
-        timeout=30,
-        capture_output=True,
-    )
+def _preview_filename(url, title, artist):
+    url_l = (url or "").lower()
+    if ".mp3" in url_l:
+        ext = "mp3"
+    elif ".m4a" in url_l or ".aac" in url_l:
+        ext = "m4a"
+    else:
+        ext = "m4a"
+    safe_title = (title or "preview").replace("/", "-")[:80]
+    safe_artist = (artist or "unknown").replace("/", "-")[:60]
+    return f"{safe_artist} - {safe_title}.{ext}"
 
 
 class PreviewSender:
@@ -66,7 +67,9 @@ class PreviewSender:
         if not PREVIEW_ENABLED:
             return
         url = getattr(self.metadata, "preview_url", None)
-        if not url:
+        title = getattr(self.metadata, "title", "") or ""
+        artist = getattr(self.metadata, "artist", "") or ""
+        if not url and not (title and artist):
             return
         self._task = asyncio.create_task(self._run())
 
@@ -76,31 +79,36 @@ class PreviewSender:
             if self._done:
                 return
 
-            data = await _fetch(self.metadata.preview_url)
+            title = getattr(self.metadata, "title", "") or ""
+            artist = getattr(self.metadata, "artist", "") or ""
+            preview_url = getattr(self.metadata, "preview_url", None)
+            if title and artist:
+                try:
+                    deezer = await catalog.fetch_track_preview(title, artist)
+                    if deezer:
+                        preview_url = deezer
+                except Exception:
+                    pass
+            if not preview_url:
+                return
+
+            data = await _fetch(preview_url)
             if not data or self._done:
                 return
 
-            with tempfile.TemporaryDirectory(prefix="hiit_preview_") as tmp:
-                src = os.path.join(tmp, "preview.m4a")
-                dest = os.path.join(tmp, "preview.ogg")
-                with open(src, "wb") as f:
-                    f.write(data)
-                try:
-                    await asyncio.to_thread(_to_opus, src, dest)
-                except Exception as e:
-                    logger.info("Preview convert failed: %s", e)
-                    return
-                if self._done or not os.path.exists(dest):
-                    return
+            caption = msg.preview_caption(title, artist)
+            filename = _preview_filename(preview_url, title, artist)
+            bio = BytesIO(data)
+            bio.name = filename
 
-                title = getattr(self.metadata, "title", "") or ""
-                artist = getattr(self.metadata, "artist", "") or ""
-                caption = msg.preview_caption(title, artist)
-                with open(dest, "rb") as voice:
-                    self._sent = await self.message.reply_voice(
-                        voice=voice,
-                        caption=caption,
-                    )
+            if self._done:
+                return
+            self._sent = await self.message.reply_audio(
+                audio=bio,
+                title=title or None,
+                performer=artist or None,
+                caption=caption,
+            )
         except asyncio.CancelledError:
             return
         except Exception as e:
