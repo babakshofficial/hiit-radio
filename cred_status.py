@@ -13,26 +13,39 @@ def get_credentials_status():
 
     # --- YouTube (all audio downloads) ---
     lines.append("▶ یوتیوب (دانلود صدا — همه لینک‌ها)")
-    has_auth_cookies = os.path.exists(dl.cookies_path) and _cookies_look_authenticated(dl.cookies_path)
-    if has_auth_cookies:
-        lines.append(f"  ✓ cookies.txt لاگین‌شده: {dl.cookies_path}")
-        yt_ok = True
-        if dl.cookies_from_browser:
-            lines.append(
-                f"  (فایل cookies.txt اولویت دارد؛ YTDLP_COOKIES_FROM_BROWSER={dl.cookies_from_browser} نادیده گرفته می‌شود)"
-            )
-    elif dl.cookies_from_browser:
-        lines.append(f"  ⚠ YTDLP_COOKIES_FROM_BROWSER={dl.cookies_from_browser}")
-        lines.append("    → روی VPS معمولاً کار نمی‌کند؛ cookies.txt را از PC کپی کن")
-        yt_ok = False
-    elif os.path.exists(dl.cookies_path):
-        lines.append(f"  ✗ cookies.txt هست ولی بدون LOGIN_INFO/SAPISID (مهمان)")
-        lines.append("    → در مرورگر وارد youtube.com شو و کوکی را دوباره export کن")
-        yt_ok = False
+    if dl.cookies_from_browser:
+        lines.append(f"  ✓ مرورگر: YTDLP_COOKIES_FROM_BROWSER={dl.cookies_from_browser}")
+        live_ok, live_detail = dl.probe_youtube_auth()
+        if live_ok:
+            lines.append(f"  ✓ تست زنده: {live_detail}")
+            yt_ok = True
+        else:
+            lines.append(f"  ✗ تست زنده: {live_detail}")
+            lines.append("    → در Chrome وارد youtube.com شو؛ secretstorage نصب باشد")
+            yt_ok = False
     else:
-        lines.append(f"  ✗ cookies.txt پیدا نشد: {dl.cookies_path}")
-        lines.append("    → فایل را از PC کپی کن یا در مرورگر export کن")
-        yt_ok = False
+        has_auth_cookies = (
+            os.path.exists(dl.cookies_path) and _cookies_look_authenticated(dl.cookies_path)
+        )
+        if has_auth_cookies:
+            live_ok, live_detail = dl.probe_youtube_auth()
+            lines.append(f"  ✓ cookies.txt: {dl.cookies_path}")
+            if live_ok:
+                lines.append(f"  ✓ تست زنده: {live_detail}")
+                yt_ok = True
+            else:
+                lines.append(f"  ✗ تست زنده: {live_detail}")
+                lines.append("    → کوکی منقضی شده — از PC export کن یا /cookies بفرست")
+                yt_ok = False
+        elif os.path.exists(dl.cookies_path):
+            lines.append(f"  ✗ cookies.txt هست ولی نشست یوتیوب کامل نیست")
+            lines.append("    → در مرورگر وارد youtube.com شو و کوکی را دوباره export کن")
+            lines.append("    → یا YTDLP_COOKIES_FROM_BROWSER=chrome و YTDLP_AUTO_REFRESH_COOKIES=1")
+            yt_ok = False
+        else:
+            lines.append(f"  ✗ cookies.txt پیدا نشد: {dl.cookies_path}")
+            lines.append("    → فایل را از PC کپی کن یا در مرورگر export کن")
+            yt_ok = False
 
     # --- Spotify API (metadata only) ---
     lines.append("")

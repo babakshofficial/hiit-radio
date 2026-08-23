@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -70,7 +71,7 @@ from llm_service import (
     set_cached_recommendations,
 )
 from cache_manager import content_key
-from downloader import cookie_jar_status
+from downloader import cookie_jar_status, invalidate_youtube_auth_probe, downloads_in_progress
 from preview import PreviewSender
 import entitlements
 import jobs
@@ -83,6 +84,9 @@ import support_chat
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
+TG_PROXY_URL = os.getenv("TG_PROXY_URL", "").strip()
+# Optional in-app Telegram proxy (httpx SOCKS).
+TG_USE_INAPP_PROXY = os.getenv("TG_USE_INAPP_PROXY", "").lower() in ("1", "true", "yes")
 TG_CONNECT_TIMEOUT = float(os.getenv("TG_CONNECT_TIMEOUT", "30"))
 TG_READ_TIMEOUT = float(os.getenv("TG_READ_TIMEOUT", "300"))
 TG_WRITE_TIMEOUT = float(os.getenv("TG_WRITE_TIMEOUT", "300"))
@@ -2232,13 +2236,23 @@ def _youtube_auth_status():
     """Return ``(healthy, detail)`` for the credentials yt-dlp will actually use."""
     file_ok, file_detail, _updated = _cookie_file_status()
     path = downloader.cookies_path
+    live_ok, live_detail = downloader.probe_youtube_auth()
+    if live_ok:
+        if downloader.cookies_from_browser:
+            return True, (
+                f"browser cookies OK — {live_detail} "
+                f"({downloader.cookies_from_browser})"
+            )
+        return True, f"cookies.txt OK — {live_detail} ({path})"
+    if downloader.cookies_from_browser:
+        return False, (
+            f"browser cookies failed ({live_detail}); "
+            f"check {downloader.cookies_from_browser} is logged into YouTube"
+        )
     if file_ok:
-        return True, f"cookies.txt OK — {file_detail} ({path})"
-    browser = downloader.cookies_from_browser
-    if browser:
-        return True, (
-            f"cookies.txt unusable ({file_detail}); "
-            f"falling back to browser cookies ({browser})"
+        return False, (
+            f"cookies.txt stale ({live_detail}) at {path}. "
+            "Send a fresh cookies.txt to the bot as a file to fix it — see /cookies."
         )
     return False, (
         f"cookies.txt unusable ({file_detail}) at {path}. "
@@ -2295,6 +2309,7 @@ async def cookies_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     logger.info("cookies.txt replaced via admin upload (%s)", detail)
+    invalidate_youtube_auth_probe()
     await update.message.reply_text(msg.cookies_accepted(detail, backed_up))
     await _check_and_report_cookie_health(context.bot)
 
@@ -2305,6 +2320,9 @@ async def _cache_sweep_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _cookie_health_job(context: ContextTypes.DEFAULT_TYPE):
+    if downloads_in_progress():
+        logger.debug("Skipping cookie health check — download in progress")
+        return
     await _check_and_report_cookie_health(context.bot)
 
 
@@ -2331,10 +2349,38 @@ async def _cache_sweep_fallback_loop(bot):
         await asyncio.sleep(3600)
 
 
+async def _deferred_youtube_setup(bot):
+    """Wait for YTDLP_PROXY, refresh cookies, then probe — avoids boot-time races."""
+    from downloader import _wait_for_yt_proxy, invalidate_youtube_auth_probe
+
+    await asyncio.to_thread(_wait_for_yt_proxy, 120)
+    await asyncio.sleep(5)
+
+    if downloader.cookies_from_browser:
+        try:
+            ok, detail = await asyncio.to_thread(downloader.refresh_cookies_from_browser)
+            logger.info("YouTube cookie refresh (deferred): ok=%s detail=%s", ok, detail)
+        except Exception as exc:
+            logger.warning("YouTube cookie refresh failed: %s", exc)
+
+    invalidate_youtube_auth_probe()
+    status_text, yt_ok = get_credentials_status()
+    for line in status_text.splitlines():
+        logger.info(line)
+    if not yt_ok:
+        logger.warning(
+            "YouTube live probe failed after deferred startup wait. "
+            "Downloads retry with backoff + cookie refresh on bot_check."
+        )
+    await _check_and_report_cookie_health(bot)
+
+
 async def _on_startup(application):
     gate_ok = await validate_channel_gate(application.bot)
     vip_ok = await validate_vip_log_channel(application.bot)
-    _, yt_ok = get_credentials_status()
+
+    asyncio.create_task(_deferred_youtube_setup(application.bot))
+
     if not vip_ok:
         await notify_admin_vip_issue(
             application.bot,
@@ -2342,10 +2388,9 @@ async def _on_startup(application):
             "ربات را ادمین کانال خصوصی کن، VIP_LOG_CHANNEL_ID را در .env بگذار، "
             "و /viplogtest را بزن.",
         )
-    await log_startup(application.bot, gate_ok, vip_ok, yt_ok)
+    await log_startup(application.bot, gate_ok, vip_ok, yt_ok=True)
     removed = orchestrator.sweep_cache()
     await log_system(application.bot, "پاکسازی کش (startup)", removed=removed)
-    await _check_and_report_cookie_health(application.bot)
     try:
         from api.webapp_menu import configure_webapp_menu
         await configure_webapp_menu(application.bot)
@@ -2599,11 +2644,31 @@ async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user:
         return
+
+    body = _support_message_body(update, context)
+
     if _is_admin(user.id):
-        await update.message.reply_text(msg.support_usage())
+        session = user_manager.database.get_admin_support_session(user.id)
+        if session and body:
+            ok, reply = await support_chat.forward_admin_message(
+                context.bot,
+                user_manager.database,
+                user.id,
+                body,
+                notify_opened=True,
+            )
+            thread_id = session["thread_id"]
+            if ok:
+                await update.message.reply_text(
+                    reply,
+                    reply_markup=support_chat.build_admin_active_keyboard(thread_id),
+                )
+            else:
+                await update.message.reply_text(reply)
+            return
+        await update.message.reply_text(msg.support_admin_usage())
         return
 
-    body = " ".join(context.args).strip() if context.args else ""
     if not body:
         await update.message.reply_text(msg.support_usage())
         return
@@ -2612,6 +2677,17 @@ async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot, user_manager.database, user.id, body,
     )
     await update.message.reply_text(text)
+
+
+def _support_message_body(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Text after /support — context.args plus fallback parse from message.text."""
+    if context.args:
+        return " ".join(context.args).strip()
+    text = (update.message.text or "").strip()
+    match = re.match(r"^/support(?:@\w+)?\s*(.*)$", text, re.I | re.S)
+    if match:
+        return match.group(1).strip()
+    return ""
 
 
 async def supportend_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2770,8 +2846,15 @@ def main():
         .pool_timeout(TG_POOL_TIMEOUT)
         .post_init(_on_startup)
         .post_shutdown(_on_shutdown)
-        .build()
     )
+    if TG_PROXY_URL and TG_USE_INAPP_PROXY:
+        application = (
+            application
+            .proxy(TG_PROXY_URL)
+            .get_updates_proxy(TG_PROXY_URL)
+        )
+        logger.info("Telegram in-app proxy enabled (TG_USE_INAPP_PROXY=1)")
+    application = application.build()
 
     application.add_handler(TypeHandler(Update, vip_update_logger), group=-1)
 
@@ -2843,12 +2926,6 @@ def main():
             group=0,
         )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    status_text, yt_ok = get_credentials_status()
-    for line in status_text.splitlines():
-        logger.info(line)
-    if not yt_ok:
-        logger.warning("YouTube full downloads unavailable until logged-in cookies are configured")
 
     application.run_polling()
 
