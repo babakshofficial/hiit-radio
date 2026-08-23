@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Fresh-process YouTube download for the systemd/proxychains bot.
+"""Fresh-process YouTube download worker for the bot.
 
-Clears proxychains LD_PRELOAD (Deno needs a clean env) and optionally uses
-YTDLP_PROXY. Invoked by MusicDownloader._download_youtube_subprocess.
+Isolates live Chrome cookie reads from the long-lived bot process. Uses
+``YTDLP_PROXY`` when set. Invoked by MusicDownloader._run_youtube_worker.
 """
 from __future__ import annotations
 
@@ -44,8 +44,6 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    os.environ.pop("LD_PRELOAD", None)
-
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sys.path.insert(0, root)
     os.chdir(root)
@@ -66,8 +64,9 @@ def main() -> int:
             f"REFRESH_{'OK' if ok else 'FAIL'} {detail}",
             flush=True,
         )
+        proxy = (args.proxy or os.getenv("YTDLP_PROXY") or "").strip()
         print(
-            f"yt_worker auth=browser proxy={args.proxy or 'direct'} "
+            f"yt_worker auth=browser proxy={proxy or 'direct'} "
             f"dbus={bool(os.environ.get('DBUS_SESSION_BUS_ADDRESS'))} "
             f"keyring={bool(os.environ.get('SSH_AUTH_SOCK'))}",
             flush=True,

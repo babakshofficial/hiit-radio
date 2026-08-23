@@ -63,7 +63,7 @@ Restart the bot/API after changing `.env`.
 
 ## systemd (bot + API + web)
 
-One unit starts the Telegram bot, FastAPI (`127.0.0.1:8000`), and Next.js (`127.0.0.1:3000`). The bot and API run under `proxychains4` (same as your previous unit).
+One unit starts the Telegram bot, FastAPI (`127.0.0.1:8000`), and Next.js (`127.0.0.1:3000`) via `scripts/hiit-radio-stack.sh`.
 
 Build the frontend once (or after UI changes):
 

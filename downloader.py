@@ -78,12 +78,8 @@ def downloads_in_progress():
 
 
 def _yt_proxy_url():
-    """SOCKS/HTTP proxy for yt-dlp when not using LD_PRELOAD proxychains."""
-    explicit = os.getenv("YTDLP_PROXY", "").strip()
-    if explicit:
-        return explicit
-    # Match common local Hiddify / proxychains default used on this host.
-    return os.getenv("YTDLP_PROXY_FALLBACK", "socks5://127.0.0.1:3080").strip()
+    """Optional SOCKS/HTTP proxy for yt-dlp (``YTDLP_PROXY`` env var)."""
+    return os.getenv("YTDLP_PROXY", "").strip()
 
 
 def _yt_proxy_endpoint():
@@ -100,7 +96,7 @@ def _yt_proxy_endpoint():
 
 
 def _wait_for_yt_proxy(timeout=90):
-    """Block until the local SOCKS proxy accepts connections (Hiddify startup race)."""
+    """Block until ``YTDLP_PROXY`` accepts connections (optional startup wait)."""
     endpoint = _yt_proxy_endpoint()
     if not endpoint:
         return True
@@ -126,97 +122,14 @@ _BROWSER_RETRY_DELAYS = (2, 6, 15)
 
 
 def _deno_js_runtimes():
-    """Point yt-dlp at a deno wrapper that strips proxychains LD_PRELOAD.
-
-    Under proxychains, ``deno --version`` output is polluted and yt-dlp marks
-    deno as unsupported (``deno-unknown``), so YouTube n-challenges never solve.
-    """
-    wrapper = os.getenv("YTDLP_DENO_PATH", "").strip()
-    if not wrapper:
-        wrapper = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "scripts", "deno-noproxy"
-        )
-    if os.path.isfile(wrapper) and os.access(wrapper, os.X_OK):
-        return {"deno": {"path": wrapper}}
+    """Return yt-dlp ``js_runtimes`` config pointing at deno when installed."""
+    explicit = os.getenv("YTDLP_DENO_PATH", "").strip()
+    if explicit:
+        return {"deno": {"path": explicit}}
     deno = os.path.expanduser("~/.deno/bin/deno")
     if os.path.isfile(deno) and os.access(deno, os.X_OK):
         return {"deno": {"path": deno}}
     return {"deno": {}}
-
-
-def _patch_yt_dlp_proxychains():
-    """Make yt-dlp's Deno integration work when the bot runs under proxychains.
-
-    proxychains LD_PRELOAD:
-    - prefixes ``deno --version`` so yt-dlp reports ``deno-unknown (unsupported)``
-    - leaves noise on stderr so challenge solving treats Deno as failed
-    """
-    try:
-        from yt_dlp.utils._jsruntime import (
-            DenoJsRuntime,
-            JsRuntimeInfo,
-            _determine_runtime_path,
-            version_tuple,
-        )
-        from yt_dlp.utils._utils import detect_exe_version
-    except ImportError:
-        return
-
-    def _info(self):
-        path = _determine_runtime_path(self._path, "deno")
-        env = os.environ.copy()
-        env.pop("LD_PRELOAD", None)
-        try:
-            import subprocess
-            out = subprocess.check_output(
-                [path, "--version"],
-                env=env,
-                text=True,
-                stderr=subprocess.STDOUT,
-            )
-        except (OSError, subprocess.CalledProcessError):
-            return None
-        out = "\n".join(
-            line for line in out.splitlines()
-            if not line.startswith("[proxychains]")
-        )
-        version = detect_exe_version(out, r"(?m)^deno (\S+)", "unknown")
-        vt = version_tuple(version, lenient=True)
-        return JsRuntimeInfo(
-            name="deno",
-            path=path,
-            version=version,
-            version_tuple=vt,
-            supported=vt >= DenoJsRuntime.MIN_SUPPORTED_VERSION,
-        )
-
-    DenoJsRuntime._info = _info
-
-    try:
-        from yt_dlp.extractor.youtube.jsc._builtin.deno import DenoJCP
-    except ImportError:
-        return
-
-    _orig_env = DenoJCP._get_env_options
-    _orig_clean = DenoJCP._clean_stderr
-
-    def _get_env_options(self):
-        options = _orig_env(self)
-        options.pop("LD_PRELOAD", None)
-        return options
-
-    def _clean_stderr(self, stderr):
-        cleaned = _orig_clean(self, stderr)
-        return "\n".join(
-            line for line in cleaned.splitlines()
-            if not line.startswith("[proxychains]")
-        )
-
-    DenoJCP._get_env_options = _get_env_options
-    DenoJCP._clean_stderr = _clean_stderr
-
-
-_patch_yt_dlp_proxychains()
 
 
 def _info_has_formats(info):
@@ -578,19 +491,18 @@ class MusicDownloader:
         return False, "cookie export produced no authenticated session"
 
     def refresh_cookies_from_browser(self, browser_spec=None):
-        """Export fresh cookies via an isolated worker (never from proxychains main)."""
+        """Export fresh cookies via an isolated worker subprocess."""
         _wait_for_yt_proxy(timeout=60)
         ok, detail = self._run_cookie_refresh_worker(browser_spec)
         invalidate_youtube_auth_probe()
         return ok, detail
 
     def _run_cookie_refresh_worker(self, browser_spec=None):
-        """Refresh cookies.txt in a subprocess without proxychains LD_PRELOAD."""
+        """Refresh cookies.txt in a subprocess worker."""
         _ensure_youtube_session_env()
         root = os.path.dirname(os.path.abspath(__file__))
         worker = os.path.join(root, "scripts", "yt_download_worker.py")
         env = os.environ.copy()
-        env.pop("LD_PRELOAD", None)
         deno_bin = os.path.expanduser("~/.deno/bin")
         venv_bin = os.path.join(root, ".venv", "bin")
         env["PATH"] = f"{deno_bin}:{venv_bin}:" + env.get("PATH", "")
@@ -616,10 +528,6 @@ class MusicDownloader:
                     detail = line[len("REFRESH_OK "):]
             return True, detail or "browser cookies exported"
         err = (completed.stderr or completed.stdout or "").strip()
-        err = "\n".join(
-            line for line in err.splitlines()
-            if not line.startswith("[proxychains]")
-        )
         return False, err[:500] or "cookie refresh worker failed"
 
     def _apply_network(self, ydl_opts):
@@ -675,10 +583,7 @@ class MusicDownloader:
         if not force and now - _PROBE_CACHE["monotonic"] < _PROBE_TTL_SEC:
             return _PROBE_CACHE["ok"], _PROBE_CACHE["detail"]
 
-        use_subprocess = bool(
-            _yt_proxy_url()
-            or "proxychains" in (os.environ.get("LD_PRELOAD") or "").lower()
-        )
+        use_subprocess = bool(_yt_proxy_url() or self.cookies_from_browser)
         if use_subprocess:
             ok, detail = self._probe_youtube_subprocess(thorough=force)
             _PROBE_CACHE.update(monotonic=now, ok=ok, detail=detail)
@@ -819,13 +724,12 @@ class MusicDownloader:
         return attempts or [("", "browser")]
 
     def _run_youtube_worker(self, url, *, probe=False, output_template="", quality=DEFAULT_QUALITY):
-        """Invoke yt_download_worker.py without proxychains LD_PRELOAD."""
+        """Invoke yt_download_worker.py in an isolated subprocess."""
         _wait_for_yt_proxy(timeout=60)
         _ensure_youtube_session_env()
         root = os.path.dirname(os.path.abspath(__file__))
         worker = os.path.join(root, "scripts", "yt_download_worker.py")
         env = os.environ.copy()
-        env.pop("LD_PRELOAD", None)
         deno_bin = os.path.expanduser("~/.deno/bin")
         venv_bin = os.path.join(root, ".venv", "bin")
         env["PATH"] = f"{deno_bin}:{venv_bin}:" + env.get("PATH", "")
@@ -864,10 +768,6 @@ class MusicDownloader:
                 err = (completed.stderr or completed.stdout or "").strip() or (
                     f"worker exited {completed.returncode}"
                 )
-                err = "\n".join(
-                    line for line in err.splitlines()
-                    if not line.startswith("[proxychains]")
-                )
                 last_err = err or last_err
                 if (
                     attempt + 1 < max_attempts
@@ -887,7 +787,7 @@ class MusicDownloader:
         return False, last_err or "YouTube worker failed"
 
     def _download_youtube_subprocess(self, url, output_template, quality=DEFAULT_QUALITY):
-        """Download in a fresh Python process without proxychains LD_PRELOAD."""
+        """Download in a fresh worker subprocess (isolates Chrome cookie access)."""
         logger.info("YouTube subprocess download: %s", url)
         ok, detail = self._run_youtube_worker(
             url, probe=False, output_template=output_template, quality=quality,
@@ -1502,8 +1402,7 @@ class MusicDownloader:
                                   f"{metadata.title} — {metadata.artist}\nدر حال دانلود فایل صوتی...")
                     await asyncio.sleep(3)
 
-            # Fresh subprocess for YouTube — avoids bot-check pollution in the
-            # long-lived proxychains Python process.
+            # Fresh subprocess for YouTube — isolates live Chrome cookie reads from search.
             if source_label == "YouTube":
                 heartbeat = asyncio.create_task(_heartbeat())
                 try:
