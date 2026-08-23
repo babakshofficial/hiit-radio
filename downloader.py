@@ -1,5 +1,9 @@
 import os
 import re
+import time
+import threading
+import subprocess
+import sys
 import yt_dlp
 import logging
 import asyncio
@@ -19,16 +23,241 @@ QUALITIES = ("128", "192", "256", "320", "original")
 DEFAULT_QUALITY = "256"
 
 # Soft signals that a YouTube cookie jar was exported while signed in.
-_YT_AUTH_HINT_NAMES = (
+_YT_AUTH_COOKIE_NAMES = (
     "LOGIN_INFO",
     "SAPISID",
+    "APISID",
+    "__Secure-1PAPISID",
+    "__Secure-3PAPISID",
 )
-# Hard session cookies yt-dlp needs to pass the bot check.
+# Session cookies yt-dlp needs to pass the bot check (any one is enough).
 _YT_SESSION_COOKIE_NAMES = (
     "SID",
     "__Secure-1PSID",
     "__Secure-3PSID",
 )
+# Legacy tuple kept for messages that reference the old combined list.
+_YT_AUTH_HINT_NAMES = _YT_AUTH_COOKIE_NAMES
+
+# web_safari + ejs:github pass YouTube bot-checks in 2026; android skips cookie auth.
+_YT_PLAYER_CLIENTS = ["web_safari", "web", "tv"]
+# Prefer short, widely available videos for live auth probes. Some IDs bot-check
+# via proxy while normal track downloads still succeed — try several.
+_DEFAULT_PROBE_URLS = (
+    "https://www.youtube.com/watch?v=BaW_jenozKc",
+    "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+)
+
+# Representative music video for health / auth checks (override via YTDLP_HEALTH_PROBE_URL).
+_HEALTH_PROBE_URL = os.getenv(
+    "YTDLP_HEALTH_PROBE_URL",
+    "https://www.youtube.com/watch?v=MO4cP8zsgY0",
+).strip()
+
+
+def _probe_urls():
+    explicit = os.getenv("YTDLP_PROBE_URL", "").strip()
+    if explicit:
+        return (explicit,)
+    extra = os.getenv("YTDLP_PROBE_URLS", "").strip()
+    if extra:
+        return tuple(u.strip() for u in extra.split(",") if u.strip())
+    return _DEFAULT_PROBE_URLS
+
+
+_YT_PROBE_URL = _DEFAULT_PROBE_URLS[-1]  # legacy single-URL callers
+_PROBE_TTL_SEC = 600
+_PROBE_CACHE = {"monotonic": 0.0, "ok": False, "detail": ""}
+# Chrome cookie DB + keyring decrypt fails when multiple yt-dlp instances run at once.
+_YTDLP_LOCK = threading.Lock()
+_ACTIVE_DOWNLOADS = 0
+
+
+def downloads_in_progress():
+    return _ACTIVE_DOWNLOADS > 0
+
+
+def _yt_proxy_url():
+    """SOCKS/HTTP proxy for yt-dlp when not using LD_PRELOAD proxychains."""
+    explicit = os.getenv("YTDLP_PROXY", "").strip()
+    if explicit:
+        return explicit
+    # Match common local Hiddify / proxychains default used on this host.
+    return os.getenv("YTDLP_PROXY_FALLBACK", "socks5://127.0.0.1:3080").strip()
+
+
+def _yt_proxy_endpoint():
+    """Return ``(host, port)`` for the configured SOCKS proxy, if any."""
+    from urllib.parse import urlparse
+
+    proxy = _yt_proxy_url()
+    if not proxy:
+        return None
+    parsed = urlparse(proxy)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (1080 if "socks" in (parsed.scheme or "") else 8080)
+    return host, port
+
+
+def _wait_for_yt_proxy(timeout=90):
+    """Block until the local SOCKS proxy accepts connections (Hiddify startup race)."""
+    endpoint = _yt_proxy_endpoint()
+    if not endpoint:
+        return True
+    host, port = endpoint
+    deadline = time.monotonic() + max(5, timeout)
+    while time.monotonic() < deadline:
+        try:
+            import socket
+            with socket.create_connection((host, port), timeout=2):
+                return True
+        except OSError:
+            time.sleep(2)
+    logger.warning(
+        "YouTube proxy %s:%s not reachable after %ss — yt-dlp may bot-check",
+        host,
+        port,
+        timeout,
+    )
+    return False
+
+
+_BROWSER_RETRY_DELAYS = (2, 6, 15)
+
+
+def _deno_js_runtimes():
+    """Point yt-dlp at a deno wrapper that strips proxychains LD_PRELOAD.
+
+    Under proxychains, ``deno --version`` output is polluted and yt-dlp marks
+    deno as unsupported (``deno-unknown``), so YouTube n-challenges never solve.
+    """
+    wrapper = os.getenv("YTDLP_DENO_PATH", "").strip()
+    if not wrapper:
+        wrapper = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "scripts", "deno-noproxy"
+        )
+    if os.path.isfile(wrapper) and os.access(wrapper, os.X_OK):
+        return {"deno": {"path": wrapper}}
+    deno = os.path.expanduser("~/.deno/bin/deno")
+    if os.path.isfile(deno) and os.access(deno, os.X_OK):
+        return {"deno": {"path": deno}}
+    return {"deno": {}}
+
+
+def _patch_yt_dlp_proxychains():
+    """Make yt-dlp's Deno integration work when the bot runs under proxychains.
+
+    proxychains LD_PRELOAD:
+    - prefixes ``deno --version`` so yt-dlp reports ``deno-unknown (unsupported)``
+    - leaves noise on stderr so challenge solving treats Deno as failed
+    """
+    try:
+        from yt_dlp.utils._jsruntime import (
+            DenoJsRuntime,
+            JsRuntimeInfo,
+            _determine_runtime_path,
+            version_tuple,
+        )
+        from yt_dlp.utils._utils import detect_exe_version
+    except ImportError:
+        return
+
+    def _info(self):
+        path = _determine_runtime_path(self._path, "deno")
+        env = os.environ.copy()
+        env.pop("LD_PRELOAD", None)
+        try:
+            import subprocess
+            out = subprocess.check_output(
+                [path, "--version"],
+                env=env,
+                text=True,
+                stderr=subprocess.STDOUT,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return None
+        out = "\n".join(
+            line for line in out.splitlines()
+            if not line.startswith("[proxychains]")
+        )
+        version = detect_exe_version(out, r"(?m)^deno (\S+)", "unknown")
+        vt = version_tuple(version, lenient=True)
+        return JsRuntimeInfo(
+            name="deno",
+            path=path,
+            version=version,
+            version_tuple=vt,
+            supported=vt >= DenoJsRuntime.MIN_SUPPORTED_VERSION,
+        )
+
+    DenoJsRuntime._info = _info
+
+    try:
+        from yt_dlp.extractor.youtube.jsc._builtin.deno import DenoJCP
+    except ImportError:
+        return
+
+    _orig_env = DenoJCP._get_env_options
+    _orig_clean = DenoJCP._clean_stderr
+
+    def _get_env_options(self):
+        options = _orig_env(self)
+        options.pop("LD_PRELOAD", None)
+        return options
+
+    def _clean_stderr(self, stderr):
+        cleaned = _orig_clean(self, stderr)
+        return "\n".join(
+            line for line in cleaned.splitlines()
+            if not line.startswith("[proxychains]")
+        )
+
+    DenoJCP._get_env_options = _get_env_options
+    DenoJCP._clean_stderr = _clean_stderr
+
+
+_patch_yt_dlp_proxychains()
+
+
+def _info_has_formats(info):
+    if not info:
+        return False
+    if info.get("url"):
+        return True
+    formats = info.get("formats") or []
+    return any(f.get("vcodec") != "none" or f.get("acodec") != "none" for f in formats)
+
+
+def _is_bot_check_error(exc):
+    err = str(exc).lower()
+    return "confirm you're not a bot" in err or "sign in to confirm" in err
+
+
+def invalidate_youtube_auth_probe():
+    """Clear cached live YouTube auth probe (e.g. after cookies.txt upload)."""
+    _PROBE_CACHE["monotonic"] = 0.0
+
+
+def _ensure_youtube_session_env():
+    """Ensure GNOME keyring vars exist (systemd does not inherit the desktop session)."""
+    uid = os.getuid()
+    runtime = f"/run/user/{uid}"
+    if os.path.isdir(runtime):
+        os.environ.setdefault("XDG_RUNTIME_DIR", runtime)
+        bus = f"{runtime}/bus"
+        if os.path.exists(bus):
+            os.environ.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={bus}")
+        keyring = f"{runtime}/keyring/ssh"
+        if os.path.exists(keyring):
+            os.environ["SSH_AUTH_SOCK"] = keyring
+    os.environ.setdefault("DISPLAY", ":0")
+    xauth = os.path.expanduser("~/.Xauthority")
+    if os.path.exists(xauth):
+        os.environ.setdefault("XAUTHORITY", xauth)
+    # secretstorage needs a desktop id to unlock Chrome v11 cookies; without this,
+    # systemd workers see dbus+keyring paths but decrypt fails → YouTube bot_check.
+    os.environ.setdefault("XDG_CURRENT_DESKTOP", "ubuntu:GNOME")
+    os.environ.setdefault("LANG", "en_US.UTF-8")
 
 
 def parse_cookie_jar(text):
@@ -50,18 +279,20 @@ def parse_cookie_jar(text):
 def cookie_jar_status(text):
     """Return ``(ok, detail)`` for a cookie jar's logged-in YouTube session.
 
-    LOGIN_INFO/SAPISID alone are not enough — without SID / __Secure-*PSID,
-    YouTube still returns the bot-check interstitial. Empty cookie values
-    (common in broken exports) also count as missing.
+    Requires at least one session cookie (SID / __Secure-*PSID) and one auth
+    cookie (SAPISID / APISID / __Secure-*PAPISID / LOGIN_INFO). Modern Chrome
+    exports often only include __Secure-3PSID + __Secure-3PAPISID.
     """
     values_by_name = parse_cookie_jar(text)
     if not values_by_name:
         return False, "no cookies found (expected tab-separated Netscape format)"
+    has_session = any(name in values_by_name for name in _YT_SESSION_COOKIE_NAMES)
+    has_auth = any(name in values_by_name for name in _YT_AUTH_COOKIE_NAMES)
     missing = []
-    if not any(name in values_by_name for name in _YT_AUTH_HINT_NAMES):
-        missing.append("/".join(_YT_AUTH_HINT_NAMES))
-    if not any(name in values_by_name for name in _YT_SESSION_COOKIE_NAMES):
-        missing.append("/".join(_YT_SESSION_COOKIE_NAMES))
+    if not has_session:
+        missing.append("SID/__Secure-*PSID")
+    if not has_auth:
+        missing.append("SAPISID/APISID/__Secure-*PAPISID/LOGIN_INFO")
     if missing:
         return False, "missing or empty: " + ", ".join(missing)
     return True, f"{len(values_by_name)} cookies, YouTube session present"
@@ -209,6 +440,17 @@ class MusicDownloader:
             os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt"),
         )
         self.cookies_from_browser = os.getenv("YTDLP_COOKIES_FROM_BROWSER", "").strip()
+        _ensure_youtube_session_env()
+        if self.cookies_from_browser and not os.getenv("DBUS_SESSION_BUS_ADDRESS"):
+            logger.warning(
+                "DBUS_SESSION_BUS_ADDRESS is unset — Chrome cookie decryption will fail. "
+                "Ensure hiit-radio-stack.sh exports the user session (logged-in desktop required)."
+            )
+        elif self.cookies_from_browser and not os.getenv("SSH_AUTH_SOCK"):
+            logger.warning(
+                "SSH_AUTH_SOCK is unset — GNOME keyring may be unreachable and Chrome "
+                "cookie decryption can fail under systemd."
+            )
 
         self.logo_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "hiit-radio.png"
@@ -220,6 +462,24 @@ class MusicDownloader:
         except Exception:
             # Artwork will gracefully fall back to "no logo" if the file is missing/broken.
             self._logo_base = None
+
+    def _with_ydl(self, opts):
+        """Serialize yt-dlp — Chrome cookie decrypt is not safe concurrently."""
+        class _YtdlCtx:
+            def __enter__(ctx_self):
+                _ensure_youtube_session_env()
+                _YTDLP_LOCK.acquire()
+                ctx_self._ydl = yt_dlp.YoutubeDL(opts)
+                ctx_self._ydl.__enter__()
+                return ctx_self._ydl
+
+            def __exit__(ctx_self, exc_type, exc, tb):
+                try:
+                    return ctx_self._ydl.__exit__(exc_type, exc, tb)
+                finally:
+                    _YTDLP_LOCK.release()
+
+        return _YtdlCtx()
 
     def _make_dynamic_logo(self):
         """Return logo with a thin white outline around letter edges."""
@@ -241,74 +501,266 @@ class MusicDownloader:
         stroke = stroke.filter(ImageFilter.GaussianBlur(radius=0.45))
         return Image.alpha_composite(stroke, logo)
 
-    def _apply_auth(self, ydl_opts):
-        """Attach cookies to yt-dlp options."""
+    def _browser_auth_tuple(self):
+        spec = self.cookies_from_browser.strip() if self.cookies_from_browser else ""
+        if not spec:
+            return None
+        parts = spec.split(":", 1)
+        browser = parts[0].strip()
+        profile = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+        return (browser, profile, None, None)
+
+    def _browser_spec_tuple(self, browser_spec=None):
+        spec = (
+            browser_spec
+            or self.cookies_from_browser
+            or os.getenv("YTDLP_AUTO_BROWSER", "chrome")
+        ).strip()
+        if not spec:
+            return None
+        parts = spec.split(":", 1)
+        browser = parts[0].strip()
+        profile = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
+        return (browser, profile, None, None)
+
+    def _refresh_cookies_impl(self, browser_spec=None):
+        """Export Chrome cookies to cookies.txt (call from a clean subprocess only)."""
+        browser = self._browser_spec_tuple(browser_spec)
+        if not browser:
+            return False, "no browser configured"
+
+        os.makedirs(os.path.dirname(os.path.abspath(self.cookies_path)), exist_ok=True)
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "ignore_no_formats_error": True,
+            "cookiesfrombrowser": browser,
+            "cookiefile": self.cookies_path,
+            "remote_components": ["ejs:github"],
+            "js_runtimes": _deno_js_runtimes(),
+            "socket_timeout": 45,
+            "extractor_args": {"youtube": {"player_client": list(_YT_PLAYER_CLIENTS)}},
+        }
+        proxy = _yt_proxy_url()
+        if proxy:
+            opts["proxy"] = proxy
+        ytdlp_log = logging.getLogger("yt_dlp")
+        prev_level = ytdlp_log.level
+        ytdlp_log.setLevel(logging.CRITICAL)
+        last_err = None
+        try:
+            for attempt in range(2):
+                try:
+                    with self._with_ydl(opts) as ydl:
+                        ydl.extract_info(_HEALTH_PROBE_URL or _YT_PROBE_URL, download=False)
+                    last_err = None
+                    break
+                except Exception as exc:
+                    last_err = exc
+                    if attempt < 1:
+                        time.sleep(2)
+        finally:
+            ytdlp_log.setLevel(prev_level)
+
+        try:
+            with open(self.cookies_path, "r", encoding="utf-8", errors="ignore") as f:
+                jar_ok, jar_detail = cookie_jar_status(f.read())
+            if jar_ok:
+                return True, f"exported cookies.txt — {jar_detail}"
+        except OSError:
+            pass
+
+        if last_err is not None and _is_bot_check_error(last_err):
+            return False, "bot_check during cookie export"
+        if last_err is not None:
+            return False, str(last_err)[:500]
+        return False, "cookie export produced no authenticated session"
+
+    def refresh_cookies_from_browser(self, browser_spec=None):
+        """Export fresh cookies via an isolated worker (never from proxychains main)."""
+        _wait_for_yt_proxy(timeout=60)
+        ok, detail = self._run_cookie_refresh_worker(browser_spec)
+        invalidate_youtube_auth_probe()
+        return ok, detail
+
+    def _run_cookie_refresh_worker(self, browser_spec=None):
+        """Refresh cookies.txt in a subprocess without proxychains LD_PRELOAD."""
+        _ensure_youtube_session_env()
+        root = os.path.dirname(os.path.abspath(__file__))
+        worker = os.path.join(root, "scripts", "yt_download_worker.py")
+        env = os.environ.copy()
+        env.pop("LD_PRELOAD", None)
+        deno_bin = os.path.expanduser("~/.deno/bin")
+        venv_bin = os.path.join(root, ".venv", "bin")
+        env["PATH"] = f"{deno_bin}:{venv_bin}:" + env.get("PATH", "")
+        cmd = [sys.executable, worker, "--refresh-cookies"]
+        if browser_spec:
+            cmd.extend(["--browser", browser_spec])
+        with _YTDLP_LOCK:
+            completed = subprocess.run(
+                cmd,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                cwd=root,
+            )
+        for line in (completed.stdout or "").splitlines():
+            if line.startswith("yt_worker ") or line.startswith("REFRESH_"):
+                logger.info("%s", line)
+        if completed.returncode == 0:
+            detail = ""
+            for line in (completed.stdout or "").splitlines():
+                if line.startswith("REFRESH_OK "):
+                    detail = line[len("REFRESH_OK "):]
+            return True, detail or "browser cookies exported"
+        err = (completed.stderr or completed.stdout or "").strip()
+        err = "\n".join(
+            line for line in err.splitlines()
+            if not line.startswith("[proxychains]")
+        )
+        return False, err[:500] or "cookie refresh worker failed"
+
+    def _apply_network(self, ydl_opts):
+        proxy = _yt_proxy_url()
+        if proxy:
+            ydl_opts["proxy"] = proxy
+        return ydl_opts
+
+    def _apply_auth(self, ydl_opts, *, live_browser=False):
+        """Attach cookies to yt-dlp options.
+
+        ``live_browser=True`` reads Chrome's cookie DB (subprocess downloads only).
+        The long-lived bot must not touch Chrome during search — it locks the DB and
+        breaks subprocess auth.
+        """
+        ydl_opts.setdefault("remote_components", ["ejs:github"])
+        ydl_opts.setdefault("js_runtimes", _deno_js_runtimes())
+        self._apply_network(ydl_opts)
+        browser = self._browser_auth_tuple()
+        if browser and live_browser:
+            ydl_opts["cookiesfrombrowser"] = browser
+            logger.info(
+                f"Using YouTube cookies from browser: {self.cookies_from_browser}"
+            )
+            return ydl_opts
+
+        if browser and not live_browser:
+            return ydl_opts
+
         cookies_ok = (
             os.path.exists(self.cookies_path)
             and _cookies_look_authenticated(self.cookies_path)
         )
         if cookies_ok:
-            ydl_opts['cookiefile'] = self.cookies_path
+            ydl_opts["cookiefile"] = self.cookies_path
             logger.info(f"Using authenticated YouTube cookies from {self.cookies_path}")
-        elif self.cookies_from_browser:
-            parts = self.cookies_from_browser.split(":", 1)
-            browser = parts[0].strip()
-            profile = parts[1].strip() if len(parts) > 1 and parts[1].strip() else None
-            ydl_opts['cookiesfrombrowser'] = (browser, profile, None, None)
-            logger.info(f"Using YouTube cookies from browser: {self.cookies_from_browser}")
-            if os.path.exists(self.cookies_path):
-                logger.warning(
-                    f"cookies.txt at {self.cookies_path} is incomplete "
-                    "(needs SID or __Secure-*PSID plus LOGIN_INFO/SAPISID); "
-                    "preferring YTDLP_COOKIES_FROM_BROWSER instead."
-                )
         elif os.path.exists(self.cookies_path):
+            ydl_opts["cookiefile"] = self.cookies_path
             logger.warning(
-                f"cookies.txt at {self.cookies_path} has no usable YouTube session "
-                "(need non-empty SID/__Secure-*PSID and LOGIN_INFO/SAPISID). "
-                "Skipping cookiefile — YouTube will likely bot-block downloads. "
-                "Export fresh cookies while signed into youtube.com."
+                f"Using partial cookies.txt at {self.cookies_path} "
+                "(missing some auth names — export fresh cookies if bot-check persists)"
             )
         else:
             logger.warning(
-                f"No authenticated cookies at {self.cookies_path}. YouTube may bot-block. "
-                "Copy cookies.txt from your PC or export fresh cookies on desktop."
+                f"No cookies at {self.cookies_path}. YouTube may bot-block. "
+                "Set YTDLP_COOKIES_FROM_BROWSER=chrome or upload cookies.txt."
             )
         return ydl_opts
 
-    def youtube_auth_ok(self):
-        """True when yt-dlp has credentials that can pass YouTube's bot check."""
-        if self.cookies_from_browser:
-            return True
-        return (
-            os.path.exists(self.cookies_path)
-            and _cookies_look_authenticated(self.cookies_path)
+    def probe_youtube_auth(self, force=False):
+        """Live yt-dlp probe with format extraction; cached for ``_PROBE_TTL_SEC``."""
+        now = time.monotonic()
+        if not force and now - _PROBE_CACHE["monotonic"] < _PROBE_TTL_SEC:
+            return _PROBE_CACHE["ok"], _PROBE_CACHE["detail"]
+
+        use_subprocess = bool(
+            _yt_proxy_url()
+            or "proxychains" in (os.environ.get("LD_PRELOAD") or "").lower()
         )
+        if use_subprocess:
+            ok, detail = self._probe_youtube_subprocess(thorough=force)
+            _PROBE_CACHE.update(monotonic=now, ok=ok, detail=detail)
+            return ok, detail
 
-    def _build_search_opts(self):
-        """Fast flat search — no sleep, list results only."""
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': 'in_playlist',
-            'skip_download': True,
-            'noplaylist': True,
-            'sleep_interval': 0,
-            'max_sleep_interval': 0,
-            'socket_timeout': 20,
-            'retries': 2,
-            'http_headers': {
-                'User-Agent': (
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-                    'AppleWebKit/537.36 (KHTML, like Gecko) '
-                    'Chrome/131.0.0.0 Safari/537.36'
-                ),
-            },
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "ignore_no_formats_error": False,
+            "socket_timeout": 30,
+            "remote_components": ["ejs:github"],
+            "js_runtimes": _deno_js_runtimes(),
+            "extractor_args": {"youtube": {"player_client": list(_YT_PLAYER_CLIENTS)}},
         }
-        return self._apply_auth(ydl_opts)
+        self._apply_auth(opts, live_browser=True)
+        ytdlp_log = logging.getLogger("yt_dlp")
+        prev_level = ytdlp_log.level
+        ytdlp_log.setLevel(logging.CRITICAL)
+        try:
+            for probe_url in _probe_urls():
+                try:
+                    with self._with_ydl(opts) as ydl:
+                        info = ydl.extract_info(probe_url, download=False)
+                    if _info_has_formats(info):
+                        ok, detail = True, "live probe OK (formats available)"
+                        break
+                    ok, detail = False, "probe returned no formats — download would fail"
+                except Exception as exc:
+                    err = str(exc)
+                    if _is_bot_check_error(exc):
+                        ok, detail = (
+                            False,
+                            "bot_check on probe URL (other videos may still download)",
+                        )
+                        continue
+                    if "no video formats found" in err.lower() or "format is not available" in err.lower():
+                        ok, detail = False, "no formats — YouTube bot-check, stale cookies, or JS runtime"
+                    else:
+                        ok, detail = False, err[:200]
+                    break
+            else:
+                ok, detail = (
+                    False,
+                    "bot_check on probe URL (other videos may still download)",
+                )
+            if not ok:
+                try:
+                    from yt_dlp.utils._jsruntime import DenoJsRuntime
+                    deno_info = DenoJsRuntime(path=_deno_js_runtimes().get("deno", {}).get("path")).info
+                    logger.warning(
+                        "YouTube probe failed (%s); deno=%s",
+                        detail,
+                        deno_info,
+                    )
+                except Exception:
+                    pass
+        finally:
+            ytdlp_log.setLevel(prev_level)
 
-    def _build_ydl_opts(self, output_template, progress_hooks=None, quality=DEFAULT_QUALITY):
+        _PROBE_CACHE.update(monotonic=now, ok=ok, detail=detail)
+        return ok, detail
+
+    def ensure_youtube_ready(self, refresh=False):
+        """Verify YouTube can extract formats; optionally refresh browser cookies first."""
+        if refresh and self.cookies_from_browser:
+            ok, detail = self.refresh_cookies_from_browser()
+            logger.info("YouTube cookie refresh before download: ok=%s detail=%s", ok, detail)
+            invalidate_youtube_auth_probe()
+        return self.probe_youtube_auth(force=True)
+
+    def youtube_auth_ok(self):
+        """True when yt-dlp can pass YouTube's bot check (live probe)."""
+        ok, _detail = self.probe_youtube_auth()
+        return ok
+
+    def _build_ydl_opts(
+        self, output_template, progress_hooks=None, quality=DEFAULT_QUALITY,
+        player_clients=None, live_browser=False,
+    ):
         """Build yt-dlp options for the final audio download."""
+        clients = player_clients or list(_YT_PLAYER_CLIENTS)
         ydl_opts = {
             'format': 'bestaudio/best',
             'outtmpl': output_template,
@@ -329,7 +781,7 @@ class MusicDownloader:
             'noplaylist': True,
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['android', 'web'],
+                    'player_client': clients,
                 }
             },
         }
@@ -341,7 +793,168 @@ class MusicDownloader:
             }]
         if progress_hooks:
             ydl_opts['progress_hooks'] = list(progress_hooks)
-        return self._apply_auth(ydl_opts)
+        return self._apply_auth(ydl_opts, live_browser=live_browser)
+
+    def _youtube_subprocess_attempts(self):
+        """Proxy/auth combinations for subprocess YouTube operations."""
+        configured = _yt_proxy_url()
+        allow_direct = os.getenv("YTDLP_ALLOW_DIRECT", "").strip() == "1"
+        attempts = []
+        if self.cookies_from_browser:
+            if configured:
+                attempts.append((configured, "browser"))
+            else:
+                attempts.append(("", "browser"))
+            if allow_direct and configured:
+                attempts.append(("", "browser"))
+            return attempts
+        if configured:
+            if _cookies_look_authenticated(self.cookies_path):
+                attempts.append((configured, "cookiefile"))
+            if allow_direct:
+                attempts.append(("", "cookiefile"))
+        else:
+            if _cookies_look_authenticated(self.cookies_path):
+                attempts.append(("", "cookiefile"))
+        return attempts or [("", "browser")]
+
+    def _run_youtube_worker(self, url, *, probe=False, output_template="", quality=DEFAULT_QUALITY):
+        """Invoke yt_download_worker.py without proxychains LD_PRELOAD."""
+        _wait_for_yt_proxy(timeout=60)
+        _ensure_youtube_session_env()
+        root = os.path.dirname(os.path.abspath(__file__))
+        worker = os.path.join(root, "scripts", "yt_download_worker.py")
+        env = os.environ.copy()
+        env.pop("LD_PRELOAD", None)
+        deno_bin = os.path.expanduser("~/.deno/bin")
+        venv_bin = os.path.join(root, ".venv", "bin")
+        env["PATH"] = f"{deno_bin}:{venv_bin}:" + env.get("PATH", "")
+
+        last_err = ""
+        for proxy, auth in self._youtube_subprocess_attempts():
+            label = proxy or "direct"
+            retry_delays = _BROWSER_RETRY_DELAYS if auth == "browser" else ()
+            max_attempts = 1 + len(retry_delays)
+            for attempt in range(max_attempts):
+                cmd = [
+                    sys.executable,
+                    worker,
+                    "--url", url,
+                    "--outtmpl", output_template or os.path.join(root, "downloads", "_probe.%(ext)s"),
+                    "--quality", str(quality),
+                    "--proxy", proxy,
+                    "--auth", auth,
+                ]
+                if probe:
+                    cmd.append("--probe")
+                with _YTDLP_LOCK:
+                    completed = subprocess.run(
+                        cmd,
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        timeout=120 if probe else 600,
+                        cwd=root,
+                    )
+                for line in (completed.stdout or "").splitlines():
+                    if line.startswith("yt_worker ") or line == "PROBE_OK":
+                        logger.info("%s", line)
+                if completed.returncode == 0:
+                    return True, f"subprocess OK (proxy={label}, auth={auth})"
+                err = (completed.stderr or completed.stdout or "").strip() or (
+                    f"worker exited {completed.returncode}"
+                )
+                err = "\n".join(
+                    line for line in err.splitlines()
+                    if not line.startswith("[proxychains]")
+                )
+                last_err = err or last_err
+                if (
+                    attempt + 1 < max_attempts
+                    and auth == "browser"
+                    and _is_bot_check_error(last_err)
+                ):
+                    delay = retry_delays[attempt]
+                    logger.info(
+                        "YouTube browser auth bot_check — retry %d/%d after %ds",
+                        attempt + 2,
+                        max_attempts,
+                        delay,
+                    )
+                    time.sleep(delay)
+                    continue
+                break
+        return False, last_err or "YouTube worker failed"
+
+    def _download_youtube_subprocess(self, url, output_template, quality=DEFAULT_QUALITY):
+        """Download in a fresh Python process without proxychains LD_PRELOAD."""
+        logger.info("YouTube subprocess download: %s", url)
+        ok, detail = self._run_youtube_worker(
+            url, probe=False, output_template=output_template, quality=quality,
+        )
+        if not ok and _is_bot_check_error(detail) and self.cookies_from_browser:
+            logger.info(
+                "YouTube download bot_check — exporting browser cookies and retrying once"
+            )
+            refresh_ok, refresh_detail = self.refresh_cookies_from_browser()
+            logger.info(
+                "Pre-retry cookie refresh: ok=%s detail=%s",
+                refresh_ok,
+                refresh_detail,
+            )
+            time.sleep(3)
+            ok, detail = self._run_youtube_worker(
+                url, probe=False, output_template=output_template, quality=quality,
+            )
+        if ok:
+            return True
+        raise RuntimeError(detail)
+
+    def _probe_youtube_subprocess(self, thorough=False):
+        """Health-check via subprocess with live Chrome cookies (browser auth only)."""
+        urls = []
+        if _HEALTH_PROBE_URL:
+            urls.append(_HEALTH_PROBE_URL)
+        if thorough or os.getenv("YTDLP_PROBE_ALL", "").strip() == "1":
+            for url in _probe_urls():
+                if url not in urls:
+                    urls.append(url)
+        last_detail = "subprocess probe failed on all URLs"
+        for url in urls:
+            ok, detail = self._run_youtube_worker(url, probe=True)
+            if ok:
+                vid = url.rsplit("=", 1)[-1]
+                return True, f"live probe OK ({detail}; video={vid})"
+            last_detail = detail
+        return False, last_detail
+
+    def _build_search_opts(self):
+        """Fast flat search — no sleep, list results only."""
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'remote_components': ['ejs:github'],
+            'extract_flat': 'in_playlist',
+            'skip_download': True,
+            'noplaylist': True,
+            'sleep_interval': 0,
+            'max_sleep_interval': 0,
+            'socket_timeout': 20,
+            'retries': 2,
+            'http_headers': {
+                'User-Agent': (
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/131.0.0.0 Safari/537.36'
+                ),
+            },
+            'extractor_args': {
+                'youtube': {
+                    'player_client': list(_YT_PLAYER_CLIENTS),
+                }
+            },
+        }
+        return self._apply_auth(ydl_opts, live_browser=False)
 
     async def download_song(self, metadata, progress_reporter=None, cancel_check=None,
                           quality=DEFAULT_QUALITY):
@@ -370,6 +983,8 @@ class MusicDownloader:
         def _classify_error(err):
             text = str(err or "").lower()
             if "confirm you're not a bot" in text or "sign in to confirm" in text:
+                return "bot_check"
+            if "no video formats found" in text:
                 return "bot_check"
             if "drm" in text:
                 return "drm"
@@ -580,7 +1195,7 @@ class MusicDownloader:
                 output_template, progress_hooks=[_direct_hook], quality=quality,
             )
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with self._with_ydl(ydl_opts) as ydl:
                     await loop.run_in_executor(None, ydl.download, [source_url])
             except Exception as e:
                 logger.error("Direct URL download failed: %s", e, exc_info=True)
@@ -627,7 +1242,7 @@ class MusicDownloader:
             seen_ids = set()
             bot_blocked = False
             n = max(len(strategies), 1)
-            with yt_dlp.YoutubeDL(search_opts) as ydl:
+            with self._with_ydl(search_opts) as ydl:
                 for strategy_idx, search_query in enumerate(strategies):
                     if _is_cancelled():
                         return [], False, True
@@ -755,7 +1370,8 @@ class MusicDownloader:
         source_order = ("YouTube", "SoundCloud") if yt_usable else ("SoundCloud", "YouTube")
         if not yt_usable:
             logger.warning(
-                "YouTube cookies are not usable — searching SoundCloud first"
+                "YouTube cookies are not usable — searching SoundCloud first "
+                "(YouTube search still runs for ranking; downloads skipped if probe fails)"
             )
 
         best = None
@@ -801,6 +1417,24 @@ class MusicDownloader:
                 return "SoundCloud"
             return "YouTube"
 
+        yt_items = [c for c in download_queue if _source_label_for(c[1]) == "YouTube"]
+        other_items = [c for c in download_queue if _source_label_for(c[1]) != "YouTube"]
+        # Probe URL can bot-check while real track downloads still work — never drop
+        # YouTube candidates solely on probe failure. Prefer SoundCloud first when the
+        # cached probe is bad; keep YouTube as fallback (e.g. SoundCloud DRM).
+        yt_usable = self.youtube_auth_ok()
+        if yt_usable:
+            download_queue = yt_items[:3] + other_items[:3]
+        else:
+            logger.warning(
+                "YouTube probe unhealthy — trying other sources first, "
+                "YouTube kept as fallback (%d candidates)",
+                len(yt_items),
+            )
+            download_queue = other_items[:3] + yt_items[:4]
+            if not download_queue:
+                return None, "bot_check", failure_trail
+
         def _yt_hook(d):
             try:
                 if d.get("status") == "downloading":
@@ -828,7 +1462,8 @@ class MusicDownloader:
             if _is_cancelled():
                 return None, None, "cancelled"
             logger.info(
-                f"Best {source_label} match {score:.1f}% — '{video.get('title', '')}' — downloading"
+                f"Best {source_label} match {score:.1f}% — '{video.get('title', '')}' "
+                f"— downloading {url}"
             )
 
             need_hydrate = not (
@@ -841,33 +1476,83 @@ class MusicDownloader:
             else:
                 await _report(50, f"{metadata.title} — {metadata.artist}\nشروع دانلود...")
 
+            if progress_reporter and getattr(progress_reporter, "progress_mode", "") == "percent":
+                progress_reporter.reset_phase(52)
+
             if _is_cancelled():
                 return None, None, "cancelled"
 
             download_pct["value"] = 0.0
-            ydl_opts = self._build_ydl_opts(
-                output_template, progress_hooks=[_yt_hook], quality=quality,
-            )
+            pulse = {"n": 0}
 
             async def _heartbeat():
                 base = 52
+                detail_yt = (
+                    f"{metadata.title} — {metadata.artist}\n"
+                    "در حال دانلود از یوتیوب..."
+                )
                 while True:
-                    frac = download_pct["value"]
-                    pct = base + int(frac * 28)  # 52 → 80
-                    await _report(
-                        pct,
-                        f"{metadata.title} — {metadata.artist}\nدر حال دانلود فایل صوتی...",
-                    )
+                    if source_label == "YouTube":
+                        pulse["n"] = min(pulse["n"] + 1, 9)
+                        pct = base + pulse["n"]
+                    else:
+                        frac = download_pct["value"]
+                        pct = base + int(frac * 28)  # 52 → 80
+                    await _report(pct, detail_yt if source_label == "YouTube" else
+                                  f"{metadata.title} — {metadata.artist}\nدر حال دانلود فایل صوتی...")
                     await asyncio.sleep(3)
 
+            # Fresh subprocess for YouTube — avoids bot-check pollution in the
+            # long-lived proxychains Python process.
+            if source_label == "YouTube":
+                heartbeat = asyncio.create_task(_heartbeat())
+                try:
+                    await loop.run_in_executor(
+                        None,
+                        lambda: self._download_youtube_subprocess(
+                            url, output_template, quality
+                        ),
+                    )
+                except Exception as e:
+                    code = _classify_error(e)
+                    logger.warning(
+                        f"Download of {source_label} match failed ({code}): {url} — {e}"
+                    )
+                    return None, None, code
+                finally:
+                    heartbeat.cancel()
+                    try:
+                        await heartbeat
+                    except asyncio.CancelledError:
+                        pass
+
+                path = os.path.join(self.download_dir, f"{metadata.id}.mp3")
+                if not os.path.exists(path):
+                    prefix = f"{metadata.id}."
+                    for name in os.listdir(self.download_dir):
+                        if name.startswith(prefix) and not name.endswith(".part"):
+                            path = os.path.join(self.download_dir, name)
+                            break
+                if not os.path.exists(path):
+                    logger.warning(
+                        f"{source_label} download completed but output file not found"
+                    )
+                    return None, None, "invalid_file"
+                return path, video, None
+
+            ydl_opts = self._build_ydl_opts(
+                output_template,
+                progress_hooks=[_yt_hook],
+                quality=quality,
+            )
             heartbeat = asyncio.create_task(_heartbeat())
             try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                with self._with_ydl(ydl_opts) as ydl:
                     await loop.run_in_executor(None, ydl.download, [url])
             except Exception as e:
                 code = _classify_error(e)
                 logger.warning(
-                    f"Download of {source_label} match failed ({code}): {e}"
+                    f"Download of {source_label} match failed ({code}): {url} — {e}"
                 )
                 return None, None, code
             finally:
@@ -886,59 +1571,67 @@ class MusicDownloader:
         if _is_cancelled():
             return None, "cancelled", failure_trail
 
-        file_path = None
-        best_video = None
-        best_score = 0.0
-        last_err = None
-        for candidate in download_queue:
+        global _ACTIVE_DOWNLOADS
+        _ACTIVE_DOWNLOADS += 1
+        try:
+            file_path = None
+            best_video = None
+            best_score = 0.0
+            last_err = None
+            for candidate in download_queue:
+                if _is_cancelled():
+                    return None, "cancelled", failure_trail
+                score, _video = candidate
+                file_path, best_video, dl_err = await _download_candidate(candidate)
+                if file_path:
+                    best_score = score
+                    break
+                last_err = dl_err
+                src = _source_label_for(_video)
+                failure_trail.append({
+                    "source": src,
+                    "score": score,
+                    "error": dl_err,
+                    "title": (_video.get("title") or "")[:120],
+                })
+                logger.warning(
+                    f"{src} candidate failed ({dl_err}, score {score:.1f}%) — trying next"
+                )
+                # Cool down after YouTube bot-check — burst requests get blocked.
+                if dl_err == "bot_check" and src == "YouTube":
+                    await asyncio.sleep(5)
+
             if _is_cancelled():
                 return None, "cancelled", failure_trail
-            score, _video = candidate
-            file_path, best_video, dl_err = await _download_candidate(candidate)
-            if file_path:
-                best_score = score
-                break
-            last_err = dl_err
-            src = _source_label_for(_video)
-            failure_trail.append({
-                "source": src,
-                "score": score,
-                "error": dl_err,
-                "title": (_video.get("title") or "")[:120],
-            })
-            logger.warning(
-                f"{src} candidate failed ({dl_err}, score {score:.1f}%) — trying next"
-            )
 
-        if _is_cancelled():
-            return None, "cancelled", failure_trail
+            if not file_path:
+                return None, last_err or ("bot_check" if saw_bot_check else "no_match"), failure_trail
 
-        if not file_path:
-            return None, last_err or ("bot_check" if saw_bot_check else "no_match"), failure_trail
+            try:
+                audio_file = MutagenMP3(file_path)
+                duration = audio_file.info.length
+                if duration < 60 or duration > 600:
+                    logger.warning(f"Invalid duration ({duration:.1f}s) - likely wrong track")
+                    os.remove(file_path)
+                    return None, "invalid_file", failure_trail
+                if duration < 90 or duration > 420:
+                    logger.warning(f"Unusual duration ({duration:.1f}s) - proceeding anyway")
+            except Exception as e:
+                logger.warning(f"Duration validation skipped (error: {e})")
 
-        try:
-            audio_file = MutagenMP3(file_path)
-            duration = audio_file.info.length
-            if duration < 60 or duration > 600:
-                logger.warning(f"Invalid duration ({duration:.1f}s) - likely wrong track")
+            file_size = os.path.getsize(file_path)
+            if file_size < 1_000_000:
+                logger.warning(f"File too small ({file_size/1024:.0f}KB) - likely wrong track")
                 os.remove(file_path)
                 return None, "invalid_file", failure_trail
-            if duration < 90 or duration > 420:
-                logger.warning(f"Unusual duration ({duration:.1f}s) - proceeding anyway")
-        except Exception as e:
-            logger.warning(f"Duration validation skipped (error: {e})")
 
-        file_size = os.path.getsize(file_path)
-        if file_size < 1_000_000:
-            logger.warning(f"File too small ({file_size/1024:.0f}KB) - likely wrong track")
-            os.remove(file_path)
-            return None, "invalid_file", failure_trail
-
-        logger.info(f"Download successful (match {best_score:.1f}%)")
-        await _report(82, f"{metadata.title} — {metadata.artist}\nبرچسب‌گذاری و کاور...")
-        self._enrich_metadata_from_source(metadata, best_video)
-        self._apply_metadata(file_path, metadata)
-        return file_path, None, failure_trail
+            logger.info(f"Download successful (match {best_score:.1f}%)")
+            await _report(82, f"{metadata.title} — {metadata.artist}\nبرچسب‌گذاری و کاور...")
+            self._enrich_metadata_from_source(metadata, best_video)
+            self._apply_metadata(file_path, metadata)
+            return file_path, None, failure_trail
+        finally:
+            _ACTIVE_DOWNLOADS = max(0, _ACTIVE_DOWNLOADS - 1)
 
     async def _hydrate_video_info(self, download_url, flat_video, loop):
         """Replace flat-search stub with full metadata (title, uploader, thumbnail)."""
@@ -949,10 +1642,12 @@ class MusicDownloader:
             "noplaylist": True,
             "socket_timeout": 20,
             "retries": 2,
+            "remote_components": ["ejs:github"],
+            "extractor_args": {"youtube": {"player_client": list(_YT_PLAYER_CLIENTS)}},
         }
-        self._apply_auth(opts)
+        self._apply_auth(opts, live_browser=False)
         try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
+            with self._with_ydl(opts) as ydl:
                 full = await loop.run_in_executor(
                     None, lambda: ydl.extract_info(download_url, download=False)
                 )

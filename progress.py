@@ -45,6 +45,13 @@ class ProgressReporter:
             **{"پیشرفت": status_text},
         )
 
+    def reset_phase(self, current=0):
+        """Reset ETA baseline when a new long-running phase starts (e.g. yt-dlp)."""
+        self._t0 = time.time()
+        self._update_count = 0
+        self._last_current = max(-1, int(current) - 1)
+        self._last_edit = 0.0
+
     async def update(self, current, detail="", force=False):
         now = time.time()
         if self._t0 is None:

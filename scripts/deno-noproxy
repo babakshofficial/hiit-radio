@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Run real deno without proxychains LD_PRELOAD (challenge solver + version checks).
+set -euo pipefail
+DENO_BIN="${DENO_BIN:-${HOME}/.deno/bin/deno}"
+if [[ ! -x "$DENO_BIN" ]]; then
+  DENO_BIN="$(command -v deno)"
+fi
+# Drop preload so deno is not injected; discard shell noise on stderr for --version.
+export LD_PRELOAD=
+if [[ "${1:-}" == "--version" ]]; then
+  exec "$DENO_BIN" --version 2>/dev/null
+fi
+exec "$DENO_BIN" "$@"
