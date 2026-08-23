@@ -5,9 +5,51 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-PROXY=(proxychains4)
-if ! command -v proxychains4 >/dev/null 2>&1; then
-  PROXY=()
+# Load .env into the process environment (systemd EnvironmentFile is not always enough
+# for vars added after the unit was last daemon-reloaded).
+if [[ -f "$ROOT/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$ROOT/.env"
+  set +a
+fi
+
+# Chrome cookie decryption (secretstorage) needs the logged-in user's DBUS session
+# and GNOME keyring (SSH_AUTH_SOCK). Without these, yt-dlp cannot decrypt v11 cookies.
+RUNTIME_DIR="/run/user/$(id -u)"
+if [[ -d "$RUNTIME_DIR" ]]; then
+  export XDG_RUNTIME_DIR="$RUNTIME_DIR"
+  if [[ -S "${RUNTIME_DIR}/bus" ]]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=${RUNTIME_DIR}/bus"
+  fi
+  if [[ -S "${RUNTIME_DIR}/keyring/ssh" ]]; then
+    export SSH_AUTH_SOCK="${RUNTIME_DIR}/keyring/ssh"
+  elif [[ -S "${RUNTIME_DIR}/keyring/control" ]]; then
+    # Some GNOME builds expose control but not ssh; secretstorage still needs the bus.
+    :
+  fi
+fi
+# System systemd units don't inherit the graphical session; default for local X11 login.
+export DISPLAY="${DISPLAY:-:0}"
+export XAUTHORITY="${XAUTHORITY:-${HOME}/.Xauthority}"
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-ubuntu:GNOME}"
+export LANG="${LANG:-en_US.UTF-8}"
+
+export PATH="${HOME}/.deno/bin:${ROOT}/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+
+# Wait for YTDLP_PROXY endpoint when configured (local SOCKS may start late).
+PROXY_WAIT_HOST="${YTDLP_PROXY_HOST:-127.0.0.1}"
+PROXY_WAIT_PORT="${YTDLP_PROXY_PORT:-1080}"
+if [[ -n "${YTDLP_PROXY:-}" ]]; then
+  for _i in $(seq 1 60); do
+    if (echo >/dev/tcp/"${PROXY_WAIT_HOST}"/"${PROXY_WAIT_PORT}") 2>/dev/null; then
+      break
+    fi
+    if [[ "${_i}" -eq 60 ]]; then
+      echo "hiit-radio-stack: WARN YTDLP_PROXY ${PROXY_WAIT_HOST}:${PROXY_WAIT_PORT} not ready after 120s" >&2
+    fi
+    sleep 2
+  done
 fi
 
 pids=()
@@ -20,10 +62,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-"${PROXY[@]}" "$ROOT/.venv/bin/python" "$ROOT/main.py" &
+"$ROOT/.venv/bin/python" "$ROOT/main.py" &
 pids+=("$!")
 
-"${PROXY[@]}" "$ROOT/.venv/bin/uvicorn" api.main:app --host 127.0.0.1 --port 8000 &
+"$ROOT/.venv/bin/uvicorn" api.main:app --host 127.0.0.1 --port 8000 &
 pids+=("$!")
 
 if [[ -d "$ROOT/web/.next" ]]; then

@@ -10,9 +10,12 @@ Group=babak
 WorkingDirectory=/home/babak/Desktop/Projects/hiit-radio-bot
 EnvironmentFile=-/home/babak/Desktop/Projects/hiit-radio-bot/.env
 Environment=PYTHONUNBUFFERED=1
-Environment=PATH=/home/babak/Desktop/Projects/hiit-radio-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin
+Environment=XDG_CURRENT_DESKTOP=ubuntu:GNOME
+Environment=LANG=en_US.UTF-8
+# DBUS + deno path are set in scripts/hiit-radio-stack.sh (Chrome cookie decrypt + JS challenges)
+Environment=PATH=/home/babak/.deno/bin:/home/babak/Desktop/Projects/hiit-radio-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin
 
-# Bot (Telegram via proxychains) + FastAPI :8000 + Next.js :3000
+# Bot + FastAPI :8000 + Next.js :3000
 ExecStart=/home/babak/Desktop/Projects/hiit-radio-bot/scripts/hiit-radio-stack.sh
 
 KillMode=control-group

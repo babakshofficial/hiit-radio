@@ -53,8 +53,7 @@ else
   echo "     Copy from your PC: scp cookies.txt babak@your-vps:/home/babak/hiit-radio/cookies.txt"
 fi
 if grep -q '^YTDLP_COOKIES_FROM_BROWSER=' .env 2>/dev/null; then
-  echo "NOTE: YTDLP_COOKIES_FROM_BROWSER is set — ignored if authenticated cookies.txt exists"
-  echo "      On VPS, rely on cookies.txt (no Chrome browser)"
+  echo "NOTE: YTDLP_COOKIES_FROM_BROWSER is set — live browser cookies are used (VPS needs cookies.txt only)"
 fi
 echo
 
