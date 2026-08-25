@@ -306,6 +306,12 @@ class Database:
                 )
             except sqlite3.OperationalError:
                 pass
+            try:
+                conn.execute(
+                    "ALTER TABLE users ADD COLUMN language TEXT"
+                )
+            except sqlite3.OperationalError:
+                pass
 
     # --- Users ---
 
@@ -346,6 +352,28 @@ class Database:
             conn.execute(
                 "UPDATE users SET audio_quality = ? WHERE user_id = ?",
                 (quality, user_id),
+            )
+
+    def get_language(self, user_id):
+        user_id = str(user_id)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT language FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            return row["language"]
+        except (KeyError, IndexError, TypeError):
+            return None
+
+    def set_language(self, user_id, language):
+        user_id = str(user_id)
+        self.touch_user(user_id)
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE users SET language = ? WHERE user_id = ?",
+                (language, user_id),
             )
 
     def get_all_user_ids(self):

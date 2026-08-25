@@ -272,15 +272,22 @@ def _vip_failure_detail(context=""):
 
 
 def _error_report_ctx(metadata=None, query=None, **extra):
-    _, yt_ok = get_credentials_status()
-    ctx = {"cookies_ok": yt_ok}
+    live_ok, live_detail = downloader.probe_youtube_auth()
+    ctx = {
+        "cookies_ok": live_ok,
+        "cookies_detail": (live_detail or "")[:240],
+    }
     if metadata:
         ctx["title"] = getattr(metadata, "title", None)
         ctx["artist"] = getattr(metadata, "artist", None)
+        ctx["album"] = getattr(metadata, "album", None)
         ctx["search_query"] = getattr(metadata, "search_query", None)
         trail = getattr(metadata, "last_failure_trail", None)
         if trail:
             ctx["failure_trail"] = trail
+        url = getattr(metadata, "url", None) or getattr(metadata, "source_url", None)
+        if url and not query:
+            query = url
     if query:
         ctx["query"] = query
     ctx.update({k: v for k, v in extra.items() if v is not None})
@@ -288,6 +295,11 @@ def _error_report_ctx(metadata=None, query=None, **extra):
 
 
 async def _fail_job(reporter, user, *, kind, code, reason, **ctx):
+    if "quality" not in ctx and user:
+        try:
+            ctx["quality"] = user_manager.get_audio_quality(user.id)
+        except Exception:
+            pass
     rid = error_report.create_context(
         user_manager.database,
         user,
@@ -296,10 +308,19 @@ async def _fail_job(reporter, user, *, kind, code, reason, **ctx):
         user_message=reason,
         **ctx,
     )
-    await reporter.fail(reason, reply_markup=error_report.build_keyboard(rid))
+    include_retry = error_report.kind_supports_retry(kind, ctx)
+    await reporter.fail(
+        reason,
+        reply_markup=error_report.build_keyboard(rid, include_retry=include_retry),
+    )
 
 
 async def _edit_error(message, user, text, *, kind, code, **ctx):
+    if "quality" not in ctx and user:
+        try:
+            ctx["quality"] = user_manager.get_audio_quality(user.id)
+        except Exception:
+            pass
     rid = error_report.create_context(
         user_manager.database,
         user,
@@ -308,10 +329,19 @@ async def _edit_error(message, user, text, *, kind, code, **ctx):
         user_message=text,
         **ctx,
     )
-    await message.edit_text(text, reply_markup=error_report.build_keyboard(rid))
+    include_retry = error_report.kind_supports_retry(kind, ctx)
+    await message.edit_text(
+        text,
+        reply_markup=error_report.build_keyboard(rid, include_retry=include_retry),
+    )
 
 
 async def _reply_error(message, user, text, *, kind, code, **ctx):
+    if "quality" not in ctx and user:
+        try:
+            ctx["quality"] = user_manager.get_audio_quality(user.id)
+        except Exception:
+            pass
     rid = error_report.create_context(
         user_manager.database,
         user,
@@ -320,7 +350,11 @@ async def _reply_error(message, user, text, *, kind, code, **ctx):
         user_message=text,
         **ctx,
     )
-    await message.reply_text(text, reply_markup=error_report.build_keyboard(rid))
+    include_retry = error_report.kind_supports_retry(kind, ctx)
+    await message.reply_text(
+        text,
+        reply_markup=error_report.build_keyboard(rid, include_retry=include_retry),
+    )
 
 
 def _btn_redownload(title):
@@ -335,6 +369,28 @@ async def _touch_user(update):
     u = update.effective_user
     if u:
         user_manager.touch_user(u.id, u.username, u.first_name)
+        # Persist Telegram language on first sight if user has no stored pref.
+        if not user_manager.get_language(u.id):
+            detected = msg.normalize_lang(getattr(u, "language_code", None))
+            if detected:
+                user_manager.set_language(u.id, detected)
+
+
+def resolve_lang(user) -> str:
+    """Stored pref → Telegram language_code → fa."""
+    if not user:
+        return msg.set_lang(None)
+    stored = user_manager.get_language(user.id)
+    if stored and msg.normalize_lang(stored):
+        return msg.set_lang(stored)
+    detected = msg.normalize_lang(getattr(user, "language_code", None))
+    if detected:
+        return msg.set_lang(detected)
+    return msg.set_lang(None)
+
+
+async def apply_user_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    resolve_lang(update.effective_user)
 
 
 async def _deny_quota(message, bot, user):
@@ -385,43 +441,95 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _start_menu_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🔎 جستجوی آهنگ", callback_data="menu:search"),
-            InlineKeyboardButton("🎙 مرور هنرمند", callback_data="menu:artist"),
+            InlineKeyboardButton(msg.t("menu_search"), callback_data="menu:search"),
+            InlineKeyboardButton(msg.t("menu_artist"), callback_data="menu:artist"),
         ],
         [
-            InlineKeyboardButton("🎛 کیفیت صدا", callback_data="menu:quality"),
-            InlineKeyboardButton("📚 راهنمای کامل", callback_data="menu:help"),
+            InlineKeyboardButton(msg.t("menu_quality"), callback_data="menu:quality"),
+            InlineKeyboardButton(msg.t("menu_help"), callback_data="menu:help"),
         ],
         [
-            InlineKeyboardButton("🕐 تاریخچه دانلود", callback_data="menu:history"),
-            InlineKeyboardButton("💖 علاقه‌مندی‌ها", callback_data="menu:liked"),
+            InlineKeyboardButton(msg.t("menu_history"), callback_data="menu:history"),
+            InlineKeyboardButton(msg.t("menu_liked"), callback_data="menu:liked"),
         ],
         [
-            InlineKeyboardButton("🔥 محبوب‌ترین‌ها", callback_data="menu:top"),
-            InlineKeyboardButton("🎯 پیشنهاد شخصی", callback_data="menu:discover"),
+            InlineKeyboardButton(msg.t("menu_top"), callback_data="menu:top"),
+            InlineKeyboardButton(msg.t("menu_discover"), callback_data="menu:discover"),
         ],
         [
-            InlineKeyboardButton("🔔 هنرمندان من", callback_data="menu:following"),
-            InlineKeyboardButton("🎁 دعوت دوست", callback_data="menu:invite"),
+            InlineKeyboardButton(msg.t("menu_following"), callback_data="menu:following"),
+            InlineKeyboardButton(msg.t("menu_invite"), callback_data="menu:invite"),
         ],
         [
-            InlineKeyboardButton("💠 پریمیوم", callback_data="menu:premium"),
-            InlineKeyboardButton("🤖 درباره ربات", callback_data="menu:aboutme"),
+            InlineKeyboardButton(msg.t("menu_premium"), callback_data="menu:premium"),
+            InlineKeyboardButton(msg.t("menu_aboutme"), callback_data="menu:aboutme"),
         ],
         [
-            InlineKeyboardButton("⛔ لغو کار جاری", callback_data="menu:cancel"),
+            InlineKeyboardButton(msg.t("menu_lang"), callback_data="menu:lang"),
+            InlineKeyboardButton(msg.t("menu_cancel"), callback_data="menu:cancel"),
         ],
     ])
 
 
 def _back_button():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="menu:back")],
+        [InlineKeyboardButton(msg.t("menu_back"), callback_data="menu:back")],
     ])
 
 
 def _back_row():
-    return [InlineKeyboardButton("🔙 بازگشت به منو", callback_data="menu:back")]
+    return [InlineKeyboardButton(msg.t("menu_back"), callback_data="menu:back")]
+
+
+def _lang_keyboard():
+    rows = []
+    row = []
+    for code in msg.SUPPORTED:
+        row.append(
+            InlineKeyboardButton(
+                msg.t(f"lang_name_{code}"),
+                callback_data=f"lang:{code}",
+            )
+        )
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(_back_row())
+    return InlineKeyboardMarkup(rows)
+
+
+async def lang_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    await _touch_user(update)
+    resolve_lang(update.effective_user)
+    await update.effective_message.reply_text(
+        msg.lang_choose(), reply_markup=_lang_keyboard(),
+    )
+
+
+async def lang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = update.effective_user
+    if not query or not user:
+        return
+    code = (query.data or "").split(":", 1)[-1]
+    if code not in msg.SUPPORTED:
+        await query.answer()
+        return
+    user_manager.set_language(user.id, code)
+    msg.set_lang(code)
+    await query.answer(msg.lang_set(code))
+    try:
+        await query.message.edit_text(
+            msg.lang_set(code), reply_markup=_back_button(),
+        )
+    except Exception:
+        await query.message.reply_text(
+            msg.lang_set(code), reply_markup=_back_button(),
+        )
 
 
 async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -699,21 +807,22 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await _touch_user(update)
     user_id = update.effective_user.id
+    message = update.effective_message
     db = user_manager.database
     history = db.get_user_history(user_id, limit=40)
     if not history:
-        await update.message.reply_text(msg.discover_empty_history())
+        await message.reply_text(msg.discover_empty_history())
         return
 
     if not llm_configured():
-        await update.message.reply_text(msg.discover_not_configured())
+        await message.reply_text(msg.discover_not_configured())
         return
 
-    if await _reject_if_busy(update.message, context):
+    if await _reject_if_busy(message, context):
         return
 
     job = _start_job(context, "discover")
-    status = await update.message.reply_text(msg.discover_preparing())
+    status = await message.reply_text(msg.discover_preparing())
     reporter = ProgressReporter(
         status,
         100,
@@ -847,6 +956,7 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reporter, update.effective_user,
             kind="discover", code="exception",
             reason=msg.discover_llm_error(),
+            detail=str(e)[:500],
         )
     finally:
         _end_job(context, job)
@@ -970,12 +1080,12 @@ async def _show_artist_page(message, artist_id, context, edit=False, user_id=Non
     safe_name = (name or "")[:40]
     if following:
         buttons.append([InlineKeyboardButton(
-            f"🔕 لغو دنبال‌کردن {safe_name[:20]}",
+            msg.btn_unfollow(safe_name[:20]),
             callback_data=f"unfollow:{artist_id}",
         )])
     else:
         buttons.append([InlineKeyboardButton(
-            f"🔔 دنبال‌کردن {safe_name[:20]}",
+            msg.btn_follow(safe_name[:20]),
             callback_data=f"follow:{artist_id}:{safe_name}",
         )])
 
@@ -1120,7 +1230,7 @@ async def follow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         safe_name = (hit.name or "")[:40]
         buttons.append([
             InlineKeyboardButton(
-                f"🔔 دنبال‌کردن {safe_name[:22]}",
+                msg.btn_follow(safe_name[:22]),
                 callback_data=f"follow:{hit.id}:{safe_name}",
             )
         ])
@@ -1154,7 +1264,7 @@ async def _show_following_list(message, user_id, context, reply_markup_extra=Non
         safe_name = (r["artist_name"] or "")[:20]
         buttons.append([
             InlineKeyboardButton(
-                f"🔕 لغو {safe_name}",
+                msg.btn_unfollow(safe_name),
                 callback_data=f"unfollow:{r['deezer_artist_id']}",
             ),
             InlineKeyboardButton(
@@ -1402,7 +1512,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     safe_name = (r["artist_name"] or "")[:20]
                     buttons.append([
                         InlineKeyboardButton(
-                            f"🔕 لغو {safe_name}",
+                            msg.btn_unfollow(safe_name),
                             callback_data=f"unfollow:{r['deezer_artist_id']}",
                         ),
                         InlineKeyboardButton(
@@ -1415,6 +1525,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     chat_id, "\n".join(lines),
                     reply_markup=InlineKeyboardMarkup(buttons),
                 )
+        elif action == "lang":
+            await context.bot.send_message(
+                chat_id, msg.lang_choose(), reply_markup=_lang_keyboard(),
+            )
         elif action == "cancel":
             cancelled = jobs.cancel_all(context)
             text = msg.cancel_ok(len(cancelled)) if cancelled else msg.cancel_no_job()
@@ -1588,6 +1702,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 kind="similar", code="exception",
                 reason=msg.similar_not_found(),
                 title=title, artist=artist,
+                detail=str(e)[:500],
             )
         finally:
             _end_job(context, job)
@@ -1651,6 +1766,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 kind="lyrics", code="exception",
                 reason=msg.lyrics_not_found(),
                 title=title, artist=artist,
+                detail=str(e)[:500],
             )
         finally:
             _end_job(context, job)
@@ -1782,7 +1898,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await process_playlist(
             update, context, tracks, name, orchestrator,
-            user_manager, admin_logger,
+            user_manager, admin_logger, collection_url=url,
         )
         return
 
@@ -1810,7 +1926,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             await process_playlist(
                 update, context, tracks, name or hit.name, orchestrator,
-                user_manager, admin_logger,
+                user_manager, admin_logger, collection_url=hit.url,
             )
             return
         if hit.kind == "artist":
@@ -1851,7 +1967,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             await process_playlist(
                 update, context, tracks, name, orchestrator,
-                user_manager, admin_logger,
+                user_manager, admin_logger, collection_url=url,
             )
             return
         return
@@ -2036,7 +2152,12 @@ async def _download_and_send(message, user, metadata, context):
                 reporter, user,
                 kind="download", code=error_code or "unknown",
                 reason=reason,
-                **_error_report_ctx(metadata=metadata),
+                **_error_report_ctx(
+                    metadata=metadata,
+                    query=getattr(metadata, "url", None)
+                    or f"{metadata.title} {metadata.artist}".strip(),
+                    platform=platform,
+                ),
             )
             await log_error(
                 context.bot, user, f"Download failed ({error_code})",
@@ -2050,7 +2171,12 @@ async def _download_and_send(message, user, metadata, context):
                 reporter, user,
                 kind="download", code=code,
                 reason=reason,
-                **_error_report_ctx(metadata=metadata),
+                **_error_report_ctx(
+                    metadata=metadata,
+                    query=getattr(metadata, "url", None)
+                    or f"{metadata.title} {metadata.artist}".strip(),
+                    platform=platform,
+                ),
             )
             await log_error(
                 context.bot, user, "Download failed",
@@ -2076,7 +2202,12 @@ async def _download_and_send(message, user, metadata, context):
             await _edit_error(
                 status, user, msg.send_failed(),
                 kind="download", code="send_failed",
-                **_error_report_ctx(metadata=metadata),
+                **_error_report_ctx(
+                    metadata=metadata,
+                    query=getattr(metadata, "url", None)
+                    or f"{metadata.title} {metadata.artist}".strip(),
+                    detail=str(e)[:500],
+                ),
             )
         except Exception:
             pass
@@ -2104,7 +2235,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tracks:
             await process_playlist(
                 update, context, tracks, name, orchestrator,
-                user_manager, admin_logger,
+                user_manager, admin_logger, collection_url=text,
             )
             return
         await _reply_error(
@@ -2591,6 +2722,229 @@ async def error_report_callback(update: Update, context: ContextTypes.DEFAULT_TY
         pass
 
 
+async def retry_error_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Re-run the failed action using context stored on the error report."""
+    query = update.callback_query
+    user = update.effective_user
+    if not user or not query:
+        return
+    try:
+        report_id = int((query.data or "").split(":", 1)[1])
+    except (IndexError, ValueError):
+        await query.answer()
+        return
+
+    row = user_manager.database.get_error_report(report_id)
+    if not row or str(row.get("user_id")) != str(user.id):
+        await query.answer()
+        return
+
+    ctx = error_report.parse_context(row)
+    kind = row.get("error_kind") or ""
+    if not error_report.kind_supports_retry(kind, ctx):
+        await query.answer(msg.error_retry_unavailable(), show_alert=True)
+        return
+
+    await query.answer(msg.error_retrying())
+    try:
+        await query.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    retry = ctx.get("retry") or {}
+    message = query.message
+
+    if kind == "download":
+        q = (retry.get("query") or ctx.get("query") or "").strip()
+        title = retry.get("title") or ctx.get("title")
+        artist = retry.get("artist") or ctx.get("artist") or ""
+        if q and await TrackMetadata.is_collection_url(q):
+            name, tracks = await TrackMetadata.create_collection(q, _ydl_opts_factory)
+            if tracks:
+                await process_playlist(
+                    update, context, tracks, name, orchestrator,
+                    user_manager, admin_logger, collection_url=q,
+                )
+                return
+            await message.reply_text(msg.collection_not_found())
+            return
+        if title:
+            meta = TrackMetadata()
+            meta.title = title
+            meta.artist = artist
+            meta.id = str(abs(hash(f"{title}{artist}")))
+            meta.type = "retry"
+            if q and ("http://" in q or "https://" in q):
+                meta.url = q
+            await _download_and_send(message, user, meta, context)
+            return
+        if q:
+            meta = await TrackMetadata.create(q, _ydl_opts_factory)
+            if meta and meta.title:
+                await _download_and_send(message, user, meta, context)
+                return
+            await message.reply_text(msg.metadata_not_found())
+            return
+        await message.reply_text(msg.error_retry_unavailable())
+        return
+
+    if kind in ("metadata", "collection"):
+        q = (retry.get("query") or ctx.get("query") or "").strip()
+        if not q:
+            await message.reply_text(msg.error_retry_unavailable())
+            return
+        if await TrackMetadata.is_collection_url(q):
+            name, tracks = await TrackMetadata.create_collection(q, _ydl_opts_factory)
+            if tracks:
+                await process_playlist(
+                    update, context, tracks, name, orchestrator,
+                    user_manager, admin_logger, collection_url=q,
+                )
+            else:
+                await message.reply_text(msg.collection_not_found())
+            return
+        meta = await TrackMetadata.create(q, _ydl_opts_factory)
+        if meta and meta.title:
+            await _download_and_send(message, user, meta, context)
+        else:
+            await message.reply_text(msg.metadata_not_found())
+        return
+
+    if kind == "playlist":
+        q = (
+            retry.get("collection_url")
+            or retry.get("query")
+            or ctx.get("collection_url")
+            or ctx.get("query")
+            or ""
+        ).strip()
+        if not q:
+            await message.reply_text(msg.error_retry_unavailable())
+            return
+        name, tracks = await TrackMetadata.create_collection(q, _ydl_opts_factory)
+        if tracks:
+            await process_playlist(
+                update, context, tracks, name, orchestrator,
+                user_manager, admin_logger, collection_url=q,
+            )
+        else:
+            await message.reply_text(msg.collection_not_found())
+        return
+
+    if kind == "discover":
+        await discover_command(update, context)
+        return
+
+    if kind == "similar":
+        title = retry.get("title") or ctx.get("title")
+        artist = retry.get("artist") or ctx.get("artist") or ""
+        if not title:
+            await message.reply_text(msg.error_retry_unavailable())
+            return
+        if await _reject_if_busy(message, context):
+            return
+        job = _start_job(context, "similar")
+        status = await message.reply_text(msg.similar_preparing())
+        reporter = ProgressReporter(
+            status, 100, "مشابه", bot=context.bot, user=user, progress_mode="percent",
+        )
+        try:
+            await reporter.update(10, msg.similar_llm_phase(), force=True)
+            suggestions = await _resolve_similar_tracks(
+                title, artist, user.id,
+                reporter=reporter,
+                cancel_check=lambda: _cancel_check(job),
+            )
+            if _cancel_check(job):
+                await reporter.fail(msg.work_cancelled())
+                return
+            if not suggestions:
+                await _fail_job(
+                    reporter, user,
+                    kind="similar", code="not_found",
+                    reason=msg.similar_not_found(),
+                    title=title, artist=artist,
+                )
+                return
+            lines = [msg.similar_header(title, artist)]
+            buttons = []
+            context.user_data["reco_cache"] = {}
+            for i, meta in enumerate(suggestions, 1):
+                lines.append(f"{i}. {meta.title} — {meta.artist}")
+                context.user_data["reco_cache"][str(i)] = meta
+                buttons.append([
+                    InlineKeyboardButton(
+                        _btn_download(meta.title, i),
+                        callback_data=f"searchpick:{i}",
+                    )
+                ])
+            await status.edit_text(
+                "\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except Exception as e:
+            logger.error("Retry similar failed: %s", e, exc_info=True)
+            await _fail_job(
+                reporter, user,
+                kind="similar", code="exception",
+                reason=msg.similar_not_found(),
+                title=title, artist=artist, detail=str(e)[:500],
+            )
+        finally:
+            _end_job(context, job)
+        return
+
+    if kind == "lyrics":
+        title = retry.get("title") or ctx.get("title")
+        artist = retry.get("artist") or ctx.get("artist") or ""
+        if not title:
+            await message.reply_text(msg.error_retry_unavailable())
+            return
+        if await _reject_if_busy(message, context):
+            return
+        job = _start_job(context, "lyrics")
+        status = await message.reply_text(msg.searching())
+        reporter = ProgressReporter(
+            status, 100, "متن آهنگ", bot=context.bot, user=user, progress_mode="percent",
+        )
+        try:
+            await reporter.update(20, f"{title} — {artist or msg.UNKNOWN}", force=True)
+            text = _lyrics_from_cache(title, artist)
+            if not text:
+                result, cancelled = await _await_with_progress(
+                    fetch_lyrics(title, artist),
+                    reporter,
+                    lambda: _cancel_check(job),
+                    25, 85, "در حال دریافت متن آهنگ...",
+                )
+                if cancelled:
+                    await reporter.fail(msg.work_cancelled())
+                    return
+                text = (result or {}).get("text") if result else None
+            if not text:
+                await _fail_job(
+                    reporter, user,
+                    kind="lyrics", code="not_found",
+                    reason=msg.lyrics_not_found(),
+                    title=title, artist=artist,
+                )
+                return
+            await status.delete()
+            await _reply_lyrics(message, title, artist, text)
+        except Exception as e:
+            logger.error("Retry lyrics failed: %s", e, exc_info=True)
+            await _fail_job(
+                reporter, user,
+                kind="lyrics", code="exception",
+                reason=msg.lyrics_not_found(),
+                title=title, artist=artist, detail=str(e)[:500],
+            )
+        finally:
+            _end_job(context, job)
+        return
+
+    await message.reply_text(msg.error_retry_unavailable())
+
+
 async def support_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = update.effective_user
@@ -2842,10 +3196,12 @@ def main():
     )
     application = application.build()
 
+    application.add_handler(TypeHandler(Update, apply_user_lang), group=-2)
     application.add_handler(TypeHandler(Update, vip_update_logger), group=-1)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("lang", lang_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("analytics", analytics_command))
     application.add_handler(CommandHandler("creds", creds_command))
@@ -2887,6 +3243,8 @@ def main():
     application.add_handler(CommandHandler("support", support_command))
     application.add_handler(CommandHandler("supportend", supportend_command))
     application.add_handler(CallbackQueryHandler(error_report_callback, pattern=r"^err:\d+$"))
+    application.add_handler(CallbackQueryHandler(retry_error_callback, pattern=r"^retry:\d+$"))
+    application.add_handler(CallbackQueryHandler(lang_callback, pattern=r"^lang:"))
     application.add_handler(CallbackQueryHandler(support_callback, pattern=r"^sup:"))
     application.add_handler(CallbackQueryHandler(report_callback, pattern=r"^rpt:"))
     application.add_handler(CallbackQueryHandler(callback_handler))

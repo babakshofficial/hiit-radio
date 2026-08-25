@@ -341,7 +341,7 @@ async def log_user_report(bot, user, report_row):
         **{
             "نوع": report_row.get("error_kind") or "?",
             "کد": report_row.get("error_code") or "—",
-            "جزئیات": summary[:800],
+            "جزئیات": summary[:3500],
         },
     )
     await notify_admin_vip_issue(bot, summary, reply_markup=keyboard)

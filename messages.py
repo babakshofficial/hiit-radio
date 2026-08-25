@@ -1,6 +1,11 @@
-"""User-facing Persian copy for the HiiT Radio bot."""
+"""User-facing copy façade — lookups go through locales + a language contextvar."""
+
+from __future__ import annotations
 
 import os
+from contextvars import ContextVar
+
+from locales import DEFAULT_LANG, SUPPORTED, get_strings, normalize_lang
 
 DEVELOPER_NAME = os.getenv("DEVELOPER_NAME", "بابک").strip() or "بابک"
 DEVELOPER_USERNAME = os.getenv("DEVELOPER_USERNAME", "").strip()
@@ -12,204 +17,215 @@ DEVELOPER_CHANNEL = (
 if not DEVELOPER_CHANNEL.startswith("@"):
     DEVELOPER_CHANNEL = f"@{DEVELOPER_CHANNEL.lstrip('@')}"
 
-UNKNOWN = "نامشخص"
 BOT_INLINE = "@HiiTRadioBot"
+
+_lang_var: ContextVar[str] = ContextVar("ui_lang", default=DEFAULT_LANG)
+
+
+def get_lang() -> str:
+    return _lang_var.get()
+
+
+def set_lang(lang: str | None) -> str:
+    resolved = normalize_lang(lang) or DEFAULT_LANG
+    _lang_var.set(resolved)
+    return resolved
+
+
+def use_lang(lang: str | None):
+    """Set language; returns a token for ``reset_lang``."""
+    return _lang_var.set(normalize_lang(lang) or DEFAULT_LANG)
+
+
+def reset_lang(token) -> None:
+    _lang_var.reset(token)
+
+
+def t(key: str, **kwargs) -> str:
+    table = get_strings(get_lang())
+    text = table.get(key)
+    if text is None:
+        text = get_strings(DEFAULT_LANG).get(key, key)
+    if kwargs:
+        try:
+            return text.format(**kwargs)
+        except (KeyError, ValueError):
+            return text
+    return text
+
+
+def __getattr__(name: str):
+    if name == "UNKNOWN":
+        return t("unknown")
+    if name == "BTN_INVITE":
+        return t("btn_invite")
+    if name == "BTN_MORE_BY_ARTIST":
+        return t("btn_more_by_artist")
+    if name == "BTN_SIMILAR":
+        return t("btn_similar")
+    if name == "BTN_LYRICS":
+        return t("btn_lyrics")
+    if name == "BTN_ARTWORK":
+        return t("btn_artwork")
+    if name == "BTN_FAVORITE_ADD":
+        return t("btn_favorite_add")
+    if name == "BTN_FAVORITE_REMOVE":
+        return t("btn_favorite_remove")
+    raise AttributeError(f"module 'messages' has no attribute {name!r}")
 
 
 def platform_fa(platform):
     if not platform:
-        return UNKNOWN
+        return t("unknown")
     p = platform.lower()
     if "spotify" in p:
-        return "اسپاتیفای"
+        return t("platform_spotify")
     if "apple" in p:
-        return "اپل موزیک"
+        return t("platform_apple")
     if "youtube" in p:
-        return "یوتیوب"
+        return t("platform_youtube")
     if "soundcloud" in p:
-        return "ساندکلاود"
+        return t("platform_soundcloud")
     if "deezer" in p:
-        return "دیزر"
+        return t("platform_deezer")
     if "cache" in p:
-        return "کش"
+        return t("platform_cache")
     return platform
 
 
 def unknown_artist(artist):
-    return artist or UNKNOWN
+    return artist or t("unknown")
 
 
 def btn_redownload(title):
-    label = (title or UNKNOWN)[:26]
-    return f"🔄 دانلود مجدد: {label}"
+    label = (title or t("unknown"))[:26]
+    return t("btn_redownload", label=label)
 
 
 def btn_download(title, index=None):
-    label = (title or UNKNOWN)[:24]
+    label = (title or t("unknown"))[:24]
     if index is not None:
-        return f"{index}. دانلود «{label}»"
-    return f"دانلود «{label}»"
+        return t("btn_download_indexed", index=index, label=label)
+    return t("btn_download", label=label)
 
 
 def start_text(first_name=""):
-    name = first_name or "دوست عزیز"
-    return (
-        f"سلام {name}! 🎶\n\n"
-        "به HiiT Radio خوش اومدی — ربات دانلود موزیک بدون محدودیت!\n\n"
-        "فقط کافیه لینک آهنگ، آلبوم یا پلی‌لیست رو بفرستی "
-        "(اسپاتیفای · اپل موزیک · دیزر · یوتیوب · ساندکلاود) "
-        "یا اسم آهنگ رو بنویسی — بقیه‌اش با من.\n\n"
-        "از دکمه‌های زیر شروع کن 👇"
-    )
+    name = first_name or t("start_friend_name")
+    return t("start_text", name=name)
 
 
 def help_text():
-    return (
-        "چطور استفاده کنم؟\n\n"
-        "۱. لینک آهنگ، آلبوم یا پلی‌لیست بفرست\n"
-        "   (اسپاتیفای · اپل موزیک · دیزر · یوتیوب · ساندکلاود)\n"
-        "۲. یا اسم آهنگ و هنرمند رو بنویس\n"
-        "۳. /search نام آهنگ — جستجو در دیزر و اپل\n"
-        "۴. /artist نام هنرمند — آلبوم‌ها و برترین‌ها\n"
-        "۵. /quality — انتخاب کیفیت MP3\n"
-        "۶. یا اینلاین: "
-        f"{BOT_INLINE} نام آهنگ — توی هر چتی\n\n"
-        "/liked — آهنگ‌های ذخیره‌شده\n"
-        "/top — جدول محبوب‌ها (day / week / all)\n"
-        "/discover — بر اساس تاریخچه‌ات، ۱۰ آهنگ پیشنهاد می‌دم\n"
-        "/premium — اشتراک پریمیوم / خرید سقف روزانه\n"
-        "/invite — لینک دعوت دوست\n"
-        "/cancel — توقف هر کار جاری (دانلود، پیشنهاد، …)\n"
-        "/aboutme — درباره ربات و سازنده\n\n"
-        "سقف روزانه رایگان: ۱۰ دانلود "
-        f"(پریمیوم: {os.getenv('PREMIUM_DAILY_LIMIT', '100')})."
+    return t(
+        "help_text",
+        bot_inline=BOT_INLINE,
+        premium_daily_limit=os.getenv("PREMIUM_DAILY_LIMIT", "100"),
     )
 
 
 def aboutme_text():
     channel = DEVELOPER_CHANNEL
-    lines = [
-        "🎙 درباره HiiT Radio",
-        "",
-        f"این ربات رو من، {DEVELOPER_NAME}، ساختم تا راحت‌تر موزیک دانلود کنی.",
-        "",
-        f"📻 کانال: {channel}",
-    ]
+    developer_line = ""
     if DEVELOPER_USERNAME:
         username = (
             DEVELOPER_USERNAME
             if DEVELOPER_USERNAME.startswith("@")
             else f"@{DEVELOPER_USERNAME}"
         )
-        lines.append(f"💬 توسعه‌دهنده: {username}")
-    lines.extend([
-        "",
-        "چی کار می‌کنه؟",
-        "• لینک اسپاتیفای / اپل / دیزر / یوتیوب / ساندکلاود",
-        "• جستجو با نام آهنگ (/search)",
-        "• مرور هنرمند (/artist) و کیفیت صدا (/quality)",
-        "• پیشنهاد شخصی با /discover",
-        "",
-        "اگه ایده یا باگی داشتی، پیام بده — خوشحال می‌شم بشنوم 😊",
-    ])
-    return "\n".join(lines)
+        developer_line = t("aboutme_developer_line", username=username)
+    return t(
+        "aboutme_text",
+        developer_name=DEVELOPER_NAME,
+        channel=channel,
+        developer_line=developer_line,
+    )
 
 
 def history_empty():
-    return "هنوز چیزی دانلود نکردی — یه آهنگ بفرست تا اینجا ثبت بشه 🎧"
+    return t("history_empty")
 
 
 def history_header():
-    return "📜 دانلودهای اخیرت:\n"
+    return t("history_header")
 
 
 def discover_empty_history():
-    return (
-        "برای پیشنهاد شخصی، اول چند تا آهنگ دانلود کن — "
-        "بعد /discover رو بزن 🎧"
-    )
+    return t("discover_empty_history")
 
 
 def discover_not_configured():
-    return (
-        "پیشنهاد هوشمند فعلاً فعال نیست.\n"
-        "به زودی دوباره امتحان کن."
-    )
+    return t("discover_not_configured")
 
 
 def discover_preparing():
-    return "⏳ دارم برات آهنگ پیشنهاد می‌دم..."
+    return t("discover_preparing")
 
 
 def discover_llm_phase():
-    return "در حال فکر کردن روی سلیقه‌ات..."
+    return t("discover_llm_phase")
 
 
 def discover_resolve_phase(done, total):
-    return f"در حال پیدا کردن آهنگ‌ها ({done}/{total})..."
+    return t("discover_resolve_phase", done=done, total=total)
 
 
 def discover_llm_error():
-    return "الان نتونستم پیشنهاد بدم — یه کم دیگه دوباره امتحان کن 🙏"
+    return t("discover_llm_error")
 
 
 def discover_no_results():
-    return "فعلاً پیشنهاد تازه‌ای ندارم — بعداً دوباره امتحان کن."
+    return t("discover_no_results")
 
 
 def discover_header():
-    return "🎧 پیشنهاد برای تو:\n"
+    return t("discover_header")
 
 
 def cancel_ok(count=1):
     if count > 1:
-        return f"⏹ درخواست توقف برای {count} کار ثبت شد — به زودی متوقف می‌شن."
-    return "⏹ درخواست توقف ثبت شد — کار جاری به زودی متوقف می‌شه."
+        return t("cancel_ok_many", count=count)
+    return t("cancel_ok")
 
 
 def cancel_no_job():
-    return "الان کار فعالی از طرف تو در حال اجرا نیست."
+    return t("cancel_no_job")
 
 
 def too_many_jobs(limit):
-    return (
-        f"همزمان بیشتر از {limit} کار نمی‌تونی اجرا کنی.\n"
-        "صبر کن تموم بشه یا با /cancel متوقفش کن."
-    )
+    return t("too_many_jobs", limit=limit)
 
 
 def preview_caption(title="", artist=""):
-    line = "🎧 پیش‌نمایش ۳۰ ثانیه‌ای"
     title = (title or "").strip()
     artist = (artist or "").strip()
     if title and artist:
-        return f"{line}\n{title} — {artist}"
+        return t("preview_caption_full", title=title, artist=artist)
     if title:
-        return f"{line}\n{title}"
-    return line
+        return t("preview_caption_title", title=title)
+    return t("preview_caption")
 
 
 def download_cancelled():
-    return "متوقف شد."
+    return t("download_cancelled")
 
 
 def work_cancelled():
-    return "کار لغو شد."
+    return t("work_cancelled")
 
 
 def rate_limit(minutes):
-    return f"فعلاً به سقف دانلود رسیدی — {minutes} دقیقه دیگه برگرد 🙏"
+    return t("rate_limit", minutes=minutes)
+
+
+def _tier_label(tier):
+    return {
+        "free": t("tier_free"),
+        "premium": t("tier_premium"),
+        "unlimited": t("tier_unlimited"),
+    }.get(tier, tier)
 
 
 def quota_exceeded(used, limit, tier):
-    tier_fa = {"free": "رایگان", "premium": "پریمیوم", "unlimited": "نامحدود"}.get(
-        tier, tier
-    )
-    return (
-        f"به سقف دانلود امروز رسیدی ({used}/{limit}) — طرح: {tier_fa}.\n"
-        "می‌تونی با ستاره تلگرام سقف امروز رو بالا ببری، "
-        "پریمیوم بگیری، یا ۳ دوست دعوت کنی."
-    )
+    return t("quota_exceeded", used=used, limit=limit, tier=_tier_label(tier))
 
 
 def premium_status(snapshot):
@@ -217,150 +233,153 @@ def premium_status(snapshot):
     from zoneinfo import ZoneInfo
     import entitlements as ent
 
-    tier = snapshot["tier"]
-    tier_fa = {"free": "رایگان", "premium": "پریمیوم", "unlimited": "نامحدود"}.get(
-        tier, tier
-    )
     lines = [
-        "⭐ وضعیت اشتراک",
-        f"طرح: {tier_fa}",
+        t("premium_status_title"),
+        t("premium_plan", tier=_tier_label(snapshot["tier"])),
     ]
     sub = snapshot.get("subscription")
     if sub and sub.get("expires_at"):
         exp = datetime.fromtimestamp(
             float(sub["expires_at"]), ZoneInfo(os.getenv("QUOTA_TZ", "Asia/Tehran"))
         )
-        lines.append(f"انقضا: {exp.strftime('%Y-%m-%d %H:%M')}")
+        lines.append(t("premium_expires", expires=exp.strftime("%Y-%m-%d %H:%M")))
     if snapshot.get("limit") is None:
-        lines.append("سقف امروز: نامحدود")
+        lines.append(t("premium_limit_unlimited"))
     else:
         lines.append(
-            f"دانلود امروز: {snapshot.get('used', 0)}/{snapshot.get('limit')}"
+            t(
+                "premium_limit_today",
+                used=snapshot.get("used", 0),
+                limit=snapshot.get("limit"),
+            )
         )
-    lines.append(f"تاریخ: {snapshot.get('day')}")
+    lines.append(t("premium_day", day=snapshot.get("day")))
     lines.append("")
     lines.append(
-        f"روزپس: +{ent.TOPUP_AMOUNT} دانلود | "
-        f"پریمیوم هفتگی/ماهانه: {ent.PREMIUM_DAILY_LIMIT} در روز"
+        t(
+            "premium_footer",
+            topup=ent.TOPUP_AMOUNT,
+            premium_daily=ent.PREMIUM_DAILY_LIMIT,
+        )
     )
     return "\n".join(lines)
 
 
 def invite_status(progress):
-    return (
-        "🎁 دعوت دوست\n"
-        f"پیشرفت: {progress['toward']}/{progress['needed']} "
-        f"(مجموع تأییدشده: {progress['credited']})\n"
-        f"در انتظار عضویت کانال: {progress['pending']}\n\n"
-        "با هر ۳ دوست جدید که از لینک تو وارد بشن و عضو کانال بشن، "
-        f"+{os.getenv('TOPUP_AMOUNT', '10')} دانلود امروز بهت اضافه می‌شه.\n\n"
-        f"لینک دعوت:\n{progress['link']}"
+    return t(
+        "invite_status",
+        toward=progress["toward"],
+        needed=progress["needed"],
+        credited=progress["credited"],
+        pending=progress["pending"],
+        topup=os.getenv("TOPUP_AMOUNT", "10"),
+        link=progress["link"],
     )
 
 
 def payment_failed():
-    return "پرداخت ثبت نشد — دوباره از /premium تلاش کن."
+    return t("payment_failed")
 
 
 def payment_already_processed():
-    return "این پرداخت قبلاً اعمال شده."
+    return t("payment_already_processed")
 
 
 def payment_bonus_ok(amount, day):
-    return f"✅ +{amount} دانلود برای امروز ({day}) فعال شد."
+    return t("payment_bonus_ok", amount=amount, day=day)
 
 
 def referral_topup_granted():
-    amount = os.getenv("TOPUP_AMOUNT", "10")
-    return (
-        f"🎉 سه دعوتت تکمیل شد — +{amount} دانلود امروز به حسابت اضافه شد.\n"
-        "با /invite پیشرفت بعدیت رو ببین."
-    )
+    return t("referral_topup_granted", amount=os.getenv("TOPUP_AMOUNT", "10"))
 
 
 def payment_premium_ok(tier, expires_at):
     from datetime import datetime
     from zoneinfo import ZoneInfo
+
     exp = datetime.fromtimestamp(
         float(expires_at), ZoneInfo(os.getenv("QUOTA_TZ", "Asia/Tehran"))
     )
-    tier_fa = "پریمیوم" if tier == "premium" else "نامحدود"
-    return f"✅ اشتراک {tier_fa} فعال شد تا {exp.strftime('%Y-%m-%d %H:%M')}."
+    tier_label = t("tier_premium") if tier == "premium" else t("tier_unlimited")
+    return t(
+        "payment_premium_ok",
+        tier=tier_label,
+        expires=exp.strftime("%Y-%m-%d %H:%M"),
+    )
 
 
 def btn_buy_daypass(stars, amount):
-    return f"🔓 +{amount} دانلود امروز — {stars}⭐"
+    return t("btn_buy_daypass", amount=amount, stars=stars)
 
 
 def btn_buy_weekly(stars):
-    return f"⭐ پریمیوم ۷ روزه — {stars}⭐"
+    return t("btn_buy_weekly", stars=stars)
 
 
 def btn_buy_monthly(stars):
-    return f"⭐ پریمیوم ۳۰ روزه — {stars}⭐"
-
-
-BTN_INVITE = "🎁 دعوت دوست"
+    return t("btn_buy_monthly", stars=stars)
 
 
 def grant_ok(user_id, tier, expires_at):
     from datetime import datetime
     from zoneinfo import ZoneInfo
+
     exp = datetime.fromtimestamp(
         float(expires_at), ZoneInfo(os.getenv("QUOTA_TZ", "Asia/Tehran"))
     )
-    return f"✅ کاربر {user_id}: {tier} تا {exp.strftime('%Y-%m-%d %H:%M')}"
-
-
-def topup_ok(user_id, amount, day):
-    return f"✅ کاربر {user_id}: +{amount} برای {day}"
-
-
-def searching():
-    return "⏳ دارم آهنگت رو پیدا می‌کنم..."
-
-
-def downloading():
-    return "⏳ دارم دانلود می‌کنم..."
-
-
-def metadata_not_found():
-    return "نتیجه‌ای پیدا نشد — لینک یا نام آهنگ رو دوباره بفرست 🙏"
-
-
-def not_music_query():
-    return "این شبیه نام آهنگ نیست — لینک موزیک یا «هنرمند - آهنگ» بفرست"
-
-
-def collection_not_found():
-    return "نتونستم این آلبوم یا پلی‌لیست رو بشناسم — لینک رو چک کن و دوباره بفرست."
-
-
-def send_failed():
-    return "ارسال آهنگ ممکن نشد — لطفاً دوباره تلاش کن 🙏"
-
-
-def download_not_found():
-    return "نسخه کامل پیدا نشد — شاید با اسم دیگه‌ای جستجو کنی بهتر بشه."
-
-
-def download_fail_bot_check():
-    return (
-        "الان دانلود ممکن نشد — "
-        "یه کم دیگه دوباره امتحان کن یا اسم دیگه‌ای بفرست."
+    return t(
+        "grant_ok",
+        user_id=user_id,
+        tier=tier,
+        expires=exp.strftime("%Y-%m-%d %H:%M"),
     )
 
 
+def topup_ok(user_id, amount, day):
+    return t("topup_ok", user_id=user_id, amount=amount, day=day)
+
+
+def searching():
+    return t("searching")
+
+
+def downloading():
+    return t("downloading")
+
+
+def metadata_not_found():
+    return t("metadata_not_found")
+
+
+def not_music_query():
+    return t("not_music_query")
+
+
+def collection_not_found():
+    return t("collection_not_found")
+
+
+def send_failed():
+    return t("send_failed")
+
+
+def download_not_found():
+    return t("download_not_found")
+
+
+def download_fail_bot_check():
+    return t("download_fail_bot_check")
+
+
 def download_fail_timeout():
-    return "دانلود طول کشید و قطع شد — لطفاً دوباره تلاش کن 🙏"
+    return t("download_fail_timeout")
 
 
 def download_fail_invalid():
-    return "فایل درست دانلود نشد — یه لینک یا اسم دیگه امتحان کن."
+    return t("download_fail_invalid")
 
 
 def download_fail_message(error_code):
-    """Map internal failure codes to non-technical Persian copy."""
     mapping = {
         "no_match": download_not_found(),
         "bot_check": download_fail_bot_check(),
@@ -374,132 +393,127 @@ def download_fail_message(error_code):
 
 
 def record_not_found():
-    return "این مورد توی تاریخچه پیدا نشد."
+    return t("record_not_found")
 
 
 def songs_not_found():
-    return "آهنگی پیدا نشد — یه اسم دیگه امتحان کن."
+    return t("songs_not_found")
 
 
 def similar_preparing():
-    return "⏳ دارم آهنگ‌های مشابه پیدا می‌کنم..."
+    return t("similar_preparing")
 
 
 def similar_llm_phase():
-    return "در حال پیدا کردن آهنگ‌های مشابه..."
+    return t("similar_llm_phase")
 
 
 def similar_resolve_phase(done, total):
-    return f"در حال آماده‌سازی لیست ({done}/{total})..."
+    return t("similar_resolve_phase", done=done, total=total)
 
 
 def similar_header(title, artist):
-    who = f" — {artist}" if artist else ""
-    return f"🎧 مشابه «{title}{who}»:\n"
+    if artist:
+        return t("similar_header_with_artist", title=title, artist=artist)
+    return t("similar_header", title=title)
 
 
 def similar_not_found():
-    return "آهنگ مشابهی پیدا نشد — بعداً دوباره امتحان کن."
+    return t("similar_not_found")
 
 
 def liked_empty():
-    return "هنوز چیزی به علاقه‌مندی‌ها اضافه نکردی ❤️"
+    return t("liked_empty")
 
 
 def liked_header():
-    return "❤️ علاقه‌مندی‌هات:\n"
+    return t("liked_header")
 
 
 def favorite_added(title):
-    return f"به علاقه‌مندی‌ها اضافه شد: {title or UNKNOWN}"
+    return t("favorite_added", title=title or t("unknown"))
 
 
 def favorite_removed(title):
-    return f"از علاقه‌مندی‌ها حذف شد: {title or UNKNOWN}"
+    return t("favorite_removed", title=title or t("unknown"))
 
 
 def favorite_missing():
-    return "این آهنگ برای علاقه‌مندی پیدا نشد."
+    return t("favorite_missing")
 
 
 def top_header(period_label):
-    return f"🏆 محبوب‌ترین‌ها ({period_label}):\n"
+    return t("top_header", period=period_label)
 
 
 def top_empty():
-    return "فعلاً آماری برای این بازه نیست."
+    return t("top_empty")
 
 
 def top_period_label(period):
-    return {"day": "۲۴ ساعت", "week": "هفته", "all": "همه زمان‌ها"}.get(
-        period, "هفته"
-    )
+    return {
+        "day": t("top_period_day"),
+        "week": t("top_period_week"),
+        "all": t("top_period_all"),
+    }.get(period, t("top_period_week"))
 
 
 def lyrics_not_found():
-    return "متن این آهنگ پیدا نشد."
+    return t("lyrics_not_found")
 
 
 def lyrics_header(title, artist):
-    who = f" — {artist}" if artist else ""
-    return f"📝 {title}{who}\n\n"
+    if artist:
+        return t("lyrics_header_with_artist", title=title, artist=artist)
+    return t("lyrics_header", title=title)
 
 
 def pick_expired():
-    return "این انتخاب منقضی شده — دوباره جستجو کن."
+    return t("pick_expired")
 
 
 def pick_expired_short():
-    return "این انتخاب منقضی شده — دوباره امتحان کن."
+    return t("pick_expired_short")
 
 
 def more_by_artist(artist):
-    return f"🎵 آهنگ‌های بیشتر از {artist}:\n"
+    return t("more_by_artist", artist=artist)
 
 
 def inline_description(artist):
-    return f"{artist} — برای دانلود لمس کن"
+    return t("inline_description", artist=artist)
 
 
 def gate_denied(channel):
     channel = channel.lstrip("@")
-    return (
-        f"برای استفاده از ربات، اول عضو کانال @{channel} شو 🙏\n\n"
-        f"https://t.me/{channel}\n\n"
-        "بعد از عضویت، دوباره امتحان کن."
-    )
+    return t("gate_denied", channel=channel)
 
 
 def gate_alert():
-    return "ابتدا عضو کانال شو."
+    return t("gate_alert")
 
 
 def playlist_empty():
-    return "هیچ آهنگی توی این مجموعه پیدا نشد."
+    return t("playlist_empty")
 
 
 def playlist_start(collection_name, total):
-    name = collection_name or "پلی‌لیست"
-    return (
-        f"📋 شروع دانلود: {name}\n"
-        f"تعداد: {total} آهنگ\n\n"
-        "/cancel برای توقف کار جاری"
-    )
+    name = collection_name or t("playlist_default_name")
+    return t("playlist_start", name=name, total=total)
 
 
 def playlist_cancelled(sent, total):
-    return f"متوقف شد. ارسال شده: {sent}/{total}"
+    return t("playlist_cancelled", sent=sent, total=total)
 
 
 def playlist_rate_limited(minutes, sent, total):
-    return f"محدودیت نرخ ({minutes} دقیقه). ارسال شده: {sent}/{total}"
+    return t("playlist_rate_limited", minutes=minutes, sent=sent, total=total)
 
 
 def playlist_summary(sent, total, failed=0):
-    summary = f"ارسال شده: {sent}/{total}"
     if failed:
-        summary += f" | ناموفق: {failed}"
-    return summary
+        return t("playlist_summary_failed", sent=sent, total=total, failed=failed)
+    return t("playlist_summary", sent=sent, total=total)
 
 
 def progress_update(label, current, total, detail="", eta_sec=None, show_counter=True):
@@ -516,301 +530,314 @@ def progress_update(label, current, total, detail="", eta_sec=None, show_counter
         eta_sec = max(int(round(eta_sec)), 0)
         m = eta_sec // 60
         s = eta_sec % 60
-        eta_line = f"\n⏳ حدودا {m}:{s:02d}"
-    counter = f" — آهنگ {current} از {total}" if show_counter else ""
-    return f"📥 {label} {bar} {pct}%{counter}{detail_line}{eta_line}"
+        eta_line = t("progress_eta", m=m, s=s)
+    counter = (
+        t("progress_counter", current=current, total=total) if show_counter else ""
+    )
+    return t(
+        "progress_update",
+        label=label,
+        bar=bar,
+        pct=pct,
+        counter=counter,
+        detail_line=detail_line,
+        eta_line=eta_line,
+    )
 
 
 def progress_done(label, summary=""):
-    text = f"✅ {label} تمام شد."
     if summary:
-        text += f"\n{summary}"
-    return text
+        return t("progress_done_with_summary", label=label, summary=summary)
+    return t("progress_done", label=label)
 
 
 def progress_fail(label, reason=""):
-    text = f"❌ {label} ناموفق بود."
     if reason:
-        text += f"\n{reason}"
-    return text
+        return t("progress_fail_with_reason", label=label, reason=reason)
+    return t("progress_fail", label=label)
 
 
 def error_report_button():
-    return "📩 گزارش به پشتیبان"
+    return t("error_report_button")
+
+
+def error_retry_button():
+    return t("error_retry_button")
+
+
+def error_retrying():
+    return t("error_retrying")
+
+
+def error_retry_unavailable():
+    return t("error_retry_unavailable")
 
 
 def error_report_sent():
-    return "\n\n✅ گزارشت ثبت شد. ممنون!"
+    return t("error_report_sent")
 
 
 def error_report_already_sent():
-    return "این خطا قبلاً گزارش شده."
+    return t("error_report_already_sent")
 
 
 def error_report_rate_limited():
-    return "محدودیت گزارش — فردا دوباره امتحان کن."
+    return t("error_report_rate_limited")
 
 
 def support_admin_prompt(report_id, user_id):
-    return (
-        f"حالت پاسخ فعال — گزارش #{report_id} (کاربر {user_id})\n"
-        "هر پیامی بفرستی مستقیم به کاربر می‌رسد.\n"
-        "پایان گفتگو: /supportend"
-    )
+    return t("support_admin_prompt", report_id=report_id, user_id=user_id)
 
 
 def support_user_message(admin_text):
-    return (
-        "📩 پیام از پشتیبان HiiT Radio\n\n"
-        f"{admin_text}\n\n"
-        "برای پاسخ: /support متن پیام"
-    )
+    return t("support_user_message", admin_text=admin_text)
 
 
 def support_user_opened():
-    return (
-        "پشتیبان درباره گزارش خطایت باهات تماس گرفت.\n"
-        "برای پاسخ از /support استفاده کن — بقیه پیام‌ها مثل همیشه برای دانلود آهنگه."
-    )
+    return t("support_user_opened")
 
 
 def support_user_closed():
-    return "گفتگو با پشتیبان پایان یافت. اگر باز هم مشکلی داری، دوباره گزارش بده."
+    return t("support_user_closed")
 
 
 def support_no_thread():
-    return (
-        "گفتگوی فعالی با پشتیبان نداری.\n"
-        "اول از دکمه «📩 گزارش به پشتیبان» روی پیام خطا استفاده کن؛ "
-        "بعد از پاسخ پشتیبان می‌توانی با /support پیام بفرستی."
-    )
+    return t("support_no_thread")
 
 
 def support_usage():
-    return (
-        "نحوه استفاده: /support متن پیام\n"
-        "فقط وقتی کار می‌کند که پشتیبان از گزارش خطایت جواب داده باشد."
-    )
+    return t("support_usage")
 
 
 def support_admin_usage():
-    return (
-        "شما ادمین هستید.\n"
-        "• روی گزارش خطا «پاسخ» بزن، بعد هر پیام متنی = ارسال به کاربر\n"
-        "• پایان: /supportend"
-    )
+    return t("support_admin_usage")
 
 
 def support_empty_message():
-    return "پیام خالی — بعد از /support متن بنویس."
+    return t("support_empty_message")
 
 
 def support_sent_admin(user_id):
-    return f"✅ پیام به کاربر {user_id} ارسال شد."
+    return t("support_sent_admin", user_id=user_id)
 
 
 def support_sent_user():
-    return "✅ پیامت به پشتیبان رسید."
+    return t("support_sent_user")
 
 
 def support_forward_to_admin(user_label, report_id, text):
-    return (
-        f"💬 پاسخ کاربر ({user_label}) — گزارش #{report_id}\n\n"
-        f"{text}"
+    return t(
+        "support_forward_to_admin",
+        user_label=user_label,
+        report_id=report_id,
+        text=text,
     )
 
 
 def support_send_failed_blocked():
-    return "ارسال ناموفق — کاربر ربات را block کرده."
+    return t("support_send_failed_blocked")
 
 
 def support_send_failed():
-    return "ارسال ناموفق — بعداً دوباره امتحان کن."
+    return t("support_send_failed")
 
 
 def support_thread_ended_admin(thread_id):
-    return f"گفتگو #{thread_id} بسته شد."
+    return t("support_thread_ended_admin", thread_id=thread_id)
 
 
 def support_thread_ended_no_open():
-    return "گفتگوی باز فعالی نیست."
+    return t("support_thread_ended_no_open")
 
 
 def support_reply_button():
-    return "💬 پاسخ به کاربر"
+    return t("support_reply_button")
 
 
 def support_end_button():
-    return "⏹ پایان گفتگو"
+    return t("support_end_button")
 
 
 def support_report_not_found():
-    return "گزارش پیدا نشد یا هنوز ارسال نشده."
+    return t("support_report_not_found")
 
 
 def cookies_status(ok, detail, path, updated=None):
-    """Admin-facing cookie jar health report."""
+    state = t("cookies_state_ok") if ok else t("cookies_state_bad")
     lines = [
-        "🍪 وضعیت کوکی یوتیوب",
-        f"وضعیت: {'سالم' if ok else 'ناسالم'}",
-        f"جزئیات: {detail}",
-        f"مسیر: {path}",
+        t("cookies_status_title"),
+        t("cookies_status_state", state=state),
+        t("cookies_status_detail", detail=detail),
+        t("cookies_status_path", path=path),
     ]
     if updated:
-        lines.append(f"آخرین به‌روزرسانی: {updated}")
+        lines.append(t("cookies_status_updated", updated=updated))
     lines.append("")
-    lines.append(
-        "برای به‌روزرسانی، فایل cookies.txt رو (خروجی Netscape از مرورگری که "
-        "توی youtube.com لاگین هستی) همین‌جا به‌صورت فایل بفرست."
-    )
+    lines.append(t("cookies_status_footer"))
     return "\n".join(lines)
 
 
 def cookies_accepted(detail, backed_up):
-    text = f"✅ cookies.txt به‌روزرسانی شد.\nجزئیات: {detail}"
+    text = t("cookies_accepted", detail=detail)
     if backed_up:
-        text += "\nنسخه قبلی در cookies.txt.bak ذخیره شد."
+        text += t("cookies_accepted_backup")
     return text
 
 
 def cookies_rejected(detail):
-    return (
-        "❌ این فایل کوکی معتبر نیست و ذخیره نشد.\n"
-        f"جزئیات: {detail}\n\n"
-        "دوباره در حالی که توی youtube.com لاگین هستی خروجی Netscape بگیر."
-    )
+    return t("cookies_rejected", detail=detail)
 
 
 def cookies_too_large(limit_kb):
-    return f"❌ فایل خیلی بزرگه (بیشتر از {limit_kb} کیلوبایت)."
-
-
-BTN_MORE_BY_ARTIST = "آهنگ‌های بیشتر"
-BTN_SIMILAR = "آهنگ‌های مشابه"
-BTN_LYRICS = "متن آهنگ"
-BTN_ARTWORK = "🖼 کاور آهنگ"
-BTN_FAVORITE_ADD = "❤️ علاقه‌مندی"
-BTN_FAVORITE_REMOVE = "💔 حذف علاقه‌مندی"
+    return t("cookies_too_large", limit_kb=limit_kb)
 
 
 def artwork_not_found():
-    return "کاور این آهنگ پیدا نشد."
+    return t("artwork_not_found")
 
 
 def artwork_sending():
-    return "در حال آماده‌سازی کاور..."
+    return t("artwork_sending")
 
 
 def search_usage():
-    return "نحوه استفاده:\n/search نام آهنگ یا هنرمند"
+    return t("search_usage")
 
 
 def search_empty():
-    return "نتیجه‌ای پیدا نشد — عبارت دیگه‌ای امتحان کن."
+    return t("search_empty")
 
 
 def search_header(query):
-    return f"🔍 نتایج جستجو برای «{query}»:"
+    return t("search_header", query=query)
 
 
 def search_hit_line(index, name, subtitle, kind, source):
-    kind_fa = {
-        "track": "آهنگ",
-        "album": "آلبوم",
-        "playlist": "پلی‌لیست",
-        "artist": "هنرمند",
+    kind_label = {
+        "track": t("search_kind_track"),
+        "album": t("search_kind_album"),
+        "playlist": t("search_kind_playlist"),
+        "artist": t("search_kind_artist"),
     }.get(kind, kind)
     sub = f" — {subtitle}" if subtitle else ""
-    return f"{index}. [{kind_fa}] {name}{sub}"
+    return t("search_hit_line", index=index, kind=kind_label, name=name, sub=sub)
 
 
 def artist_usage():
-    return "نحوه استفاده:\n/artist نام هنرمند"
+    return t("artist_usage")
 
 
 def artist_not_found(name):
-    return f"هنرمند «{name}» پیدا نشد."
+    return t("artist_not_found", name=name)
 
 
 def artist_header(name):
-    return f"🎤 {name}"
+    return t("artist_header", name=name)
 
 
 def artist_top_header():
-    return "برترین آهنگ‌ها:"
+    return t("artist_top_header")
 
 
 def artist_albums_header():
-    return "آلبوم‌ها:"
+    return t("artist_albums_header")
 
 
 def quality_status(current):
     hint = {
-        "128": "کم‌حجم — مناسب فضای کم",
-        "192": "متعادل — کیفیت خوب",
-        "256": "پیش‌فرض ربات",
-        "320": "بهترین MP3",
-        "original": "بدون تبدیل — همان فایل منبع",
+        "128": t("quality_hint_128"),
+        "192": t("quality_hint_192"),
+        "256": t("quality_hint_256"),
+        "320": t("quality_hint_320"),
+        "original": t("quality_hint_original"),
     }.get(current, "")
-    return (
-        f"🎚 کیفیت فعلی: {current} kbps"
+    head = (
+        t("quality_status_kbps", value=current)
         if current != "original"
-        else "🎚 کیفیت فعلی: original (بدون تبدیل)"
-    ) + (f"\n{hint}" if hint else "") + "\n\nیکی از دکمه‌ها رو بزن یا بنویس: /quality 320"
+        else t("quality_status_original")
+    )
+    return head + (f"\n{hint}" if hint else "") + "\n\n" + t("quality_status_footer")
 
 
 def quality_set(value):
     if value == "original":
-        return "✅ کیفیت روی original (بدون تبدیل) تنظیم شد."
-    return f"✅ کیفیت روی {value} kbps تنظیم شد."
+        return t("quality_set_original")
+    return t("quality_set_kbps", value=value)
 
 
 def quality_invalid():
-    return "کیفیت نامعتبر. گزینه‌ها: 128 · 192 · 256 · 320 · original"
+    return t("quality_invalid")
 
 
 def playlist_zip_sending(name, count):
-    return f"📦 در حال ساخت ZIP ({count} آهنگ) — {name}..."
+    return t("playlist_zip_sending", name=name, count=count)
 
 
 def playlist_zip_caption(name, count):
-    return f"📦 {name} — {count} آهنگ"
+    return t("playlist_zip_caption", name=name, count=count)
 
-
-# --- Artist follow ---
 
 def follow_success(artist_name):
-    return f"✅ هنرمند «{artist_name}» دنبال شد — وقتی آلبوم جدید بذاره بهت خبر می‌دم!"
+    return t("follow_success", artist=artist_name)
 
 
 def unfollow_success(artist_name):
-    return f"🔕 دنبال‌کردن «{artist_name}» لغو شد."
+    return t("unfollow_success", artist=artist_name)
 
 
 def already_following(artist_name):
-    return f"قبلاً «{artist_name}» رو دنبال کردی."
+    return t("already_following", artist=artist_name)
 
 
 def not_following():
-    return "هنوز هیچ هنرمندی رو دنبال نکردی — با /follow شروع کن!"
+    return t("not_following")
 
 
 def following_header():
-    return "🎙 هنرمندان دنبال‌شده:"
+    return t("following_header")
 
 
 def follow_usage():
-    return "نحوه استفاده:\n/follow نام هنرمند"
+    return t("follow_usage")
+
+
+def btn_follow(artist):
+    return t("btn_follow", artist=artist)
+
+
+def btn_unfollow(artist):
+    return t("btn_unfollow", artist=artist)
 
 
 def new_release_notification(artist, album, date=""):
-    lines = [
-        "🔔 انتشار جدید!",
-        "",
-        f"🎤 {artist}",
-        f"💿 {album}",
-    ]
-    if date:
-        lines.append(f"📅 {date}")
-    lines.extend(["", "برای دانلود آلبوم دکمه زیر رو بزن 👇"])
-    return "\n".join(lines)
+    date_line = t("new_release_date_line", date=date) if date else ""
+    return t(
+        "new_release_notification",
+        artist=artist,
+        album=album,
+        date_line=date_line,
+    )
+
+
+def lang_choose():
+    return t("lang_choose")
+
+
+def lang_set(lang_code):
+    return t("lang_set", lang_name=t(f"lang_name_{lang_code}"))
+
+
+def menu_label(key):
+    return t(key)
+
+
+__all__ = [
+    "SUPPORTED",
+    "DEFAULT_LANG",
+    "get_lang",
+    "set_lang",
+    "use_lang",
+    "reset_lang",
+    "t",
+    "normalize_lang",
+]

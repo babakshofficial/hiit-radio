@@ -5,14 +5,7 @@ from collections import OrderedDict
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-from messages import (
-    BTN_MORE_BY_ARTIST,
-    BTN_LYRICS,
-    BTN_SIMILAR,
-    BTN_FAVORITE_ADD,
-    BTN_FAVORITE_REMOVE,
-    BTN_ARTWORK,
-)
+import messages as msg
 
 # Short callback tokens → (title, artist). Bounded; single-process bot.
 _TRACK_REFS = OrderedDict()
@@ -48,14 +41,14 @@ def recommendation_keyboard(artist, track_title=None, favorited=False):
     if artist:
         row1.append(
             InlineKeyboardButton(
-                BTN_MORE_BY_ARTIST,
+                msg.t("btn_more_by_artist"),
                 callback_data=f"reco:artist:{artist[:40]}",
             )
         )
     if track_title:
         row1.append(
             InlineKeyboardButton(
-                BTN_SIMILAR,
+                msg.t("btn_similar"),
                 callback_data=f"reco:similar:{token}",
             )
         )
@@ -66,21 +59,21 @@ def recommendation_keyboard(artist, track_title=None, favorited=False):
     if track_title:
         row2.append(
             InlineKeyboardButton(
-                BTN_LYRICS,
+                msg.t("btn_lyrics"),
                 callback_data=f"reco:lyrics:{token}",
             )
         )
         if favorited:
             row2.append(
                 InlineKeyboardButton(
-                    BTN_FAVORITE_REMOVE,
+                    msg.t("btn_favorite_remove"),
                     callback_data=f"fav:del:{token}",
                 )
             )
         else:
             row2.append(
                 InlineKeyboardButton(
-                    BTN_FAVORITE_ADD,
+                    msg.t("btn_favorite_add"),
                     callback_data=f"fav:add:{token}",
                 )
             )
@@ -90,7 +83,7 @@ def recommendation_keyboard(artist, track_title=None, favorited=False):
     if track_title:
         buttons.append([
             InlineKeyboardButton(
-                BTN_ARTWORK,
+                msg.t("btn_artwork"),
                 callback_data=f"reco:art:{token}",
             )
         ])

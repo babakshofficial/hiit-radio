@@ -85,19 +85,21 @@ async def _send_playlist_zip(message, collection_name, entries, bot):
 
 
 async def process_playlist(update, context, tracks, collection_name, orchestrator,
-                           user_manager, admin_logger):
+                           user_manager, admin_logger, collection_url=None):
     """Download and send all tracks sequentially with progress."""
     user = update.effective_user
     user_id = user.id
     bot = context.bot
+    message = update.effective_message
     total = len(tracks)
     if total == 0:
-        await update.message.reply_text(playlist_empty())
+        await message.reply_text(playlist_empty())
         return
 
     job = jobs.start(context, "playlist")
+    failed_tracks = []
     try:
-        status = await update.message.reply_text(playlist_start(collection_name, total))
+        status = await message.reply_text(playlist_start(collection_name, total))
         await admin_logger.log_playlist_start(bot, user, collection_name, total)
 
         reporter = ProgressReporter(
@@ -126,7 +128,7 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
                 stop_reason = f"سقف روزانه ({used}/{limit})"
                 await admin_logger.log_rate_limit(bot, user, 0)
                 await reporter.fail(playlist_rate_limited(0, sent, total))
-                await update.message.reply_text(
+                await message.reply_text(
                     quota_exceeded(used, limit, tier),
                     reply_markup=payments.quota_upsell_keyboard(),
                 )
@@ -144,6 +146,11 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
             is_file_id = bool(platform and str(platform).endswith("_cache_id"))
             if not file_path or (not is_file_id and not os.path.exists(file_path)):
                 failed += 1
+                failed_tracks.append({
+                    "title": getattr(track, "title", None),
+                    "artist": getattr(track, "artist", None),
+                    "error": error_code or "unknown",
+                })
                 await admin_logger.log_playlist_track(
                     bot, user, i, total, track.title, track.artist,
                     f"ناموفق ({error_code or 'unknown'})",
@@ -190,12 +197,12 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
                     pool_timeout=TG_POOL_TIMEOUT,
                 )
                 if is_file_id:
-                    sent_msg = await update.message.reply_audio(
+                    sent_msg = await message.reply_audio(
                         audio=file_path, **send_kwargs,
                     )
                 else:
                     with open(file_path, 'rb') as audio:
-                        sent_msg = await update.message.reply_audio(
+                        sent_msg = await message.reply_audio(
                             audio=audio, **send_kwargs,
                         )
                 if sent_msg and sent_msg.audio:
@@ -224,6 +231,11 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
             except Exception as e:
                 logger.error(f"Playlist send failed track {i}: {e}")
                 failed += 1
+                failed_tracks.append({
+                    "title": getattr(track, "title", None),
+                    "artist": getattr(track, "artist", None),
+                    "error": str(e)[:200],
+                })
                 await admin_logger.log_error(bot, user, "Playlist send failed", str(e))
                 await admin_logger.log_playlist_track(
                     bot, user, i, total, track.title, track.artist, f"خطا: {e}",
@@ -246,18 +258,27 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
                     code="partial_fail" if sent else "all_failed",
                     user_message=summary,
                     collection=collection_name,
+                    collection_url=collection_url,
+                    query=collection_url,
                     sent=sent,
                     total=total,
                     failed=failed,
+                    failed_tracks=failed_tracks[:20],
                 )
-                report_kb = error_report.build_keyboard(rid)
+                report_kb = error_report.build_keyboard(
+                    rid,
+                    include_retry=error_report.kind_supports_retry(
+                        "playlist",
+                        {"retry": {"collection_url": collection_url, "query": collection_url}},
+                    ),
+                )
             await reporter.done(summary, reply_markup=report_kb)
             await admin_logger.log_playlist_done(
                 bot, user, collection_name, sent, total, failed,
             )
             if sent >= 2:
                 await _send_playlist_zip(
-                    update.message, collection_name, zip_entries, bot,
+                    message, collection_name, zip_entries, bot,
                 )
     finally:
         jobs.end(context, job)

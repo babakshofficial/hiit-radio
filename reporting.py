@@ -200,10 +200,19 @@ def format_error_reports_page(rows, page, total_pages, total):
                 ctx = json.loads(raw)
             except json.JSONDecodeError:
                 pass
-        title = ctx.get("title") or "—"
+        title = ctx.get("title") or ctx.get("query") or ctx.get("collection") or "—"
+        if isinstance(title, str) and len(title) > 60:
+            title = title[:57] + "…"
+        snippet = None
+        try:
+            import error_report
+            snippet = error_report.trail_snippet(ctx, limit=100)
+        except Exception:
+            pass
+        extra = f"\n  {snippet}" if snippet else ""
         lines.append(
             f"• #{row.get('id')} [{user}] {kind}/{code}\n"
-            f"  {title} | {_ts(row.get('submitted_at'))}"
+            f"  {title} | {_ts(row.get('submitted_at'))}{extra}"
         )
     if not rows:
         lines.append("موردی نیست.")
