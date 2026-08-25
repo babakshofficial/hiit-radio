@@ -1073,7 +1073,7 @@ class MusicDownloader:
                 return None, "cancelled", direct_trail
             await _report(
                 25,
-                f"{metadata.title} — {metadata.artist}\nدانلود مستقیم از منبع...",
+                f"{metadata.title} — {metadata.artist}\nدر حال دانلود...",
             )
             direct_pct = {"value": 0.0}
 
@@ -1242,8 +1242,8 @@ class MusicDownloader:
             return None, "cancelled", failure_trail
 
         _SOURCES = {
-            "YouTube": ("ytsearch", yt_search_strategies, "در حال جستجو در یوتیوب..."),
-            "SoundCloud": ("scsearch", sc_search_strategies, "جستجو در ساندکلاود..."),
+            "YouTube": ("ytsearch", yt_search_strategies, "در حال جستجو..."),
+            "SoundCloud": ("scsearch", sc_search_strategies, "در حال جستجو..."),
         }
         found_by_source = {}
         saw_bot_check = False
@@ -1387,9 +1387,9 @@ class MusicDownloader:
 
             async def _heartbeat():
                 base = 52
-                detail_yt = (
+                detail = (
                     f"{metadata.title} — {metadata.artist}\n"
-                    "در حال دانلود از یوتیوب..."
+                    "در حال دانلود فایل صوتی..."
                 )
                 while True:
                     if source_label == "YouTube":
@@ -1398,8 +1398,7 @@ class MusicDownloader:
                     else:
                         frac = download_pct["value"]
                         pct = base + int(frac * 28)  # 52 → 80
-                    await _report(pct, detail_yt if source_label == "YouTube" else
-                                  f"{metadata.title} — {metadata.artist}\nدر حال دانلود فایل صوتی...")
+                    await _report(pct, detail)
                     await asyncio.sleep(3)
 
             # Fresh subprocess for YouTube — isolates live Chrome cookie reads from search.
