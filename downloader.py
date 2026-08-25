@@ -41,8 +41,7 @@ _YT_AUTH_HINT_NAMES = _YT_AUTH_COOKIE_NAMES
 
 # web_safari + ejs:github pass YouTube bot-checks in 2026; android skips cookie auth.
 _YT_PLAYER_CLIENTS = ["web_safari", "web", "tv"]
-# Prefer short, widely available videos for live auth probes. Some IDs bot-check
-# via proxy while normal track downloads still succeed — try several.
+# Prefer short, widely available videos for live auth probes.
 _DEFAULT_PROBE_URLS = (
     "https://www.youtube.com/watch?v=BaW_jenozKc",
     "https://www.youtube.com/watch?v=jNQXAC9IVRw",
@@ -75,47 +74,6 @@ _ACTIVE_DOWNLOADS = 0
 
 def downloads_in_progress():
     return _ACTIVE_DOWNLOADS > 0
-
-
-def _yt_proxy_url():
-    """Optional SOCKS/HTTP proxy for yt-dlp (``YTDLP_PROXY`` env var)."""
-    return os.getenv("YTDLP_PROXY", "").strip()
-
-
-def _yt_proxy_endpoint():
-    """Return ``(host, port)`` for the configured SOCKS proxy, if any."""
-    from urllib.parse import urlparse
-
-    proxy = _yt_proxy_url()
-    if not proxy:
-        return None
-    parsed = urlparse(proxy)
-    host = parsed.hostname or "127.0.0.1"
-    port = parsed.port or (1080 if "socks" in (parsed.scheme or "") else 8080)
-    return host, port
-
-
-def _wait_for_yt_proxy(timeout=90):
-    """Block until ``YTDLP_PROXY`` accepts connections (optional startup wait)."""
-    endpoint = _yt_proxy_endpoint()
-    if not endpoint:
-        return True
-    host, port = endpoint
-    deadline = time.monotonic() + max(5, timeout)
-    while time.monotonic() < deadline:
-        try:
-            import socket
-            with socket.create_connection((host, port), timeout=2):
-                return True
-        except OSError:
-            time.sleep(2)
-    logger.warning(
-        "YouTube proxy %s:%s not reachable after %ss — yt-dlp may bot-check",
-        host,
-        port,
-        timeout,
-    )
-    return False
 
 
 _BROWSER_RETRY_DELAYS = (2, 6, 15)
@@ -455,9 +413,6 @@ class MusicDownloader:
             "socket_timeout": 45,
             "extractor_args": {"youtube": {"player_client": list(_YT_PLAYER_CLIENTS)}},
         }
-        proxy = _yt_proxy_url()
-        if proxy:
-            opts["proxy"] = proxy
         ytdlp_log = logging.getLogger("yt_dlp")
         prev_level = ytdlp_log.level
         ytdlp_log.setLevel(logging.CRITICAL)
@@ -492,7 +447,6 @@ class MusicDownloader:
 
     def refresh_cookies_from_browser(self, browser_spec=None):
         """Export fresh cookies via an isolated worker subprocess."""
-        _wait_for_yt_proxy(timeout=60)
         ok, detail = self._run_cookie_refresh_worker(browser_spec)
         invalidate_youtube_auth_probe()
         return ok, detail
@@ -530,12 +484,6 @@ class MusicDownloader:
         err = (completed.stderr or completed.stdout or "").strip()
         return False, err[:500] or "cookie refresh worker failed"
 
-    def _apply_network(self, ydl_opts):
-        proxy = _yt_proxy_url()
-        if proxy:
-            ydl_opts["proxy"] = proxy
-        return ydl_opts
-
     def _apply_auth(self, ydl_opts, *, live_browser=False):
         """Attach cookies to yt-dlp options.
 
@@ -545,7 +493,6 @@ class MusicDownloader:
         """
         ydl_opts.setdefault("remote_components", ["ejs:github"])
         ydl_opts.setdefault("js_runtimes", _deno_js_runtimes())
-        self._apply_network(ydl_opts)
         browser = self._browser_auth_tuple()
         if browser and live_browser:
             ydl_opts["cookiesfrombrowser"] = browser
@@ -583,7 +530,7 @@ class MusicDownloader:
         if not force and now - _PROBE_CACHE["monotonic"] < _PROBE_TTL_SEC:
             return _PROBE_CACHE["ok"], _PROBE_CACHE["detail"]
 
-        use_subprocess = bool(_yt_proxy_url() or self.cookies_from_browser)
+        use_subprocess = bool(self.cookies_from_browser)
         if use_subprocess:
             ok, detail = self._probe_youtube_subprocess(thorough=force)
             _PROBE_CACHE.update(monotonic=now, ok=ok, detail=detail)
@@ -701,31 +648,15 @@ class MusicDownloader:
         return self._apply_auth(ydl_opts, live_browser=live_browser)
 
     def _youtube_subprocess_attempts(self):
-        """Proxy/auth combinations for subprocess YouTube operations."""
-        configured = _yt_proxy_url()
-        allow_direct = os.getenv("YTDLP_ALLOW_DIRECT", "").strip() == "1"
-        attempts = []
+        """Auth modes for subprocess YouTube operations (browser preferred)."""
         if self.cookies_from_browser:
-            if configured:
-                attempts.append((configured, "browser"))
-            else:
-                attempts.append(("", "browser"))
-            if allow_direct and configured:
-                attempts.append(("", "browser"))
-            return attempts
-        if configured:
-            if _cookies_look_authenticated(self.cookies_path):
-                attempts.append((configured, "cookiefile"))
-            if allow_direct:
-                attempts.append(("", "cookiefile"))
-        else:
-            if _cookies_look_authenticated(self.cookies_path):
-                attempts.append(("", "cookiefile"))
-        return attempts or [("", "browser")]
+            return ["browser"]
+        if _cookies_look_authenticated(self.cookies_path):
+            return ["cookiefile"]
+        return ["browser"]
 
     def _run_youtube_worker(self, url, *, probe=False, output_template="", quality=DEFAULT_QUALITY):
         """Invoke yt_download_worker.py in an isolated subprocess."""
-        _wait_for_yt_proxy(timeout=60)
         _ensure_youtube_session_env()
         root = os.path.dirname(os.path.abspath(__file__))
         worker = os.path.join(root, "scripts", "yt_download_worker.py")
@@ -735,8 +666,7 @@ class MusicDownloader:
         env["PATH"] = f"{deno_bin}:{venv_bin}:" + env.get("PATH", "")
 
         last_err = ""
-        for proxy, auth in self._youtube_subprocess_attempts():
-            label = proxy or "direct"
+        for auth in self._youtube_subprocess_attempts():
             retry_delays = _BROWSER_RETRY_DELAYS if auth == "browser" else ()
             max_attempts = 1 + len(retry_delays)
             for attempt in range(max_attempts):
@@ -746,7 +676,6 @@ class MusicDownloader:
                     "--url", url,
                     "--outtmpl", output_template or os.path.join(root, "downloads", "_probe.%(ext)s"),
                     "--quality", str(quality),
-                    "--proxy", proxy,
                     "--auth", auth,
                 ]
                 if probe:
@@ -764,7 +693,7 @@ class MusicDownloader:
                     if line.startswith("yt_worker ") or line == "PROBE_OK":
                         logger.info("%s", line)
                 if completed.returncode == 0:
-                    return True, f"subprocess OK (proxy={label}, auth={auth})"
+                    return True, f"subprocess OK (auth={auth})"
                 err = (completed.stderr or completed.stdout or "").strip() or (
                     f"worker exited {completed.returncode}"
                 )
@@ -1150,7 +1079,7 @@ class MusicDownloader:
                     await _report(
                         pct,
                         f"{metadata.title} — {metadata.artist}\n"
-                        f"جستجو ({source_label}) {strategy_idx + 1}/{n}...",
+                        f"در حال جستجو ({strategy_idx + 1}/{n})...",
                     )
                     try:
                         logger.info(

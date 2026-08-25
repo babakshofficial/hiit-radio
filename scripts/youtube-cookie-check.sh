@@ -25,7 +25,6 @@ echo "DBUS=$DBUS_SESSION_BUS_ADDRESS"
 echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK:-unset}"
 echo "DISPLAY=$DISPLAY"
 echo "XDG_CURRENT_DESKTOP=$XDG_CURRENT_DESKTOP"
-echo "YTDLP_PROXY=${YTDLP_PROXY:-unset}"
 echo
 
 echo "--- yt-dlp probe (formats) ---"

@@ -720,9 +720,8 @@ def search_hit_line(index, name, subtitle, kind, source):
         "playlist": "پلی‌لیست",
         "artist": "هنرمند",
     }.get(kind, kind)
-    source_fa = platform_fa(source)
     sub = f" — {subtitle}" if subtitle else ""
-    return f"{index}. [{kind_fa}/{source_fa}] {name}{sub}"
+    return f"{index}. [{kind_fa}] {name}{sub}"
 
 
 def artist_usage():

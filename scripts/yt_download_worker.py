@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Fresh-process YouTube download worker for the bot.
 
-Isolates live Chrome cookie reads from the long-lived bot process. Uses
-``YTDLP_PROXY`` when set. Invoked by MusicDownloader._run_youtube_worker.
+Isolates live Chrome cookie reads from the long-lived bot process.
+Invoked by MusicDownloader._run_youtube_worker.
 """
 from __future__ import annotations
 
@@ -16,11 +16,6 @@ def main() -> int:
     parser.add_argument("--url", default="")
     parser.add_argument("--outtmpl", default="")
     parser.add_argument("--quality", default="128")
-    parser.add_argument(
-        "--proxy",
-        default="",
-        help="SOCKS/HTTP proxy URL, or empty for direct",
-    )
     parser.add_argument(
         "--auth",
         choices=("browser", "cookiefile"),
@@ -64,9 +59,8 @@ def main() -> int:
             f"REFRESH_{'OK' if ok else 'FAIL'} {detail}",
             flush=True,
         )
-        proxy = (args.proxy or os.getenv("YTDLP_PROXY") or "").strip()
         print(
-            f"yt_worker auth=browser proxy={proxy or 'direct'} "
+            f"yt_worker auth=browser "
             f"dbus={bool(os.environ.get('DBUS_SESSION_BUS_ADDRESS'))} "
             f"keyring={bool(os.environ.get('SSH_AUTH_SOCK'))}",
             flush=True,
@@ -85,17 +79,13 @@ def main() -> int:
         opts["cookiefile"] = d.cookies_path
     else:
         opts.pop("cookiefile", None)
-    proxy = (args.proxy or "").strip()
-    if proxy:
-        opts["proxy"] = proxy
-    else:
-        opts.pop("proxy", None)
+    opts.pop("proxy", None)
 
     auth = "browser" if opts.get("cookiesfrombrowser") else (
         "cookiefile" if opts.get("cookiefile") else "none"
     )
     print(
-        f"yt_worker auth={auth} proxy={proxy or 'direct'} "
+        f"yt_worker auth={auth} "
         f"dbus={bool(os.environ.get('DBUS_SESSION_BUS_ADDRESS'))} "
         f"keyring={bool(os.environ.get('SSH_AUTH_SOCK'))}",
         flush=True,

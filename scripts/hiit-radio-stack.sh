@@ -37,21 +37,6 @@ export LANG="${LANG:-en_US.UTF-8}"
 
 export PATH="${HOME}/.deno/bin:${ROOT}/.venv/bin:/usr/local/bin:/usr/bin:/bin"
 
-# Wait for YTDLP_PROXY endpoint when configured (local SOCKS may start late).
-PROXY_WAIT_HOST="${YTDLP_PROXY_HOST:-127.0.0.1}"
-PROXY_WAIT_PORT="${YTDLP_PROXY_PORT:-1080}"
-if [[ -n "${YTDLP_PROXY:-}" ]]; then
-  for _i in $(seq 1 60); do
-    if (echo >/dev/tcp/"${PROXY_WAIT_HOST}"/"${PROXY_WAIT_PORT}") 2>/dev/null; then
-      break
-    fi
-    if [[ "${_i}" -eq 60 ]]; then
-      echo "hiit-radio-stack: WARN YTDLP_PROXY ${PROXY_WAIT_HOST}:${PROXY_WAIT_PORT} not ready after 120s" >&2
-    fi
-    sleep 2
-  done
-fi
-
 pids=()
 cleanup() {
   trap - EXIT INT TERM

@@ -84,9 +84,6 @@ import support_chat
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
-TG_PROXY_URL = os.getenv("TG_PROXY_URL", "").strip()
-# Optional in-app Telegram proxy (httpx SOCKS).
-TG_USE_INAPP_PROXY = os.getenv("TG_USE_INAPP_PROXY", "").lower() in ("1", "true", "yes")
 TG_CONNECT_TIMEOUT = float(os.getenv("TG_CONNECT_TIMEOUT", "30"))
 TG_READ_TIMEOUT = float(os.getenv("TG_READ_TIMEOUT", "300"))
 TG_WRITE_TIMEOUT = float(os.getenv("TG_WRITE_TIMEOUT", "300"))
@@ -619,7 +616,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for row in rows:
         ts = time.strftime("%m/%d %H:%M", time.localtime(row["created_at"]))
         lines.append(
-            f"• {row['title']} — {row['artist']} ({_platform_fa(row['platform'])}) [{ts}]"
+            f"• {row['title']} — {row['artist']} [{ts}]"
         )
         buttons.append([
             InlineKeyboardButton(
@@ -1237,8 +1234,6 @@ async def inline_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             continue
         desc = msg.inline_description(meta.artist)
-        if hit.source:
-            desc = f"{msg.platform_fa(hit.source)} · {desc}"
         inline_results.append(
             InlineQueryResultArticle(
                 id=f"{meta.id}_{i}",
@@ -1333,8 +1328,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 for row in rows:
                     ts = time.strftime("%m/%d %H:%M", time.localtime(row["created_at"]))
                     lines.append(
-                        f"• {row['title']} — {row['artist']} "
-                        f"({_platform_fa(row['platform'])}) [{ts}]"
+                        f"• {row['title']} — {row['artist']} [{ts}]"
                     )
                     buttons.append([
                         InlineKeyboardButton(
@@ -2350,11 +2344,10 @@ async def _cache_sweep_fallback_loop(bot):
 
 
 async def _deferred_youtube_setup(bot):
-    """Wait for YTDLP_PROXY, refresh cookies, then probe — avoids boot-time races."""
-    from downloader import _wait_for_yt_proxy, invalidate_youtube_auth_probe
+    """Refresh cookies then probe after bot is up — avoids boot-time races."""
+    from downloader import invalidate_youtube_auth_probe
 
-    await asyncio.to_thread(_wait_for_yt_proxy, 120)
-    await asyncio.sleep(5)
+    await asyncio.sleep(2)
 
     if downloader.cookies_from_browser:
         try:
@@ -2369,7 +2362,7 @@ async def _deferred_youtube_setup(bot):
         logger.info(line)
     if not yt_ok:
         logger.warning(
-            "YouTube live probe failed after deferred startup wait. "
+            "YouTube live probe failed after deferred startup. "
             "Downloads retry with backoff + cookie refresh on bot_check."
         )
     await _check_and_report_cookie_health(bot)
@@ -2847,13 +2840,6 @@ def main():
         .post_init(_on_startup)
         .post_shutdown(_on_shutdown)
     )
-    if TG_PROXY_URL and TG_USE_INAPP_PROXY:
-        application = (
-            application
-            .proxy(TG_PROXY_URL)
-            .get_updates_proxy(TG_PROXY_URL)
-        )
-        logger.info("Telegram in-app proxy enabled (TG_USE_INAPP_PROXY=1)")
     application = application.build()
 
     application.add_handler(TypeHandler(Update, vip_update_logger), group=-1)
