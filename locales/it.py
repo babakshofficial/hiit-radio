@@ -32,17 +32,8 @@ STRINGS = {
         "1. Invia il link di un brano, di un album o di una playlist\n"
         "   (Spotify · Apple Music · Deezer · YouTube · SoundCloud)\n"
         "2. Oppure scrivi il nome del brano e dell'artista\n"
-        "3. /search nome del brano — cerca su Deezer e Apple\n"
-        "4. /artist nome dell'artista — album e brani migliori\n"
-        "5. /quality — scegli la qualità MP3\n"
-        "6. Oppure inline: {bot_inline} nome del brano — in qualsiasi chat\n\n"
-        "/liked — i tuoi brani salvati\n"
-        "/top — classifica dei più popolari (day / week / all)\n"
-        "/discover — 10 consigli in base alla tua cronologia\n"
-        "/premium — abbonamento premium / acquisto del limite giornaliero\n"
-        "/invite — link per invitare un amico\n"
-        "/cancel — ferma qualsiasi operazione in corso (download, consigli, …)\n"
-        "/aboutme — info sul bot e sul suo creatore\n\n"
+        "3. Usa i pulsanti qui sotto per cerca, artisti, qualità e altro\n"
+        "4. Oppure inline: {bot_inline} nome del brano — in qualsiasi chat\n\n"
         "Limite giornaliero gratuito: 10 download "
         "(premium: {premium_daily_limit})."
     ),
@@ -56,9 +47,9 @@ STRINGS = {
         "\n"
         "Cosa sa fare?\n"
         "• Link Spotify / Apple / Deezer / YouTube / SoundCloud\n"
-        "• Ricerca per nome del brano (/search)\n"
-        "• Esplorazione degli artisti (/artist) e qualità audio (/quality)\n"
-        "• Consigli personalizzati con /discover\n"
+        "• Ricerca e artisti dai pulsanti del menu\n"
+        "• Qualità audio dal menu\n"
+        "• Consigli personalizzati da Scopri\n"
         "\n"
         "Se hai un'idea o trovi un bug, scrivimi — mi fa piacere 😊"
     ),
@@ -350,6 +341,11 @@ STRINGS = {
     "btn_favorite_remove": "💔 Rimuovi dai preferiti",
 
     # --- search ---
+    "prompt_search": "🔍 Invia il nome di un brano o artista:",
+    "prompt_artist": "🎙 Invia il nome dell'artista:",
+    "prompt_follow": "🔔 Invia il nome dell'artista da seguire:",
+    "prompt_support": "💬 Scrivi il messaggio per il supporto:",
+    "prompt_cancelled": "⏹ Input annullato.",
     "search_usage": "Uso:\n/search nome del brano o dell'artista",
     "search_empty": "Nessun risultato — prova con un'altra frase.",
     "search_header": "🔍 Risultati della ricerca per «{query}»:",
@@ -374,7 +370,7 @@ STRINGS = {
     "quality_hint_original": "Senza conversione — il file originale così com'è",
     "quality_status_kbps": "🎚 Qualità attuale: {value} kbps",
     "quality_status_original": "🎚 Qualità attuale: original (senza conversione)",
-    "quality_status_footer": "Premi uno dei pulsanti o scrivi: /quality 320",
+    "quality_status_footer": "Tocca uno dei pulsanti qui sotto.",
     "quality_set_kbps": "✅ Qualità impostata su {value} kbps.",
     "quality_set_original": "✅ Qualità impostata su original (senza conversione).",
     "quality_invalid": "Qualità non valida. Opzioni: 128 · 192 · 256 · 320 · original",
@@ -385,7 +381,7 @@ STRINGS = {
     ),
     "unfollow_success": "🔕 Non segui più «{artist}».",
     "already_following": "Segui già «{artist}».",
-    "not_following": "Non segui ancora nessun artista — inizia con /follow!",
+    "not_following": "Non segui ancora nessun artista — tocca Segui artista per iniziare!",
     "following_header": "🎙 Artisti che segui:",
     "follow_usage": "Uso:\n/follow nome dell'artista",
     "btn_follow": "🔔 Segui {artist}",
@@ -401,6 +397,8 @@ STRINGS = {
     "new_release_date_line": "\n📅 {date}",
 
     # --- main menu ---
+    "menu_follow": "🔔 Segui artista",
+    "menu_support": "💬 Supporto",
     "menu_search": "🔎 Cerca un brano",
     "menu_artist": "🎙 Esplora artista",
     "menu_quality": "🎛 Qualità audio",

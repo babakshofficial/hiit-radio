@@ -31,18 +31,9 @@ STRINGS = {
         "How do I use this?\n\n"
         "1. Send a track, album or playlist link\n"
         "   (Spotify · Apple Music · Deezer · YouTube · SoundCloud)\n"
-        "2. Or type the song and artist name\n"
-        "3. /search song name — search Deezer and Apple\n"
-        "4. /artist artist name — albums and top tracks\n"
-        "5. /quality — pick your MP3 quality\n"
-        "6. Or inline: {bot_inline} song name — in any chat\n\n"
-        "/liked — your saved tracks\n"
-        "/top — most popular chart (day / week / all)\n"
-        "/discover — 10 recommendations based on your history\n"
-        "/premium — premium subscription / buy a daily quota\n"
-        "/invite — friend invite link\n"
-        "/cancel — stop any running job (download, recommendation, …)\n"
-        "/aboutme — about the bot and its creator\n\n"
+        "2. Or type a song and artist name\n"
+        "3. Use the buttons below for search, artists, quality, and more\n"
+        "4. Or inline: {bot_inline} song name — in any chat\n\n"
         "Free daily limit: 10 downloads (premium: {premium_daily_limit})."
     ),
     "aboutme_text": (
@@ -54,9 +45,9 @@ STRINGS = {
         "\n"
         "What can it do?\n"
         "• Spotify / Apple / Deezer / YouTube / SoundCloud links\n"
-        "• Search by song name (/search)\n"
-        "• Browse artists (/artist) and set audio quality (/quality)\n"
-        "• Personal recommendations with /discover\n"
+        "• Search and browse artists from the menu buttons\n"
+        "• Set audio quality from the menu\n"
+        "• Personal recommendations from Discover\n"
         "\n"
         "Got an idea or found a bug? Send me a message — I'd love to hear it 😊"
     ),
@@ -318,6 +309,11 @@ STRINGS = {
     "btn_favorite_remove": "💔 Remove favorite",
 
     # --- search ---
+    "prompt_search": "🔍 Send a song or artist name to search:",
+    "prompt_artist": "🎙 Send the artist name:",
+    "prompt_follow": "🔔 Send the artist name to follow:",
+    "prompt_support": "💬 Write your message for support:",
+    "prompt_cancelled": "⏹ Input cancelled.",
     "search_usage": "Usage:\n/search song or artist name",
     "search_empty": "Nothing found — try a different phrase.",
     "search_header": "🔍 Search results for “{query}”:",
@@ -342,7 +338,7 @@ STRINGS = {
     "quality_hint_original": "No conversion — the source file as is",
     "quality_status_kbps": "🎚 Current quality: {value} kbps",
     "quality_status_original": "🎚 Current quality: original (no conversion)",
-    "quality_status_footer": "Tap one of the buttons or type: /quality 320",
+    "quality_status_footer": "Tap one of the buttons below.",
     "quality_set_kbps": "✅ Quality set to {value} kbps.",
     "quality_set_original": "✅ Quality set to original (no conversion).",
     "quality_invalid": "Invalid quality. Options: 128 · 192 · 256 · 320 · original",
@@ -351,7 +347,7 @@ STRINGS = {
     "follow_success": "✅ Now following “{artist}” — I'll let you know when a new album drops!",
     "unfollow_success": "🔕 Unfollowed “{artist}”.",
     "already_following": "You already follow “{artist}”.",
-    "not_following": "You aren't following any artists yet — start with /follow!",
+    "not_following": "You aren't following any artists yet — tap Follow artist to start!",
     "following_header": "🎙 Artists you follow:",
     "follow_usage": "Usage:\n/follow artist name",
     "btn_follow": "🔔 Follow {artist}",
@@ -367,6 +363,8 @@ STRINGS = {
     "new_release_date_line": "\n📅 {date}",
 
     # --- main menu ---
+    "menu_follow": "🔔 Follow artist",
+    "menu_support": "💬 Support",
     "menu_search": "🔎 Search a track",
     "menu_artist": "🎙 Browse artist",
     "menu_quality": "🎛 Audio quality",

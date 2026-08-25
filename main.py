@@ -393,6 +393,20 @@ async def apply_user_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     resolve_lang(update.effective_user)
 
 
+async def clear_await_on_slash(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Slash commands replace any pending prompt (except /cancel, which handles it)."""
+    message = update.effective_message
+    if not message or not message.text:
+        return
+    text = message.text.strip()
+    if not text.startswith("/"):
+        return
+    cmd = text.split()[0].split("@", 1)[0].lower()
+    if cmd == "/cancel":
+        return
+    clear_await_input(context)
+
+
 async def _deny_quota(message, bot, user):
     allowed, used, limit, tier = entitlements.check_quota(
         user_manager.database, user.id,
@@ -407,11 +421,76 @@ async def _deny_quota(message, bot, user):
     return True
 
 
+_AWAIT_INPUT_TTL_SEC = 10 * 60
+_AWAIT_PROMPT_KINDS = {
+    "search": "prompt_search",
+    "artist": "prompt_artist",
+    "follow": "prompt_follow",
+    "support": "prompt_support",
+}
+
+
+def clear_await_input(context) -> bool:
+    """Clear pending input intent. Returns True if something was cleared."""
+    if not context.user_data.pop("await_input", None):
+        return False
+    return True
+
+
+def set_await_input(context, kind: str) -> None:
+    context.user_data["await_input"] = {"kind": kind, "ts": time.time()}
+
+
+def peek_await_input(context):
+    pending = context.user_data.get("await_input")
+    if not pending:
+        return None
+    if time.time() - float(pending.get("ts") or 0) > _AWAIT_INPUT_TTL_SEC:
+        clear_await_input(context)
+        return None
+    return pending
+
+
+async def prompt_for_input(message, context, kind: str, *, reply_markup=None):
+    """Ask the user for the next message as input for ``kind``."""
+    key = _AWAIT_PROMPT_KINDS.get(kind)
+    if not key:
+        return
+    set_await_input(context, kind)
+    await message.reply_text(
+        msg.t(key),
+        reply_markup=reply_markup if reply_markup is not None else _back_button(),
+    )
+
+
+async def consume_await_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """If awaiting input, dispatch the current message text and return True."""
+    pending = peek_await_input(context)
+    if not pending:
+        return False
+    kind = pending.get("kind")
+    text = (update.message.text or "").strip()
+    clear_await_input(context)
+    context.args = text.split() if text else []
+    if kind == "search":
+        await search_command(update, context)
+    elif kind == "artist":
+        await artist_command(update, context)
+    elif kind == "follow":
+        await follow_command(update, context)
+    elif kind == "support":
+        await support_command(update, context)
+    else:
+        return False
+    return True
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     inviter = referrals.parse_start_payload(context.args)
     existed = user_manager.database.user_exists(user.id) if user else True
     await _touch_user(update)
+    clear_await_input(context)
     if inviter and user and not existed:
         status = referrals.record_pending(
             user_manager.database, inviter, user.id, is_new_user=True,
@@ -445,8 +524,8 @@ def _start_menu_keyboard():
             InlineKeyboardButton(msg.t("menu_artist"), callback_data="menu:artist"),
         ],
         [
+            InlineKeyboardButton(msg.t("menu_follow"), callback_data="menu:follow"),
             InlineKeyboardButton(msg.t("menu_quality"), callback_data="menu:quality"),
-            InlineKeyboardButton(msg.t("menu_help"), callback_data="menu:help"),
         ],
         [
             InlineKeyboardButton(msg.t("menu_history"), callback_data="menu:history"),
@@ -462,10 +541,14 @@ def _start_menu_keyboard():
         ],
         [
             InlineKeyboardButton(msg.t("menu_premium"), callback_data="menu:premium"),
-            InlineKeyboardButton(msg.t("menu_aboutme"), callback_data="menu:aboutme"),
+            InlineKeyboardButton(msg.t("menu_support"), callback_data="menu:support"),
         ],
         [
+            InlineKeyboardButton(msg.t("menu_aboutme"), callback_data="menu:aboutme"),
             InlineKeyboardButton(msg.t("menu_lang"), callback_data="menu:lang"),
+        ],
+        [
+            InlineKeyboardButton(msg.t("menu_help"), callback_data="menu:help"),
             InlineKeyboardButton(msg.t("menu_cancel"), callback_data="menu:cancel"),
         ],
     ])
@@ -603,7 +686,10 @@ async def topup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_access(update, context):
         return
-    await update.message.reply_text(msg.help_text())
+    clear_await_input(context)
+    await update.message.reply_text(
+        msg.help_text(), reply_markup=_start_menu_keyboard(),
+    )
 
 
 async def aboutme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1000,9 +1086,13 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cleared_await = clear_await_input(context)
     cancelled = jobs.cancel_all(context)
     if not cancelled:
-        await update.message.reply_text(msg.cancel_no_job())
+        if cleared_await:
+            await update.message.reply_text(msg.t("prompt_cancelled"))
+        else:
+            await update.message.reply_text(msg.cancel_no_job())
         return
     kinds = ", ".join(sorted({j.get("kind") or "work" for j in cancelled}))
     await log_system(
@@ -1127,8 +1217,9 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     query = " ".join(context.args or []).strip()
     if len(query) < 2:
-        await update.message.reply_text(msg.search_usage())
+        await prompt_for_input(update.effective_message, context, "search")
         return
+    clear_await_input(context)
     status = await update.message.reply_text(msg.searching())
     hits = await catalog.search_all(query, limit=10)
     await status.delete()
@@ -1175,8 +1266,9 @@ async def artist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     query = " ".join(context.args or []).strip()
     if len(query) < 2:
-        await update.message.reply_text(msg.artist_usage())
+        await prompt_for_input(update.effective_message, context, "artist")
         return
+    clear_await_input(context)
     status = await update.message.reply_text(msg.searching())
     hits = await catalog.search_all(query, limit=8)
     artists = [h for h in hits if h.kind == "artist"]
@@ -1204,8 +1296,9 @@ async def follow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     query = " ".join(context.args or []).strip()
     if len(query) < 2:
-        await update.message.reply_text(msg.follow_usage())
+        await prompt_for_input(update.effective_message, context, "follow")
         return
+    clear_await_input(context)
     status = await update.message.reply_text(msg.searching())
     hits = await catalog.search_all(query, limit=8)
     artists = [h for h in hits if h.kind == "artist"]
@@ -1369,6 +1462,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action = data.split(":", 1)[1]
         user = update.effective_user
         chat_id = query.message.chat_id
+        had_await = bool(peek_await_input(context))
+        clear_await_input(context)
 
         if action == "back":
             try:
@@ -1388,12 +1483,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
         if action == "search":
+            set_await_input(context, "search")
             await context.bot.send_message(
-                chat_id, msg.search_usage(), reply_markup=_back_button(),
+                chat_id, msg.t("prompt_search"), reply_markup=_back_button(),
             )
         elif action == "artist":
+            set_await_input(context, "artist")
             await context.bot.send_message(
-                chat_id, msg.artist_usage(), reply_markup=_back_button(),
+                chat_id, msg.t("prompt_artist"), reply_markup=_back_button(),
+            )
+        elif action == "follow":
+            set_await_input(context, "follow")
+            await context.bot.send_message(
+                chat_id, msg.t("prompt_follow"), reply_markup=_back_button(),
+            )
+        elif action == "support":
+            set_await_input(context, "support")
+            await context.bot.send_message(
+                chat_id, msg.t("prompt_support"), reply_markup=_back_button(),
             )
         elif action == "quality":
             current = user_manager.get_audio_quality(user.id)
@@ -1413,7 +1520,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     for q in ("256", "320")
                 ],
                 [InlineKeyboardButton(
-                    f"{'✅ ' if current == 'original' else '🔘 '}original (بدون تبدیل)",
+                    f"{'✅ ' if current == 'original' else '🔘 '}original",
                     callback_data="qual:original",
                 )],
                 _back_row(),
@@ -1424,7 +1531,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         elif action == "help":
             await context.bot.send_message(
-                chat_id, msg.help_text(), reply_markup=_back_button(),
+                chat_id, msg.help_text(), reply_markup=_start_menu_keyboard(),
             )
         elif action == "history":
             rows = user_manager.get_user_history(user.id, limit=10)
@@ -1531,7 +1638,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         elif action == "cancel":
             cancelled = jobs.cancel_all(context)
-            text = msg.cancel_ok(len(cancelled)) if cancelled else msg.cancel_no_job()
+            if cancelled:
+                text = msg.cancel_ok(len(cancelled))
+            elif had_await:
+                text = msg.t("prompt_cancelled")
+            else:
+                text = msg.cancel_no_job()
             await context.bot.send_message(
                 chat_id, text, reply_markup=_back_button(),
             )
@@ -2227,8 +2339,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
 
+    # Music / collection URLs always download (clear any pending prompt).
+    tl = text.lower()
+    is_collection = await TrackMetadata.is_collection_url(text)
+    looks_like_url = (
+        is_music_url(text)
+        or "http://" in tl
+        or "https://" in tl
+        or "youtube.com" in tl
+        or "youtu.be" in tl
+        or "soundcloud.com" in tl
+    )
+    if is_collection or looks_like_url:
+        clear_await_input(context)
+    elif await consume_await_input(update, context):
+        return
+
     # Collection URL?
-    if await TrackMetadata.is_collection_url(text):
+    if is_collection:
         if await _reject_if_busy(update.message, context):
             return
         name, tracks = await TrackMetadata.create_collection(text, _ydl_opts_factory)
@@ -3017,9 +3145,10 @@ async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not body:
-        await update.message.reply_text(msg.support_usage())
+        await prompt_for_input(update.effective_message, context, "support")
         return
 
+    clear_await_input(context)
     ok, text = await support_chat.forward_user_support_message(
         context.bot, user_manager.database, user.id, body,
     )
@@ -3197,6 +3326,7 @@ def main():
     application = application.build()
 
     application.add_handler(TypeHandler(Update, apply_user_lang), group=-2)
+    application.add_handler(TypeHandler(Update, clear_await_on_slash), group=-2)
     application.add_handler(TypeHandler(Update, vip_update_logger), group=-1)
 
     application.add_handler(CommandHandler("start", start))
