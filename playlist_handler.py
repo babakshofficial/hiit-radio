@@ -186,7 +186,17 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
                 favorited = user_manager.is_favorite(
                     user_id, content_key(track.title, track.artist, ""),
                 )
-                kb = recommendation_keyboard(track.artist, track.title, favorited=favorited)
+                kb = recommendation_keyboard(
+                    track.artist,
+                    track.title,
+                    favorited=favorited,
+                    url=getattr(track, "url", None),
+                    query=getattr(track, "url", None)
+                    or f"{track.title or ''} {track.artist or ''}".strip(),
+                    platform=platform,
+                    album=getattr(track, "album", None),
+                    search_query=getattr(track, "search_query", None),
+                )
                 send_kwargs = dict(
                     title=track.title,
                     performer=track.artist,

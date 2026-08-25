@@ -305,6 +305,9 @@ STRINGS = {
     "btn_similar": "آهنگ‌های مشابه",
     "btn_lyrics": "متن آهنگ",
     "btn_artwork": "🖼 کاور آهنگ",
+    "btn_report_track": "⚠️ گزارش مشکل",
+    "track_report_sent": "✅ ممنون — گزارشت به پشتیبان ارسال شد.",
+    "track_report_user_message": "کاربر این آهنگ را گزارش کرد (اشتباه / عدم تطابق با لینک / مشکل دیگر).",
     "btn_favorite_add": "❤️ علاقه‌مندی",
     "btn_favorite_remove": "💔 حذف علاقه‌مندی",
 

@@ -305,6 +305,9 @@ STRINGS = {
     "btn_similar": "Similar tracks",
     "btn_lyrics": "Lyrics",
     "btn_artwork": "🖼 Artwork",
+    "btn_report_track": "⚠️ Report issue",
+    "track_report_sent": "✅ Thanks — your report was sent to support.",
+    "track_report_user_message": "User reported this track (wrong song / mismatch / other issue).",
     "btn_favorite_add": "❤️ Favorite",
     "btn_favorite_remove": "💔 Remove favorite",
 

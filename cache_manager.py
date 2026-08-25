@@ -92,6 +92,46 @@ class CacheManager:
                 pass
         logger.info(f"Cache invalidated: {title} — {artist}")
 
+    def invalidate_track(self, title, artist):
+        """Drop every cached quality/source for this title+artist (wrong-track reports)."""
+        rows = self.db.delete_cache_entries_by_title_artist(title, artist)
+        removed = 0
+        for row in rows:
+            path = row.get("path")
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                    removed += 1
+                except OSError:
+                    pass
+        # Clear keys that may lack title/artist columns (older rows / all qualities).
+        qualities = ("128", "192", "256", "320", "original")
+        for label in ("apple", "spotify", "deezer", "youtube", "soundcloud", "search", ""):
+            for quality in qualities:
+                src = f"{label}:{quality}" if label else quality
+                key = content_key(title, artist, src)
+                row = self.db.delete_cache_entry(key)
+                if row and row.get("path") and os.path.exists(row["path"]):
+                    try:
+                        os.remove(row["path"])
+                        removed += 1
+                    except OSError:
+                        pass
+            if label:
+                key = content_key(title, artist, label)
+                row = self.db.delete_cache_entry(key)
+                if row and row.get("path") and os.path.exists(row["path"]):
+                    try:
+                        os.remove(row["path"])
+                        removed += 1
+                    except OSError:
+                        pass
+        logger.info(
+            "Cache invalidated track: %s — %s (%d db rows, %d files)",
+            title, artist, len(rows), removed,
+        )
+        return len(rows)
+
     def clear_all(self):
         """Delete every cache entry and file (used after tagging/strategy changes)."""
         rows = self.db.delete_all_cache_entries()

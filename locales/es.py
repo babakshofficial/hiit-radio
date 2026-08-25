@@ -333,6 +333,9 @@ STRINGS = {
     "btn_similar": "Canciones parecidas",
     "btn_lyrics": "Letra",
     "btn_artwork": "🖼 Portada",
+    "btn_report_track": "⚠️ Informar problema",
+    "track_report_sent": "✅ Gracias — tu informe se envió al soporte.",
+    "track_report_user_message": "El usuario informó esta canción (pista incorrecta / no coincide con el enlace / otro problema).",
     "btn_favorite_add": "❤️ Favorito",
     "btn_favorite_remove": "💔 Quitar de favoritos",
 

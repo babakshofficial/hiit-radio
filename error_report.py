@@ -52,7 +52,7 @@ def create_context(db, user, *, kind, code, user_message, **context):
 
 
 def _default_retry_payload(kind, ctx):
-    if kind == "payment":
+    if kind in ("payment", "mismatch"):
         return None
     if kind == "download":
         payload = {}
@@ -92,7 +92,7 @@ def _default_retry_payload(kind, ctx):
 
 def kind_supports_retry(kind, ctx=None):
     ctx = ctx or {}
-    if kind == "payment":
+    if kind in ("payment", "mismatch"):
         return False
     retry = ctx.get("retry")
     if retry is None:
@@ -159,9 +159,11 @@ def parse_context(row):
 
 def format_admin_summary(row):
     ctx = parse_context(row)
+    kind = row.get("error_kind", "?")
+    header = "گزارش عدم تطابق آهنگ" if kind == "mismatch" else "گزارش خطا از کاربر"
     lines = [
-        "گزارش خطا از کاربر",
-        f"#{row.get('id')} — {row.get('error_kind', '?')} ({row.get('error_code') or '—'})",
+        header,
+        f"#{row.get('id')} — {kind} ({row.get('error_code') or '—'})",
     ]
     created = _ts(row.get("created_at"))
     submitted = _ts(row.get("submitted_at"))
@@ -186,6 +188,8 @@ def format_admin_summary(row):
         if album:
             line += f" (آلبوم: {album})"
         lines.append(line)
+    if ctx.get("url") and ctx.get("url") != ctx.get("query"):
+        lines.append(f"لینک منبع: {str(ctx['url'])[:400]}")
     if ctx.get("query"):
         lines.append(f"ورودی کاربر: {str(ctx['query'])[:400]}")
     if ctx.get("search_query"):

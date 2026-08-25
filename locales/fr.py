@@ -338,6 +338,9 @@ STRINGS = {
     "btn_similar": "Titres similaires",
     "btn_lyrics": "Paroles",
     "btn_artwork": "🖼 Pochette",
+    "btn_report_track": "⚠️ Signaler un problème",
+    "track_report_sent": "✅ Merci — ton signalement a été envoyé au support.",
+    "track_report_user_message": "L'utilisateur a signalé ce titre (mauvais morceau / ne correspond pas au lien / autre problème).",
     "btn_favorite_add": "❤️ Favori",
     "btn_favorite_remove": "💔 Retirer des favoris",
 

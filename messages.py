@@ -585,6 +585,18 @@ def error_report_rate_limited():
     return t("error_report_rate_limited")
 
 
+def track_report_button():
+    return t("btn_report_track")
+
+
+def track_report_sent():
+    return t("track_report_sent")
+
+
+def track_report_user_message():
+    return t("track_report_user_message")
+
+
 def support_admin_prompt(report_id, user_id):
     return t("support_admin_prompt", report_id=report_id, user_id=user_id)
 

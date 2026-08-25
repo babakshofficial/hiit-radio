@@ -656,6 +656,23 @@ class Database:
             conn.execute("DELETE FROM cache_files WHERE content_key=?", (content_key,))
             return dict(row) if row else None
 
+    def delete_cache_entries_by_title_artist(self, title, artist):
+        """Remove all quality/source variants for a title+artist pair."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT content_key, path FROM cache_files
+                   WHERE lower(coalesce(title, '')) = lower(?)
+                     AND lower(coalesce(artist, '')) = lower(?)""",
+                ((title or "").strip(), (artist or "").strip()),
+            ).fetchall()
+            conn.execute(
+                """DELETE FROM cache_files
+                   WHERE lower(coalesce(title, '')) = lower(?)
+                     AND lower(coalesce(artist, '')) = lower(?)""",
+                ((title or "").strip(), (artist or "").strip()),
+            )
+            return [dict(r) for r in rows]
+
     def delete_all_cache_entries(self):
         with self._conn() as conn:
             rows = conn.execute(
@@ -1542,10 +1559,20 @@ class Database:
     def get_followers(self, deezer_artist_id):
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT user_id FROM followed_artists WHERE deezer_artist_id=?",
+                """SELECT user_id, created_at FROM followed_artists
+                   WHERE deezer_artist_id=?""",
                 (deezer_artist_id,),
             ).fetchall()
-            return [r["user_id"] for r in rows]
+            return [(r["user_id"], r["created_at"]) for r in rows]
+
+    def has_release_baseline(self, deezer_artist_id):
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT 1 FROM artist_releases
+                   WHERE deezer_artist_id=? LIMIT 1""",
+                (deezer_artist_id,),
+            ).fetchone()
+            return bool(row)
 
     def is_release_notified(self, deezer_artist_id, deezer_album_id):
         with self._conn() as conn:

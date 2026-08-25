@@ -61,7 +61,12 @@ import admin_logger
 from progress import ProgressReporter
 from download_orchestrator import DownloadOrchestrator
 from playlist_handler import process_playlist
-from recommendations import recommendation_keyboard, resolve_lyrics_ref, resolve_track_ref
+from recommendations import (
+    recommendation_keyboard,
+    resolve_lyrics_ref,
+    resolve_track_ref,
+    resolve_track_ref_full,
+)
 from lyrics_service import fetch_lyrics
 from llm_service import (
     is_configured as llm_configured,
@@ -129,11 +134,29 @@ def _favorite_content_key(title, artist):
     return content_key(title, artist, "")
 
 
-def _track_keyboard(user_id, title, artist):
+def _track_keyboard(user_id, title, artist, *, metadata=None, platform=None, query=None):
     favorited = user_manager.is_favorite(
         user_id, _favorite_content_key(title, artist),
     )
-    return recommendation_keyboard(artist, title, favorited=favorited)
+    url = None
+    album = None
+    search_query = None
+    if metadata is not None:
+        url = getattr(metadata, "url", None) or getattr(metadata, "source_url", None)
+        album = getattr(metadata, "album", None)
+        search_query = getattr(metadata, "search_query", None)
+        if query is None:
+            query = url or f"{title or ''} {artist or ''}".strip() or None
+    return recommendation_keyboard(
+        artist,
+        title,
+        favorited=favorited,
+        url=url,
+        query=query,
+        platform=platform,
+        album=album,
+        search_query=search_query,
+    )
 
 
 def _start_job(context, kind):
@@ -633,7 +656,9 @@ async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await _touch_user(update)
     prog = referrals.progress(user_manager.database, update.effective_user.id)
-    await update.message.reply_text(msg.invite_status(prog))
+    await update.effective_message.reply_text(
+        msg.invite_status(prog), reply_markup=_back_button(),
+    )
 
 
 async def grant_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -801,9 +826,10 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_access(update, context):
         return
     await _touch_user(update)
+    message = update.effective_message
     rows = user_manager.get_user_history(update.effective_user.id, limit=10)
     if not rows:
-        await update.message.reply_text(msg.history_empty())
+        await message.reply_text(msg.history_empty(), reply_markup=_back_button())
         return
     lines = [msg.history_header()]
     buttons = []
@@ -818,7 +844,8 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_data=f"redownload:{row['id']}",
             )
         ])
-    await update.message.reply_text(
+    buttons.append(_back_row())
+    await message.reply_text(
         "\n".join(lines),
         reply_markup=InlineKeyboardMarkup(buttons),
     )
@@ -828,9 +855,10 @@ async def liked_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_access(update, context):
         return
     await _touch_user(update)
+    message = update.effective_message
     rows = user_manager.list_favorites(update.effective_user.id, limit=30)
     if not rows:
-        await update.message.reply_text(msg.liked_empty())
+        await message.reply_text(msg.liked_empty(), reply_markup=_back_button())
         return
     lines = [msg.liked_header()]
     buttons = []
@@ -843,7 +871,8 @@ async def liked_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_data=f"liked:{row['id']}",
             )
         ])
-    await update.message.reply_text(
+    buttons.append(_back_row())
+    await message.reply_text(
         "\n".join(lines),
         reply_markup=InlineKeyboardMarkup(buttons),
     )
@@ -853,6 +882,7 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_access(update, context):
         return
     await _touch_user(update)
+    message = update.effective_message
     period = "week"
     if context.args:
         arg = (context.args[0] or "").strip().lower()
@@ -860,7 +890,7 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             period = arg
     songs = user_manager.database.get_top_songs(period=period, limit=10)
     if not songs:
-        await update.message.reply_text(msg.top_empty())
+        await message.reply_text(msg.top_empty(), reply_markup=_back_button())
         return
     lines = [msg.top_header(msg.top_period_label(period))]
     buttons = []
@@ -882,7 +912,8 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_data=f"toppick:{i}",
             )
         ])
-    await update.message.reply_text(
+    buttons.append(_back_row())
+    await message.reply_text(
         "\n".join(lines),
         reply_markup=InlineKeyboardMarkup(buttons),
     )
@@ -1204,6 +1235,7 @@ async def _show_artist_page(message, artist_id, context, edit=False, user_id=Non
                     callback_data=f"artistpick:album:{j}",
                 )
             ])
+    buttons.append(_back_row())
     text = "\n".join(lines)
     markup = InlineKeyboardMarkup(buttons) if buttons else None
     if edit:
@@ -1274,10 +1306,15 @@ async def artist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     artists = [h for h in hits if h.kind == "artist"]
     await status.delete()
     if not artists:
-        await update.message.reply_text(msg.artist_not_found(query))
+        await update.message.reply_text(
+            msg.artist_not_found(query), reply_markup=_back_button(),
+        )
         return
     if len(artists) == 1:
-        await _show_artist_page(update.message, artists[0].id, context, user_id=update.effective_user.id)
+        await _show_artist_page(
+            update.effective_message, artists[0].id, context,
+            user_id=update.effective_user.id,
+        )
         return
     lines = [msg.search_header(query)]
     buttons = []
@@ -1288,6 +1325,7 @@ async def artist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons.append([
             InlineKeyboardButton(hit.name[:30], callback_data=f"artistpick:profile:{i}")
         ])
+    buttons.append(_back_row())
     await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
 
 
@@ -1299,12 +1337,13 @@ async def follow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await prompt_for_input(update.effective_message, context, "follow")
         return
     clear_await_input(context)
-    status = await update.message.reply_text(msg.searching())
+    message = update.effective_message
+    status = await message.reply_text(msg.searching())
     hits = await catalog.search_all(query, limit=8)
     artists = [h for h in hits if h.kind == "artist"]
     await status.delete()
     if not artists:
-        await update.message.reply_text(msg.artist_not_found(query))
+        await message.reply_text(msg.artist_not_found(query), reply_markup=_back_button())
         return
     if len(artists) == 1:
         a = artists[0]
@@ -1312,9 +1351,14 @@ async def follow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.effective_user.id, a.name, a.id, a.cover_url,
         )
         if ok:
-            await update.message.reply_text(msg.follow_success(a.name))
+            asyncio.create_task(_seed_follow_releases(a.id))
+            await message.reply_text(
+                msg.follow_success(a.name), reply_markup=_back_button(),
+            )
         else:
-            await update.message.reply_text(msg.already_following(a.name))
+            await message.reply_text(
+                msg.already_following(a.name), reply_markup=_back_button(),
+            )
         return
     lines = [msg.search_header(query)]
     buttons = []
@@ -1327,7 +1371,8 @@ async def follow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 callback_data=f"follow:{hit.id}:{safe_name}",
             )
         ])
-    await update.message.reply_text(
+    buttons.append(_back_row())
+    await message.reply_text(
         "\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons),
     )
 
@@ -1653,7 +1698,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action = data.split(":", 1)[1]
         if action == "invite":
             prog = referrals.progress(user_manager.database, update.effective_user.id)
-            await query.message.reply_text(msg.invite_status(prog))
+            await query.message.reply_text(
+                msg.invite_status(prog), reply_markup=_back_button(),
+            )
             return
         try:
             await payments.send_stars_invoice(
@@ -1708,12 +1755,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title, artist = ref
         key = _favorite_content_key(title, artist)
         user_id = update.effective_user.id
+        full = resolve_track_ref_full(token) or {}
         if action == "add":
             user_manager.add_favorite(user_id, title, artist, content_key=key)
             await query.message.reply_text(msg.favorite_added(title))
             try:
                 await query.edit_message_reply_markup(
-                    reply_markup=_track_keyboard(user_id, title, artist)
+                    reply_markup=_track_keyboard(
+                        user_id, title, artist,
+                        platform=full.get("platform"),
+                        query=full.get("query") or full.get("url"),
+                    )
                 )
             except Exception:
                 pass
@@ -1722,10 +1774,59 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(msg.favorite_removed(title))
             try:
                 await query.edit_message_reply_markup(
-                    reply_markup=_track_keyboard(user_id, title, artist)
+                    reply_markup=_track_keyboard(
+                        user_id, title, artist,
+                        platform=full.get("platform"),
+                        query=full.get("query") or full.get("url"),
+                    )
                 )
             except Exception:
                 pass
+        return
+
+    if data.startswith("trkrep:"):
+        token = data.split(":", 1)[1]
+        full = resolve_track_ref_full(token)
+        if not full or not (full.get("title") or full.get("artist")):
+            await query.answer(msg.pick_expired_short(), show_alert=True)
+            return
+        user = update.effective_user
+        reported = context.user_data.setdefault("track_reports", set())
+        if token in reported:
+            await query.answer(msg.error_report_already_sent(), show_alert=True)
+            return
+        rid = error_report.create_context(
+            user_manager.database,
+            user,
+            kind="mismatch",
+            code="wrong_track",
+            user_message=msg.track_report_user_message(),
+            title=full.get("title"),
+            artist=full.get("artist"),
+            album=full.get("album"),
+            query=full.get("query") or full.get("url"),
+            search_query=full.get("search_query"),
+            platform=full.get("platform"),
+            url=full.get("url"),
+        )
+        status, _row = await error_report.submit_and_notify(
+            context.bot, user_manager.database, rid, user,
+        )
+        if status == "rate_limited":
+            await query.answer(msg.error_report_rate_limited(), show_alert=True)
+            return
+        if status == "already":
+            await query.answer(msg.error_report_already_sent(), show_alert=True)
+            return
+        if status in ("forbidden", "not_found"):
+            await query.answer()
+            return
+        try:
+            orchestrator.cache.invalidate_track(full.get("title"), full.get("artist"))
+        except Exception:
+            logger.exception("Failed to invalidate cache after track mismatch report")
+        reported.add(token)
+        await query.answer(msg.track_report_sent(), show_alert=True)
         return
 
     if data.startswith("reco:artist:"):
@@ -1980,9 +2081,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             update.effective_user.id, artist_name, deezer_id,
         )
         if ok:
-            await query.message.reply_text(msg.follow_success(artist_name))
+            asyncio.create_task(_seed_follow_releases(deezer_id))
+            await query.message.reply_text(
+                msg.follow_success(artist_name), reply_markup=_back_button(),
+            )
         else:
-            await query.message.reply_text(msg.already_following(artist_name))
+            await query.message.reply_text(
+                msg.already_following(artist_name), reply_markup=_back_button(),
+            )
         return
 
     if data.startswith("unfollow:"):
@@ -1995,9 +2101,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
         removed = user_manager.unfollow_artist(update.effective_user.id, deezer_id)
         if removed:
-            await query.message.reply_text(msg.unfollow_success(name or "هنرمند"))
+            await query.message.reply_text(
+                msg.unfollow_success(name or "هنرمند"), reply_markup=_back_button(),
+            )
         else:
-            await query.message.reply_text(msg.not_following())
+            await query.message.reply_text(
+                msg.not_following(), reply_markup=_back_button(),
+            )
         return
 
     if data.startswith("newrel:"):
@@ -2296,7 +2406,10 @@ async def _download_and_send(message, user, metadata, context):
             )
             return
 
-        kb = _track_keyboard(user_id, metadata.title, metadata.artist)
+        kb = _track_keyboard(
+            user_id, metadata.title, metadata.artist,
+            metadata=metadata, platform=platform,
+        )
         await reporter.update(95, "در حال ارسال به تلگرام...", force=True)
         sent = await _send_track_audio(
             message, metadata, file_path, platform, reply_markup=kb,
@@ -2428,7 +2541,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_file_id = bool(platform and str(platform).endswith("_cache_id"))
         if file_path and (is_file_id or os.path.exists(file_path)):
             try:
-                kb = _track_keyboard(user_id, metadata.title, metadata.artist)
+                kb = _track_keyboard(
+                    user_id, metadata.title, metadata.artist,
+                    metadata=metadata, platform=platform,
+                )
                 await reporter.update(95, "در حال ارسال به تلگرام...", force=True)
                 sent = await _send_track_audio(
                     update.message, metadata, file_path, platform, reply_markup=kb,
@@ -2577,6 +2693,15 @@ async def _cookie_health_job(context: ContextTypes.DEFAULT_TYPE):
         logger.debug("Skipping cookie health check — download in progress")
         return
     await _check_and_report_cookie_health(context.bot)
+
+
+async def _seed_follow_releases(artist_id):
+    """Baseline current albums so follow doesn't spam old catalog entries."""
+    try:
+        from release_checker import seed_artist_releases
+        await seed_artist_releases(user_manager.database, str(artist_id))
+    except Exception as exc:
+        logger.warning("Follow release seed failed for %s: %s", artist_id, exc)
 
 
 async def _release_check_job(context: ContextTypes.DEFAULT_TYPE):
@@ -3152,7 +3277,7 @@ async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok, text = await support_chat.forward_user_support_message(
         context.bot, user_manager.database, user.id, body,
     )
-    await update.message.reply_text(text)
+    await update.effective_message.reply_text(text, reply_markup=_back_button())
 
 
 def _support_message_body(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:

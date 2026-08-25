@@ -201,7 +201,56 @@ _NOISE_PATTERNS = (
     r'\blive\b', r'\bcover\b', r'\bkaraoke\b', r'\bsped\s*up\b', r'\bslowed\b',
     r'\bnightcore\b', r'#shorts\b', r'\breaction\b', r'\binstrumental\b',
     r'\bremake\b', r'\bmashup\b', r'\b8d\s*audio\b',
+    r'\bremix(?:es|ed)?\b', r'\bbootleg\b', r'\brework\b', r'\bvip\b',
 )
+
+_VERSION_GROUP_HINT = re.compile(
+    r'\b(?:remix(?:es|ed)?|rework|edit|bootleg|vip|version|extended|'
+    r'club\s*mix|radio\s*edit|dub(?:\s*mix)?|acoustic|instrumental)\b',
+    re.I,
+)
+_VERSION_SKIP_WORDS = frozenset({
+    "the", "a", "an", "and", "of", "by", "feat", "ft", "featuring",
+    "official", "audio", "video", "lyrics", "music", "from", "with",
+})
+
+
+def _required_version_tokens(title):
+    """Significant words from remix/edit/version brackets that a candidate must include.
+
+    Example: ``ghost (feat. HUMAN) [Alex Wann Remix]`` → ``{alex, wann, remix}``.
+    Without this, an original (non-remix) upload can score high on shared title/artist
+    tokens and pass coverage gates.
+    """
+    required = set()
+    for m in re.finditer(r'[\(\[]([^\)\]]+)[\)\]]', title or ""):
+        group = m.group(1).strip()
+        if not _VERSION_GROUP_HINT.search(group):
+            continue
+        for w in re.findall(r"[a-z0-9]+", group.lower()):
+            if len(w) < 3 or w in _VERSION_SKIP_WORDS:
+                continue
+            required.add(w)
+    return required
+
+
+def _version_tokens_satisfied(required, haystack):
+    """True if every required version token appears in the candidate haystack."""
+    if not required:
+        return True
+    hay = (haystack or "").lower()
+    for tok in required:
+        if tok in ("remix", "remixes", "remixed"):
+            if not re.search(r"\bremix", hay):
+                return False
+            continue
+        if tok in ("edit", "edits"):
+            if not re.search(r"\bedit", hay):
+                return False
+            continue
+        if tok not in hay:
+            return False
+    return True
 
 
 def _has_noise(text, expected_title=""):
@@ -886,11 +935,18 @@ class MusicDownloader:
         except (TypeError, ValueError):
             expected_duration = None
 
+        version_required = _required_version_tokens(metadata.title or "")
+        if not version_required and original_query:
+            version_required = _required_version_tokens(original_query)
+
         def score(video):
             raw_title = video.get('title', '') or ''
             yt_title = clean_title(raw_title, metadata.artist)
             yt_artist = clean_artist(video.get('uploader', '') or video.get('channel', ''))
             expected_title = clean_title(metadata.title, metadata.artist)
+            hay = f"{raw_title} {yt_artist}"
+            if version_required and not _version_tokens_satisfied(version_required, hay):
+                return None
             seq_title_sim = title_similarity(yt_title, expected_title)
             token_sim = _token_title_similarity(expected_title, yt_title)
             # Also score against the original free-text query title guess
@@ -910,6 +966,11 @@ class MusicDownloader:
             coverage = query_coverage(video)
             if coverage < QUERY_COVERAGE_MIN:
                 return None
+            # When a specific mix/version is required, do not let shared base-title
+            # coverage alone clear the title gate for a non-version upload.
+            coverage_gate = 75.0
+            if version_required:
+                coverage_gate = 92.0
 
             # Blend in query coverage so strong original-query matches win.
             combined = (combined * 0.75) + (coverage * 0.25)
@@ -938,7 +999,10 @@ class MusicDownloader:
             if _has_noise(raw_title, metadata.title or original_query or ""):
                 combined -= 25.0
 
-            return combined, title_sim, artist_sim, token_sim, yt_title, yt_artist, primary, is_topic, coverage
+            return (
+                combined, title_sim, artist_sim, token_sim, yt_title, yt_artist,
+                primary, is_topic, coverage, coverage_gate,
+            )
 
         q_title = search_title(metadata.title)
         q_artist = (metadata.artist or "").replace('"', '').strip()
@@ -1112,6 +1176,7 @@ class MusicDownloader:
                             (
                                 combined, title_sim, artist_sim, token_sim,
                                 c_title, c_artist, primary, is_topic, coverage,
+                                coverage_gate,
                             ) = scored
                             logger.info(
                                 f"[{source_label}] Candidate: Title {title_sim:.1f}%, Artist {artist_sim:.1f}%, "
@@ -1119,11 +1184,17 @@ class MusicDownloader:
                                 f"'{c_title}' by '{c_artist}' | "
                                 f"Expected: '{expected_title_clean}' by '{metadata.artist}'"
                             )
-                            if title_sim < TITLE_THRESHOLD and coverage < 75.0:
+                            if title_sim < TITLE_THRESHOLD and coverage < coverage_gate:
                                 topic_ok = (
                                     is_topic
                                     and token_sim >= 85.0
                                     and artist_sim >= 80.0
+                                    and (
+                                        not version_required
+                                        or _version_tokens_satisfied(
+                                            version_required, f"{c_title} {c_artist} {video.get('title', '')}"
+                                        )
+                                    )
                                 )
                                 if not topic_ok:
                                     continue
