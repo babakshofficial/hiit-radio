@@ -339,6 +339,48 @@ async def _done(dest, text):
     await dest.reply_text(text, reply_markup=kb)
 
 
+def _user_lang(user_id, user_manager=None):
+    um = user_manager or _um()
+    try:
+        return um.get_language(user_id)
+    except Exception:
+        return None
+
+
+async def notify_user_grant(bot, user_id, tier, expires_at, days, user_manager=None):
+    token = msg.use_lang(_user_lang(user_id, user_manager))
+    try:
+        text = msg.grant_user_notice(tier, expires_at, days)
+    finally:
+        msg.reset_lang(token)
+    try:
+        await bot.send_message(chat_id=int(user_id), text=text)
+        return True
+    except Exception as exc:
+        logger.warning("Could not notify user %s of grant: %s", user_id, exc)
+        return False
+
+
+async def notify_user_topup(bot, user_id, amount, day, user_manager=None):
+    token = msg.use_lang(_user_lang(user_id, user_manager))
+    try:
+        text = msg.topup_user_notice(amount, day)
+    finally:
+        msg.reset_lang(token)
+    try:
+        await bot.send_message(chat_id=int(user_id), text=text)
+        return True
+    except Exception as exc:
+        logger.warning("Could not notify user %s of topup: %s", user_id, exc)
+        return False
+
+
+def _with_notify_status(text, notified):
+    if notified:
+        return text
+    return f"{text}\n{msg.t('grant_notify_failed')}"
+
+
 async def _apply_grant(dest, context, data, admin_id):
     target = data["user_id"]
     tier = data["tier"]
@@ -348,7 +390,12 @@ async def _apply_grant(dest, context, data, admin_id):
         _um().database, target, tier, days, admin_id=admin_id,
     )
     clear(context)
-    await _done(dest, msg.grant_ok(target, tier, sub["expires_at"]))
+    notified = await notify_user_grant(
+        context.bot, target, tier, sub["expires_at"], days,
+    )
+    await _done(dest, _with_notify_status(
+        msg.grant_ok(target, tier, sub["expires_at"]), notified,
+    ))
 
 
 async def _apply_topup(dest, context, data, admin_id):
@@ -359,7 +406,10 @@ async def _apply_topup(dest, context, data, admin_id):
         _um().database, target, amount=amount, admin_id=admin_id,
     )
     clear(context)
-    await _done(dest, msg.topup_ok(target, granted, day))
+    notified = await notify_user_topup(context.bot, target, granted, day)
+    await _done(dest, _with_notify_status(
+        msg.topup_ok(target, granted, day), notified,
+    ))
 
 
 async def _apply_broadcast(dest, context, data, bot, admin_user):

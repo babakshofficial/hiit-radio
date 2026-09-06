@@ -411,21 +411,36 @@ async def admin_users(limit: int = 50, _admin=Depends(require_admin)):
 @app.post("/admin/grant")
 async def admin_grant(body: AdminGrantBody, admin=Depends(require_admin)):
     import payments
+    import admin_wizard
 
     sub = payments.apply_manual_grant(
         get_db(), body.user_id, body.tier, body.days, admin_id=admin["id"]
     )
-    return {"ok": True, "subscription": sub}
+    notified = False
+    bot = get_bot()
+    if bot:
+        notified = await admin_wizard.notify_user_grant(
+            bot, body.user_id, body.tier, sub["expires_at"], body.days,
+            user_manager=get_user_manager(),
+        )
+    return {"ok": True, "subscription": sub, "notified": notified}
 
 
 @app.post("/admin/topup")
 async def admin_topup(body: AdminTopupBody, admin=Depends(require_admin)):
     import payments
+    import admin_wizard
 
     amount, day = payments.apply_manual_topup(
         get_db(), body.user_id, amount=body.amount, admin_id=admin["id"]
     )
-    return {"ok": True, "amount": amount, "day": day}
+    notified = False
+    bot = get_bot()
+    if bot:
+        notified = await admin_wizard.notify_user_topup(
+            bot, body.user_id, amount, day, user_manager=get_user_manager(),
+        )
+    return {"ok": True, "amount": amount, "day": day, "notified": notified}
 
 
 @app.post("/admin/broadcast")

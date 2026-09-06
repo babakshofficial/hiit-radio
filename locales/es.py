@@ -148,6 +148,16 @@ STRINGS = {
     # --- admin grants ---
     "grant_ok": "✅ Usuario {user_id}: {tier} hasta {expires}",
     "topup_ok": "✅ Usuario {user_id}: +{amount} para {day}",
+    "grant_user_notice": (
+        "🎁 Has recibido {days} días de {tier}, activo hasta {expires}.\n"
+        "Envía una canción cuando quieras."
+    ),
+    "topup_user_notice": (
+        "🎁 Se añadieron +{amount} descargas extra a tu cuenta para hoy ({day})."
+    ),
+    "grant_notify_failed": (
+        "⚠️ No se pudo avisar al usuario — quizá tiene que pulsar Iniciar en el bot."
+    ),
 
     # --- download flow ---
     "searching": "⏳ Estoy buscando tu canción...",

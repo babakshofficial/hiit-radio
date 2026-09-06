@@ -815,8 +815,15 @@ async def grant_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sub = payments.apply_manual_grant(
         user_manager.database, target, tier, days, admin_id=update.effective_user.id,
     )
+    notified = await admin_wizard.notify_user_grant(
+        context.bot, target, tier, sub["expires_at"], days,
+        user_manager=user_manager,
+    )
+    text = msg.grant_ok(target, tier, sub["expires_at"])
+    if not notified:
+        text = f"{text}\n{msg.t('grant_notify_failed')}"
     await update.message.reply_text(
-        msg.grant_ok(target, tier, sub["expires_at"]),
+        text,
         reply_markup=_back_button(admin=True),
     )
 
@@ -843,8 +850,14 @@ async def topup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     granted, day = payments.apply_manual_topup(
         user_manager.database, target, amount=amount, admin_id=update.effective_user.id,
     )
+    notified = await admin_wizard.notify_user_topup(
+        context.bot, target, granted, day, user_manager=user_manager,
+    )
+    text = msg.topup_ok(target, granted, day)
+    if not notified:
+        text = f"{text}\n{msg.t('grant_notify_failed')}"
     await update.message.reply_text(
-        msg.topup_ok(target, granted, day),
+        text,
         reply_markup=_back_button(admin=True),
     )
 

@@ -136,6 +136,16 @@ STRINGS = {
     # --- admin grants ---
     "grant_ok": "✅ کاربر {user_id}: {tier} تا {expires}",
     "topup_ok": "✅ کاربر {user_id}: +{amount} برای {day}",
+    "grant_user_notice": (
+        "🎁 اشتراک {tier} به مدت {days} روز تا {expires} به حسابت اضافه شد.\n"
+        "هر وقت خواستی آهنگ بفرست."
+    ),
+    "topup_user_notice": (
+        "🎁 +{amount} دانلود اضافه برای امروز ({day}) به حسابت اضافه شد."
+    ),
+    "grant_notify_failed": (
+        "⚠️ پیام به کاربر نرسید — شاید هنوز ربات را استارت نکرده."
+    ),
 
     # --- download flow ---
     "searching": "⏳ دارم آهنگت رو پیدا می‌کنم...",

@@ -320,23 +320,41 @@ def btn_buy_monthly(stars):
     return t("btn_buy_monthly", stars=stars)
 
 
-def grant_ok(user_id, tier, expires_at):
+def _expires_local(expires_at):
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
     exp = datetime.fromtimestamp(
         float(expires_at), ZoneInfo(os.getenv("QUOTA_TZ", "Asia/Tehran"))
     )
+    return exp.strftime("%Y-%m-%d %H:%M")
+
+
+def grant_ok(user_id, tier, expires_at):
     return t(
         "grant_ok",
         user_id=user_id,
         tier=tier,
-        expires=exp.strftime("%Y-%m-%d %H:%M"),
+        expires=_expires_local(expires_at),
     )
 
 
 def topup_ok(user_id, amount, day):
     return t("topup_ok", user_id=user_id, amount=amount, day=day)
+
+
+def grant_user_notice(tier, expires_at, days):
+    tier_label = t("tier_premium") if tier == "premium" else t("tier_unlimited")
+    return t(
+        "grant_user_notice",
+        tier=tier_label,
+        days=days,
+        expires=_expires_local(expires_at),
+    )
+
+
+def topup_user_notice(amount, day):
+    return t("topup_user_notice", amount=amount, day=day)
 
 
 def searching():

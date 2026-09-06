@@ -147,6 +147,16 @@ STRINGS = {
     # --- admin grants ---
     "grant_ok": "✅ Пользователь {user_id}: {tier} до {expires}",
     "topup_ok": "✅ Пользователь {user_id}: +{amount} на {day}",
+    "grant_user_notice": (
+        "🎁 Тебе начислили {days} дн. {tier} до {expires}.\n"
+        "Отправь трек, когда захочешь."
+    ),
+    "topup_user_notice": (
+        "🎁 На сегодня ({day}) добавлено +{amount} загрузок."
+    ),
+    "grant_notify_failed": (
+        "⚠️ Не удалось написать пользователю — возможно, он ещё не нажал Start."
+    ),
 
     # --- download flow ---
     "searching": "⏳ Ищу твой трек...",
