@@ -422,6 +422,12 @@ def similar_not_found():
     return t("similar_not_found")
 
 
+def nearby_header(title, artist):
+    if artist:
+        return t("nearby_header_with_artist", title=title or "", artist=artist)
+    return t("nearby_header", title=title or "")
+
+
 def liked_empty():
     return t("liked_empty")
 

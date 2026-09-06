@@ -233,6 +233,29 @@ def score_query_match(query, title, artist):
     return min(score, 100.0)
 
 
+def score_title_nearness(seed_title, candidate_title):
+    """How close two song titles are (0-100), ignoring artist.
+
+    Used to list covers / nearby versions when the exact catalog hit failed.
+    """
+    seed = (seed_title or "").strip().lower()
+    cand = (candidate_title or "").strip().lower()
+    if not seed or not cand:
+        return 0.0
+    seed_tokens = _query_tokens(seed)
+    cand_tokens = _query_tokens(cand)
+    if not seed_tokens or not cand_tokens:
+        return difflib.SequenceMatcher(None, seed, cand).ratio() * 100.0
+    hits = sum(1 for t in seed_tokens if _token_in_haystack(t, cand_tokens, cand))
+    if hits == 0:
+        return 0.0
+    if len(seed_tokens) >= 3 and hits < 2:
+        return 0.0
+    coverage = 100.0 * hits / len(seed_tokens)
+    seq = difflib.SequenceMatcher(None, seed, cand).ratio() * 100.0
+    return min(100.0, coverage * 0.65 + seq * 0.35)
+
+
 def _itunes_query_variants(query):
     """Reorder free-text queries so iTunes can find Artist+Title better."""
     q = (query or "").strip()
@@ -771,6 +794,73 @@ class AppleMusicMetadata:
         results = []
         for score, track in scored[:limit]:
             results.append(cls._meta_from_itunes_track(track, query))
+        return results
+
+    @classmethod
+    async def search_nearby(cls, query, limit=8, extra_queries=None):
+        """Return several catalog tracks with titles near ``query``.
+
+        Unlike ``search_many``, different artists are kept (covers, retitles).
+        Title-only iTunes searches are preferred because ``title + artist``
+        often returns a single exact hit.
+        """
+        seed = (query or "").strip()
+        variants = []
+        guessed_title, _guessed_artist = guess_title_artist(seed) if seed else ("", "")
+        for v in (
+            seed,
+            guessed_title,
+            *(extra_queries or ()),
+        ):
+            v = (v or "").strip()
+            if not v:
+                continue
+            key = v.lower()
+            if key in {x.lower() for x in variants}:
+                continue
+            variants.append(v)
+        if not variants:
+            return []
+
+        seen_ids = set()
+        seen_keys = set()
+        scored = []
+        for variant in variants:
+            tracks = await cls._itunes_raw_search(variant, limit=max(limit * 3, 20))
+            for track in tracks:
+                tid = track.get("trackId")
+                title = track.get("trackName", "") or ""
+                artist = track.get("artistName", "") or ""
+                key = (title.strip().lower(), artist.strip().lower())
+                if tid is not None:
+                    if tid in seen_ids:
+                        continue
+                    seen_ids.add(tid)
+                elif key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                score = max(
+                    score_title_nearness(seed, title),
+                    score_title_nearness(guessed_title, title) if guessed_title else 0.0,
+                    *(
+                        score_title_nearness(extra, title)
+                        for extra in (extra_queries or ())
+                        if extra
+                    ),
+                )
+                if score < 40.0:
+                    continue
+                scored.append((score, track))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        results = [
+            cls._meta_from_itunes_track(track, seed or query)
+            for _score, track in scored[:limit]
+        ]
+        logger.info(
+            "Nearby catalog: %d tracks for %r (from %d iTunes hits)",
+            len(results), seed or query, len(scored),
+        )
         return results
 
     @classmethod

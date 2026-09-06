@@ -162,6 +162,8 @@ STRINGS = {
     "similar_header": "🎧 مشابه «{title}»:\n",
     "similar_header_with_artist": "🎧 مشابه «{title} — {artist}»:\n",
     "similar_not_found": "آهنگ مشابهی پیدا نشد — بعداً دوباره امتحان کن.",
+    "nearby_header": "🎧 نزدیک به «{title}» — یکی را انتخاب کن:\n",
+    "nearby_header_with_artist": "🎧 نزدیک به «{title} — {artist}» — یکی را انتخاب کن:\n",
 
     # --- favorites ---
     "liked_empty": "هنوز چیزی به علاقه‌مندی‌ها اضافه نکردی ❤️",

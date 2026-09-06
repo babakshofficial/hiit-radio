@@ -66,6 +66,7 @@ def format_global_summary(data, platform_fa):
         for row in data["platforms"][:5]:
             lines.append(f"  • {platform_fa(row['platform'])}: {row['cnt']}")
     lines.append("")
+    lines.append("گزارش‌های کاربران: /reports")
     lines.append("از دکمه‌ها برای جزئیات استفاده کن یا /export")
     return "\n".join(lines)
 
@@ -241,6 +242,21 @@ def build_error_reports_keyboard(rows, page, total_pages):
     return InlineKeyboardMarkup(buttons)
 
 
+def build_error_report_detail_keyboard(report_id):
+    import messages as msg
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f"{msg.support_reply_button()} #{report_id}",
+                callback_data=f"sup:reply:{report_id}",
+            ),
+        ],
+        [InlineKeyboardButton("همه گزارش‌ها", callback_data="rpt:bugs:0")],
+        [InlineKeyboardButton("منوی گزارش", callback_data="rpt:menu")],
+    ])
+
+
 def _page_row(scope, page, total_pages):
     buttons = []
     if page > 0:
@@ -264,7 +280,7 @@ def build_global_menu_keyboard():
             InlineKeyboardButton("LLM", callback_data="rpt:global:llm:0"),
             InlineKeyboardButton("کش", callback_data="rpt:global:cache:0"),
         ],
-        [InlineKeyboardButton("گزارش‌های کاربران", callback_data="rpt:bugs:0")],
+        [InlineKeyboardButton("گزارش‌های کاربران (/reports)", callback_data="rpt:bugs:0")],
         [InlineKeyboardButton("بازگشت به خلاصه", callback_data="rpt:menu")],
     ])
 

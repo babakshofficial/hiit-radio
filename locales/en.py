@@ -162,6 +162,8 @@ STRINGS = {
     "similar_header": "🎧 Similar to “{title}”:\n",
     "similar_header_with_artist": "🎧 Similar to “{title} — {artist}”:\n",
     "similar_not_found": "No similar tracks found — try again later.",
+    "nearby_header": "🎧 Close to “{title}” — pick one:\n",
+    "nearby_header_with_artist": "🎧 Close to “{title} — {artist}” — pick one:\n",
 
     # --- favorites ---
     "liked_empty": "You haven't added anything to your favorites yet ❤️",

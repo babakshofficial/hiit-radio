@@ -227,6 +227,20 @@ async def log_vip(bot, event_type, user=None, **fields):
     await _send(bot, "\n".join(lines))
 
 
+def message_media_kind(msg):
+    """ptb Message has no content_type; infer from attachment attributes."""
+    if not msg:
+        return "unknown"
+    for name in (
+        "text", "caption", "audio", "voice", "document", "photo",
+        "video", "animation", "sticker", "video_note", "contact",
+        "location", "venue", "poll", "dice",
+    ):
+        if getattr(msg, name, None):
+            return name
+    return "unknown"
+
+
 def _describe_update(update):
     if update.callback_query:
         return "دکمه", {"داده": update.callback_query.data or ""}
@@ -239,7 +253,7 @@ def _describe_update(update):
             return "دستور", {"متن": text[:500]}
         if text:
             return "پیام", {"متن": text[:500]}
-        return "پیام", {"نوع": msg.content_type or "unknown"}
+        return "پیام", {"نوع": message_media_kind(msg)}
     if update.channel_post:
         text = update.channel_post.text or ""
         return "پست کانال", {"متن": text[:500]}

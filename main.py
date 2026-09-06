@@ -56,6 +56,7 @@ from admin_logger import (
     vip_status_text,
     report_cookie_health_transition,
     maybe_alert_cookie_issue,
+    message_media_kind,
 )
 import admin_logger
 from progress import ProgressReporter
@@ -97,7 +98,7 @@ TG_POOL_TIMEOUT = float(os.getenv("TG_POOL_TIMEOUT", "30"))
 
 _ADMIN_COMMANDS = {
     "/stats", "/analytics", "/creds", "/channelid", "/viplogtest",
-    "/broadcast", "/report", "/users", "/user", "/export", "/cookies",
+    "/broadcast", "/report", "/reports", "/users", "/user", "/export", "/cookies",
     "/grant", "/topup",
 }
 
@@ -749,7 +750,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for row in db.platform_breakdown():
         lines.append(f"  • {_platform_fa(row['platform'])}: {row['cnt']}")
     lines.append("")
-    lines.append("گزارش کامل: /report")
+    lines.append("گزارش کامل: /report  ·  گزارش کاربران: /reports")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -1827,6 +1828,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.exception("Failed to invalidate cache after track mismatch report")
         reported.add(token)
         await query.answer(msg.track_report_sent(), show_alert=True)
+        seed = TrackMetadata()
+        seed.title = full.get("title")
+        seed.artist = full.get("artist")
+        seed.album = full.get("album")
+        seed.url = full.get("url")
+        seed.search_query = full.get("search_query")
+        await _offer_nearby_tracks(query.message, context, seed)
         return
 
     if data.startswith("reco:artist:"):
@@ -2330,6 +2338,68 @@ async def _resolve_similar_tracks(
     return suggestions[:limit]
 
 
+async def _offer_nearby_tracks(message, context, metadata, query=None):
+    """After a failed search/download or mismatch, list nearby catalog versions."""
+    title = (getattr(metadata, "title", None) or "").strip() if metadata else ""
+    artist = (getattr(metadata, "artist", None) or "").strip() if metadata else ""
+    search_query = (query or "").strip()
+    if not search_query and metadata:
+        search_query = (getattr(metadata, "search_query", None) or "").strip()
+    seed_title = title or search_query
+    if not seed_title and not artist:
+        return
+
+    extra = []
+    if search_query and not is_music_url(search_query) and "http" not in search_query.lower():
+        extra.append(search_query)
+    if title:
+        extra.append(title)
+        cleaned = re.sub(r"[?!.,]+", " ", title).strip()
+        if cleaned and cleaned.lower() != title.lower():
+            extra.append(cleaned)
+    # Title-only first: "title + artist" often returns a single exact iTunes hit.
+    try:
+        results = await AppleMusicMetadata.search_nearby(
+            seed_title, limit=8, extra_queries=extra,
+        )
+    except Exception:
+        logger.exception("Nearby catalog search failed for %r", seed_title)
+        return
+    if not results:
+        return
+
+    seed = (title.lower(), artist.lower()) if title else None
+    filtered = []
+    for r in results:
+        key = ((r.title or "").strip().lower(), (r.artist or "").strip().lower())
+        if seed and key == seed:
+            continue
+        filtered.append(r)
+    if len(filtered) < 2:
+        filtered = list(results)
+
+    cache = {}
+    lines = [msg.nearby_header(title or seed_title, artist)]
+    buttons = []
+    for i, r in enumerate(filtered[:8], 1):
+        lines.append(f"{i}. {r.title} — {r.artist}")
+        cache[str(i)] = TrackMetadata()._copy_from(r)
+        buttons.append([
+            InlineKeyboardButton(
+                _btn_download(r.title, i),
+                callback_data=f"searchpick:{i}",
+            )
+        ])
+    context.user_data["reco_cache"] = cache
+    try:
+        await message.reply_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+    except Exception:
+        logger.exception("Failed to send nearby-track picker")
+
+
 async def _download_and_send(message, user, metadata, context):
     user_id = user.id
     if await _deny_quota(message, context.bot, user):
@@ -2385,6 +2455,7 @@ async def _download_and_send(message, user, metadata, context):
                 context.bot, user, f"Download failed ({error_code})",
                 _vip_failure_detail(metadata.title),
             )
+            await _offer_nearby_tracks(message, context, metadata)
             return
         if not (platform and str(platform).endswith("_cache_id")) and not os.path.exists(file_path):
             code = error_code or "invalid_file"
@@ -2404,6 +2475,7 @@ async def _download_and_send(message, user, metadata, context):
                 context.bot, user, "Download failed",
                 _vip_failure_detail(metadata.title),
             )
+            await _offer_nearby_tracks(message, context, metadata)
             return
 
         kb = _track_keyboard(
@@ -2509,6 +2581,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             query=text,
         )
         await log_error(context.bot, user, "Metadata not found", text)
+        await _offer_nearby_tracks(update.message, context, metadata, query=text)
         return
 
     reporter = ProgressReporter(
@@ -2578,6 +2651,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.bot, user, f"No full track found ({error_code})",
                 _vip_failure_detail(text),
             )
+            await _offer_nearby_tracks(update.message, context, metadata)
     finally:
         await preview.finish(delete=False)
         _end_job(context, job)
@@ -2819,6 +2893,20 @@ async def _send_report(message, text, reply_markup=None, edit=False):
         await message.reply_text(text, reply_markup=reply_markup)
 
 
+async def _show_error_report_detail(message, report_id, edit=False):
+    row = user_manager.database.get_error_report(report_id)
+    if not row or not row.get("submitted_at"):
+        await _send_report(message, "گزارش پیدا نشد یا هنوز ارسال نشده.", edit=edit)
+        return
+    text = error_report.format_admin_summary(row)
+    await _send_report(
+        message,
+        text,
+        rpt.build_error_report_detail_keyboard(report_id),
+        edit=edit,
+    )
+
+
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
@@ -2826,6 +2914,22 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     summary = db.global_report_summary()
     text = rpt.format_global_summary(summary, _platform_fa)
     await update.message.reply_text(text, reply_markup=rpt.build_global_menu_keyboard())
+
+
+async def reports_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: submitted user failure reports (who / what / when)."""
+    if not _is_admin(update.effective_user.id):
+        return
+    if context.args:
+        raw = (context.args[0] or "").strip().lstrip("#")
+        try:
+            rid = int(raw)
+        except ValueError:
+            await update.message.reply_text("نحوه استفاده: /reports یا /reports <شناسه>")
+            return
+        await _show_error_report_detail(update.message, rid)
+        return
+    await _show_global_section(update.message, "bugs", 0)
 
 
 async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3436,7 +3540,7 @@ def _describe_user_request(update):
         return "command", text[:500]
     if text:
         return "message", text[:500]
-    return "message", (msg_obj.content_type or "unknown")[:500]
+    return "message", message_media_kind(msg_obj)[:500]
 
 
 async def vip_update_logger(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3502,6 +3606,7 @@ def main():
     application.add_handler(CommandHandler("viplogtest", viplogtest_command))
     application.add_handler(CommandHandler("cookies", cookies_command))
     application.add_handler(CommandHandler("report", report_command))
+    application.add_handler(CommandHandler("reports", reports_command))
     application.add_handler(CommandHandler("users", users_command))
     application.add_handler(CommandHandler("user", user_command))
     application.add_handler(CommandHandler("export", export_command))

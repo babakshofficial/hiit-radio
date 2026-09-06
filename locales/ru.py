@@ -182,6 +182,8 @@ STRINGS = {
     "similar_header": "🎧 Похоже на «{title}»:\n",
     "similar_header_with_artist": "🎧 Похоже на «{title} — {artist}»:\n",
     "similar_not_found": "Похожих треков не нашлось — попробуй позже.",
+    "nearby_header": "🎧 Рядом с «{title}» — выбери один:\n",
+    "nearby_header_with_artist": "🎧 Рядом с «{title} — {artist}» — выбери один:\n",
 
     # --- favorites ---
     "liked_empty": "Ты пока ничего не добавил в избранное ❤️",
