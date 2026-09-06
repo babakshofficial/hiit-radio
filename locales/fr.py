@@ -420,6 +420,28 @@ STRINGS = {
     "menu_cancel": "⛔ Annuler la tâche en cours",
     "menu_back": "🔙 Retour au menu",
     "menu_lang": "🌐 Langue",
+    "menu_admin": "🛠 Admin",
+    "menu_admin_back": "🔙 Panneau admin",
+    "admin_menu_text": "🛠 Panneau admin — choisis un outil :",
+    "admin_stats": "📊 Stats",
+    "admin_report": "📈 Tableau de bord",
+    "admin_reports": "📋 Rapports utilisateurs",
+    "admin_users": "👥 Utilisateurs",
+    "admin_creds": "🔑 Identifiants",
+    "admin_cookies": "🍪 Cookies",
+    "admin_export": "📤 Export",
+    "admin_viplog": "🧪 Journal VIP",
+    "admin_broadcast": "📣 Diffusion",
+    "admin_channelid": "🆔 ID canal",
+    "admin_grant": "➕ Accorder",
+    "admin_topup": "💰 Recharge",
+    "admin_broadcast_usage": "Usage : /broadcast <message>",
+    "admin_grant_usage": "Usage : /grant <user_id> <premium|unlimited> <days>",
+    "admin_topup_usage": "Usage : /topup <user_id> [amount]",
+    "admin_channelid_usage": (
+        "Transfère ici un message du canal VIP (en gardant le nom de l'expéditeur),\n"
+        "ou envoie /channelid dans ce canal."
+    ),
 
     # --- language selection ---
     "lang_choose": "🌐 Choisis la langue du bot :",

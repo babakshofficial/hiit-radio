@@ -99,7 +99,7 @@ TG_POOL_TIMEOUT = float(os.getenv("TG_POOL_TIMEOUT", "30"))
 _ADMIN_COMMANDS = {
     "/stats", "/analytics", "/creds", "/channelid", "/viplogtest",
     "/broadcast", "/report", "/reports", "/users", "/user", "/export", "/cookies",
-    "/grant", "/topup",
+    "/grant", "/topup", "/admin",
 }
 
 logging.basicConfig(
@@ -176,7 +176,9 @@ async def _reject_if_busy(message, context):
     """Guard against a user piling up more concurrent work than we allow."""
     if jobs.has_slot(context):
         return False
-    await message.reply_text(msg.too_many_jobs(jobs.MAX_ACTIVE_JOBS))
+    await message.reply_text(
+        msg.too_many_jobs(jobs.MAX_ACTIVE_JOBS), reply_markup=_back_button(),
+    )
     return True
 
 
@@ -440,7 +442,7 @@ async def _deny_quota(message, bot, user):
     await log_rate_limit(bot, user, 0)
     await message.reply_text(
         msg.quota_exceeded(used, limit, tier),
-        reply_markup=payments.quota_upsell_keyboard(),
+        reply_markup=_with_back(payments.quota_upsell_keyboard()),
     )
     return True
 
@@ -532,17 +534,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await update.message.reply_text(
                 msg.premium_status(snap),
-                reply_markup=payments.premium_keyboard(),
+                reply_markup=_with_back(payments.premium_keyboard()),
             )
         return
     first_name = user.first_name if user else ""
     await update.message.reply_text(
-        msg.start_text(first_name), reply_markup=_start_menu_keyboard(),
+        msg.start_text(first_name),
+        reply_markup=_start_menu_keyboard(user.id if user else None),
     )
 
 
-def _start_menu_keyboard():
-    return InlineKeyboardMarkup([
+def _start_menu_keyboard(user_id=None):
+    rows = [
         [
             InlineKeyboardButton(msg.t("menu_search"), callback_data="menu:search"),
             InlineKeyboardButton(msg.t("menu_artist"), callback_data="menu:artist"),
@@ -575,17 +578,129 @@ def _start_menu_keyboard():
             InlineKeyboardButton(msg.t("menu_help"), callback_data="menu:help"),
             InlineKeyboardButton(msg.t("menu_cancel"), callback_data="menu:cancel"),
         ],
-    ])
-
-
-def _back_button():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(msg.t("menu_back"), callback_data="menu:back")],
-    ])
+    ]
+    if user_id is not None and _is_admin(user_id):
+        rows.append([
+            InlineKeyboardButton(msg.t("menu_admin"), callback_data="admin:menu"),
+        ])
+    return InlineKeyboardMarkup(rows)
 
 
 def _back_row():
     return [InlineKeyboardButton(msg.t("menu_back"), callback_data="menu:back")]
+
+
+def _admin_home_row():
+    return [InlineKeyboardButton(msg.t("menu_admin_back"), callback_data="admin:menu")]
+
+
+def _nav_datas(*extra):
+    return {"menu:back", "admin:menu", *extra}
+
+
+def _rows_have_nav(rows, datas):
+    for row in rows or []:
+        for btn in row:
+            if getattr(btn, "callback_data", None) in datas:
+                return True
+    return False
+
+
+def _back_button(*, admin=False):
+    return InlineKeyboardMarkup([_admin_home_row() if admin else _back_row()])
+
+
+def _with_back(markup=None, *, admin=False):
+    rows = [list(r) for r in markup.inline_keyboard] if markup else []
+    nav = _admin_home_row() if admin else _back_row()
+    if not _rows_have_nav(rows, _nav_datas(nav[0].callback_data)):
+        rows.append(nav)
+    return InlineKeyboardMarkup(rows)
+
+
+def _append_back(buttons, *, admin=False):
+    nav = _admin_home_row() if admin else _back_row()
+    if not _rows_have_nav(buttons, _nav_datas(nav[0].callback_data)):
+        buttons.append(nav)
+    return buttons
+
+
+def _admin_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(msg.t("admin_stats"), callback_data="admin:stats"),
+            InlineKeyboardButton(msg.t("admin_report"), callback_data="admin:report"),
+        ],
+        [
+            InlineKeyboardButton(msg.t("admin_reports"), callback_data="admin:reports"),
+            InlineKeyboardButton(msg.t("admin_users"), callback_data="admin:users"),
+        ],
+        [
+            InlineKeyboardButton(msg.t("admin_creds"), callback_data="admin:creds"),
+            InlineKeyboardButton(msg.t("admin_cookies"), callback_data="admin:cookies"),
+        ],
+        [
+            InlineKeyboardButton(msg.t("admin_export"), callback_data="admin:export"),
+            InlineKeyboardButton(msg.t("admin_viplog"), callback_data="admin:viplog"),
+        ],
+        [
+            InlineKeyboardButton(msg.t("admin_broadcast"), callback_data="admin:broadcast"),
+            InlineKeyboardButton(msg.t("admin_channelid"), callback_data="admin:channelid"),
+        ],
+        [
+            InlineKeyboardButton(msg.t("admin_grant"), callback_data="admin:grant"),
+            InlineKeyboardButton(msg.t("admin_topup"), callback_data="admin:topup"),
+        ],
+        _back_row(),
+    ])
+
+
+class _ChatReply:
+    """Send new messages when a command is opened from an inline button."""
+
+    def __init__(self, bot, chat_id):
+        self._bot = bot
+        self.chat_id = chat_id
+
+    async def reply_text(self, text, **kwargs):
+        return await self._bot.send_message(self.chat_id, text, **kwargs)
+
+
+def _stats_text():
+    db = user_manager.database
+    total_users, total_downloads = user_manager.get_stats()
+    cached, total = db.cache_hit_rate()
+    hit_pct = f"{100 * cached / total:.1f}٪" if total else "—"
+    lines = [
+        f"کاربران: {total_users}",
+        f"دانلودها: {total_downloads}",
+        f"نرخ برخورد کش: {hit_pct} ({cached}/{total})",
+        "",
+        "پربازدیدترین هنرمندان:",
+    ]
+    for row in db.top_artists(5):
+        lines.append(f"  • {row['artist']} ({row['cnt']})")
+    lines.append("")
+    lines.append("پربازدیدترین آهنگ‌ها:")
+    for row in db.top_songs(5):
+        lines.append(f"  • {row['title']} — {row['artist']} ({row['cnt']})")
+    lines.append("")
+    lines.append("پلتفرم‌ها:")
+    for row in db.platform_breakdown():
+        lines.append(f"  • {_platform_fa(row['platform'])}: {row['cnt']}")
+    lines.append("")
+    lines.append("گزارش کامل: /report  ·  گزارش کاربران: /reports")
+    return "\n".join(lines)
+
+
+def _cookies_status_text():
+    _file_ok, file_detail, updated = _cookie_file_status()
+    healthy, _detail = _youtube_auth_status()
+    if downloader.cookies_from_browser:
+        file_detail += f"\nپشتیبان مرورگر: {downloader.cookies_from_browser}"
+    return msg.cookies_status(
+        healthy, file_detail, downloader.cookies_path, updated,
+    )
 
 
 def _lang_keyboard():
@@ -648,7 +763,7 @@ async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(
         msg.premium_status(snap),
-        reply_markup=payments.premium_keyboard(),
+        reply_markup=_with_back(payments.premium_keyboard()),
     )
 
 
@@ -668,22 +783,32 @@ async def grant_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # /grant <user_id> <premium|unlimited> <days>
     args = context.args or []
     if len(args) < 3:
-        await update.message.reply_text("نحوه استفاده: /grant <user_id> <premium|unlimited> <days>")
+        await update.message.reply_text(
+            msg.t("admin_grant_usage"), reply_markup=_back_button(admin=True),
+        )
         return
     target, tier, days_s = args[0], args[1].lower(), args[2]
     if tier not in ("premium", "unlimited"):
-        await update.message.reply_text("tier باید premium یا unlimited باشد.")
+        await update.message.reply_text(
+            "tier باید premium یا unlimited باشد.",
+            reply_markup=_back_button(admin=True),
+        )
         return
     try:
         days = int(days_s)
     except ValueError:
-        await update.message.reply_text("days باید عدد باشد.")
+        await update.message.reply_text(
+            "days باید عدد باشد.", reply_markup=_back_button(admin=True),
+        )
         return
     user_manager.touch_user(target)
     sub = payments.apply_manual_grant(
         user_manager.database, target, tier, days, admin_id=update.effective_user.id,
     )
-    await update.message.reply_text(msg.grant_ok(target, tier, sub["expires_at"]))
+    await update.message.reply_text(
+        msg.grant_ok(target, tier, sub["expires_at"]),
+        reply_markup=_back_button(admin=True),
+    )
 
 
 async def topup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -692,7 +817,9 @@ async def topup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # /topup <user_id> [amount]
     args = context.args or []
     if not args:
-        await update.message.reply_text("نحوه استفاده: /topup <user_id> [amount]")
+        await update.message.reply_text(
+            msg.t("admin_topup_usage"), reply_markup=_back_button(admin=True),
+        )
         return
     target = args[0]
     amount = None
@@ -700,13 +827,18 @@ async def topup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             amount = int(args[1])
         except ValueError:
-            await update.message.reply_text("amount باید عدد باشد.")
+            await update.message.reply_text(
+                "amount باید عدد باشد.", reply_markup=_back_button(admin=True),
+            )
             return
     user_manager.touch_user(target)
     granted, day = payments.apply_manual_topup(
         user_manager.database, target, amount=amount, admin_id=update.effective_user.id,
     )
-    await update.message.reply_text(msg.topup_ok(target, granted, day))
+    await update.message.reply_text(
+        msg.topup_ok(target, granted, day),
+        reply_markup=_back_button(admin=True),
+    )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -714,7 +846,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     clear_await_input(context)
     await update.message.reply_text(
-        msg.help_text(), reply_markup=_start_menu_keyboard(),
+        msg.help_text(), reply_markup=_start_menu_keyboard(update.effective_user.id),
     )
 
 
@@ -722,36 +854,24 @@ async def aboutme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_access(update, context):
         return
     await _touch_user(update)
-    await update.message.reply_text(msg.aboutme_text())
+    await update.message.reply_text(msg.aboutme_text(), reply_markup=_back_button())
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
-    db = user_manager.database
-    total_users, total_downloads = user_manager.get_stats()
-    cached, total = db.cache_hit_rate()
-    hit_pct = f"{100 * cached / total:.1f}٪" if total else "—"
-    lines = [
-        f"کاربران: {total_users}",
-        f"دانلودها: {total_downloads}",
-        f"نرخ برخورد کش: {hit_pct} ({cached}/{total})",
-        "",
-        "پربازدیدترین هنرمندان:",
-    ]
-    for row in db.top_artists(5):
-        lines.append(f"  • {row['artist']} ({row['cnt']})")
-    lines.append("")
-    lines.append("پربازدیدترین آهنگ‌ها:")
-    for row in db.top_songs(5):
-        lines.append(f"  • {row['title']} — {row['artist']} ({row['cnt']})")
-    lines.append("")
-    lines.append("پلتفرم‌ها:")
-    for row in db.platform_breakdown():
-        lines.append(f"  • {_platform_fa(row['platform'])}: {row['cnt']}")
-    lines.append("")
-    lines.append("گزارش کامل: /report  ·  گزارش کاربران: /reports")
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text(
+        _stats_text(), reply_markup=_back_button(admin=True),
+    )
+
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    await update.effective_message.reply_text(
+        msg.t("admin_menu_text"),
+        reply_markup=_admin_menu_keyboard(),
+    )
 
 
 async def analytics_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -763,7 +883,9 @@ async def creds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
     status_text, _ = get_credentials_status()
-    await update.message.reply_text(status_text)
+    await update.message.reply_text(
+        status_text, reply_markup=_back_button(admin=True),
+    )
 
 
 async def channelid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -818,9 +940,13 @@ async def viplogtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     status = vip_status_text()
     ok, detail = await send_test_message(context.bot)
     if ok:
-        await update.message.reply_text(f"✅ {detail}\n\n{status}")
+        await update.message.reply_text(
+            f"✅ {detail}\n\n{status}", reply_markup=_back_button(admin=True),
+        )
     else:
-        await update.message.reply_text(f"❌ {detail}\n\n{status}")
+        await update.message.reply_text(
+            f"❌ {detail}\n\n{status}", reply_markup=_back_button(admin=True),
+        )
 
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -929,11 +1055,15 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = user_manager.database
     history = db.get_user_history(user_id, limit=40)
     if not history:
-        await message.reply_text(msg.discover_empty_history())
+        await message.reply_text(
+            msg.discover_empty_history(), reply_markup=_back_button(),
+        )
         return
 
     if not llm_configured():
-        await message.reply_text(msg.discover_not_configured())
+        await message.reply_text(
+            msg.discover_not_configured(), reply_markup=_back_button(),
+        )
         return
 
     if await _reject_if_busy(message, context):
@@ -1063,6 +1193,7 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     callback_data=f"discoverpick:{i}",
                 )
             ])
+        _append_back(buttons)
         context.user_data["discover_cache"] = {
             str(i): s for i, s in enumerate(suggestions[:10], 1)
         }
@@ -1086,21 +1217,26 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     parts = text.split(maxsplit=1)
     if len(parts) < 2:
-        await update.message.reply_text("نحوه استفاده: /broadcast <پیام>")
+        await update.message.reply_text(
+            msg.t("admin_broadcast_usage"), reply_markup=_back_button(admin=True),
+        )
         return
     msg_body = parts[1].strip()
     if msg_body.startswith("confirm "):
         token = msg_body.split(maxsplit=1)[1]
         confirmed = user_manager.database.pop_broadcast_pending(token)
         if not confirmed:
-            await update.message.reply_text("توکن نامعتبر یا منقضی.")
+            await update.message.reply_text(
+                "توکن نامعتبر یا منقضی.", reply_markup=_back_button(admin=True),
+            )
             return
         msg_body = confirmed
     else:
         token = secrets.token_hex(4)
         user_manager.database.save_broadcast_pending(token, msg_body)
         await update.message.reply_text(
-            f"برای تأیید:\n/broadcast confirm {token}"
+            f"برای تأیید:\n/broadcast confirm {token}",
+            reply_markup=_back_button(admin=True),
         )
         return
 
@@ -1113,7 +1249,10 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(0.05)
         except Exception:
             failed += 1
-    await update.message.reply_text(f"پیام همگانی: ارسال‌شده={sent}، ناموفق={failed}")
+    await update.message.reply_text(
+        f"پیام همگانی: ارسال‌شده={sent}، ناموفق={failed}",
+        reply_markup=_back_button(admin=True),
+    )
     await log_broadcast(context.bot, update.effective_user, sent, failed)
 
 
@@ -1122,9 +1261,13 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cancelled = jobs.cancel_all(context)
     if not cancelled:
         if cleared_await:
-            await update.message.reply_text(msg.t("prompt_cancelled"))
+            await update.message.reply_text(
+                msg.t("prompt_cancelled"), reply_markup=_back_button(),
+            )
         else:
-            await update.message.reply_text(msg.cancel_no_job())
+            await update.message.reply_text(
+                msg.cancel_no_job(), reply_markup=_back_button(),
+            )
         return
     kinds = ", ".join(sorted({j.get("kind") or "work" for j in cancelled}))
     await log_system(
@@ -1134,7 +1277,9 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kind=kinds,
         count=len(cancelled),
     )
-    await update.message.reply_text(msg.cancel_ok(len(cancelled)))
+    await update.message.reply_text(
+        msg.cancel_ok(len(cancelled)), reply_markup=_back_button(),
+    )
 
 
 def _source_label(metadata):
@@ -1178,6 +1323,7 @@ async def _show_search_results(message, query, hits, context):
                 callback_data=f"catpick:{i}",
             )
         ])
+    _append_back(buttons)
     await message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
 
 
@@ -1186,10 +1332,11 @@ async def _show_artist_page(message, artist_id, context, edit=False, user_id=Non
         data = await catalog.fetch_artist(artist_id)
     except catalog.CatalogError as exc:
         text = str(exc)
+        kb = _back_button()
         if edit:
-            await message.edit_text(text)
+            await message.edit_text(text, reply_markup=kb)
         else:
-            await message.reply_text(text)
+            await message.reply_text(text, reply_markup=kb)
         return
     name = data.get("name") or msg.UNKNOWN
     lines = [msg.artist_header(name), "", msg.artist_top_header()]
@@ -1257,7 +1404,9 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hits = await catalog.search_all(query, limit=10)
     await status.delete()
     if not hits:
-        await update.message.reply_text(msg.search_empty())
+        await update.message.reply_text(
+            msg.search_empty(), reply_markup=_back_button(),
+        )
         return
     await _show_search_results(update.message, query, hits, context)
 
@@ -1269,10 +1418,14 @@ async def quality_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.args:
         value = context.args[0].strip().lower()
         if value not in QUALITIES:
-            await update.message.reply_text(msg.quality_invalid())
+            await update.message.reply_text(
+                msg.quality_invalid(), reply_markup=_back_button(),
+            )
             return
         user_manager.set_audio_quality(user_id, value)
-        await update.message.reply_text(msg.quality_set(value))
+        await update.message.reply_text(
+            msg.quality_set(value), reply_markup=_back_button(),
+        )
         return
     current = user_manager.get_audio_quality(user_id)
     buttons = [
@@ -1287,6 +1440,7 @@ async def quality_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{'✓ ' if current == 'original' else ''}original",
             callback_data="qual:original",
         )],
+        _back_row(),
     ]
     await update.message.reply_text(
         msg.quality_status(current),
@@ -1393,8 +1547,7 @@ async def following_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _show_following_list(message, user_id, context, reply_markup_extra=None):
     rows = user_manager.list_followed_artists(user_id)
     if not rows:
-        kb = _back_button() if reply_markup_extra else None
-        await message.reply_text(msg.not_following(), reply_markup=kb)
+        await message.reply_text(msg.not_following(), reply_markup=_back_button())
         return
     lines = [msg.following_header()]
     buttons = []
@@ -1411,8 +1564,7 @@ async def _show_following_list(message, user_id, context, reply_markup_extra=Non
                 callback_data=f"artistpick:profile:follow:{r['deezer_artist_id']}",
             ),
         ])
-    if reply_markup_extra:
-        buttons.append(_back_row())
+    _append_back(buttons)
     await message.reply_text(
         "\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons),
     )
@@ -1497,12 +1649,100 @@ async def inline_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.inline_query.answer(inline_results, cache_time=30)
 
 
+async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not _is_admin(user.id):
+        return
+    query = update.callback_query
+    action = (query.data or "").split(":", 1)[1]
+    chat_id = query.message.chat_id
+    bot = context.bot
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    target = _ChatReply(bot, chat_id)
+
+    if action == "menu":
+        await bot.send_message(
+            chat_id, msg.t("admin_menu_text"),
+            reply_markup=_admin_menu_keyboard(),
+        )
+        return
+    if action == "stats":
+        await bot.send_message(
+            chat_id, _stats_text(), reply_markup=_back_button(admin=True),
+        )
+        return
+    if action == "creds":
+        status_text, _ = get_credentials_status()
+        await bot.send_message(
+            chat_id, status_text, reply_markup=_back_button(admin=True),
+        )
+        return
+    if action == "cookies":
+        await bot.send_message(
+            chat_id, _cookies_status_text(), reply_markup=_back_button(admin=True),
+        )
+        return
+    if action == "report":
+        summary = user_manager.database.global_report_summary()
+        text = rpt.format_global_summary(summary, _platform_fa)
+        await target.reply_text(text, reply_markup=rpt.build_global_menu_keyboard())
+        return
+    if action == "reports":
+        await _show_global_section(target, "bugs", 0)
+        return
+    if action == "users":
+        await _show_users_page(target, 0)
+        return
+    if action == "export":
+        await _run_export(bot, chat_id)
+        return
+    if action == "viplog":
+        status = vip_status_text()
+        ok, detail = await send_test_message(bot)
+        mark = "✅" if ok else "❌"
+        await bot.send_message(
+            chat_id, f"{mark} {detail}\n\n{status}",
+            reply_markup=_back_button(admin=True),
+        )
+        return
+    if action == "broadcast":
+        await bot.send_message(
+            chat_id, msg.t("admin_broadcast_usage"),
+            reply_markup=_back_button(admin=True),
+        )
+        return
+    if action == "grant":
+        await bot.send_message(
+            chat_id, msg.t("admin_grant_usage"),
+            reply_markup=_back_button(admin=True),
+        )
+        return
+    if action == "topup":
+        await bot.send_message(
+            chat_id, msg.t("admin_topup_usage"),
+            reply_markup=_back_button(admin=True),
+        )
+        return
+    if action == "channelid":
+        await bot.send_message(
+            chat_id, msg.t("admin_channelid_usage"),
+            reply_markup=_back_button(admin=True),
+        )
+
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if not await ensure_access(update, context):
         return
     data = query.data or ""
+
+    if data.startswith("admin:"):
+        await _handle_admin_callback(update, context)
+        return
 
     if data.startswith("menu:"):
         action = data.split(":", 1)[1]
@@ -1519,7 +1759,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             first_name = user.first_name if user else ""
             await context.bot.send_message(
                 chat_id, msg.start_text(first_name),
-                reply_markup=_start_menu_keyboard(),
+                reply_markup=_start_menu_keyboard(user.id if user else None),
             )
             return
 
@@ -1577,7 +1817,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         elif action == "help":
             await context.bot.send_message(
-                chat_id, msg.help_text(), reply_markup=_start_menu_keyboard(),
+                chat_id, msg.help_text(),
+                reply_markup=_start_menu_keyboard(user.id if user else None),
             )
         elif action == "history":
             rows = user_manager.get_user_history(user.id, limit=10)
@@ -1722,7 +1963,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hist_id = int(data.split(":", 1)[1])
         row = user_manager.get_history_by_id(hist_id)
         if not row:
-            await query.message.reply_text(msg.record_not_found())
+            await query.message.reply_text(
+                msg.record_not_found(), reply_markup=_back_button(),
+            )
             return
         meta = TrackMetadata()
         meta.title = row["title"]
@@ -1736,7 +1979,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fav_id = int(data.split(":", 1)[1])
         row = user_manager.get_favorite_by_id(fav_id, update.effective_user.id)
         if not row:
-            await query.message.reply_text(msg.favorite_missing())
+            await query.message.reply_text(
+                msg.favorite_missing(), reply_markup=_back_button(),
+            )
             return
         meta = TrackMetadata()
         meta.title = row["title"]
@@ -1751,7 +1996,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action, token = data.split(":", 2)[1], data.split(":", 2)[2]
         ref = resolve_track_ref(token)
         if not ref:
-            await query.message.reply_text(msg.pick_expired_short())
+            await query.message.reply_text(msg.pick_expired_short(), reply_markup=_back_button())
             return
         title, artist = ref
         key = _favorite_content_key(title, artist)
@@ -1841,7 +2086,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         artist = data.split(":", 2)[2]
         results = await AppleMusicMetadata.search_many(artist, limit=5)
         if not results:
-            await query.message.reply_text(msg.songs_not_found())
+            await query.message.reply_text(
+                msg.songs_not_found(), reply_markup=_back_button(),
+            )
             return
         lines = [msg.more_by_artist(artist)]
         buttons = []
@@ -1855,6 +2102,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     callback_data=f"searchpick:{i}",
                 )
             ])
+        _append_back(buttons)
         await query.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
         return
 
@@ -1862,7 +2110,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         token = data.split(":", 2)[2]
         ref = resolve_track_ref(token)
         if not ref:
-            await query.message.reply_text(msg.pick_expired_short())
+            await query.message.reply_text(msg.pick_expired_short(), reply_markup=_back_button())
             return
         title, artist = ref
         if await _reject_if_busy(query.message, context):
@@ -1912,6 +2160,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         callback_data=f"searchpick:{i}",
                     )
                 ])
+            _append_back(buttons)
             await reporter.update(100, "آماده شد", force=True)
             await status.edit_text(
                 "\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons)
@@ -1933,7 +2182,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         token = data.split(":", 2)[2]
         ref = resolve_lyrics_ref(token)
         if not ref:
-            await query.message.reply_text(msg.pick_expired_short())
+            await query.message.reply_text(msg.pick_expired_short(), reply_markup=_back_button())
             return
         title, artist = ref
         if await _reject_if_busy(query.message, context):
@@ -1997,7 +2246,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         token = data.split(":", 2)[2]
         ref = resolve_track_ref(token)
         if not ref:
-            await query.message.reply_text(msg.pick_expired_short())
+            await query.message.reply_text(msg.pick_expired_short(), reply_markup=_back_button())
             return
         title, artist = ref
         if await _reject_if_busy(query.message, context):
@@ -2076,7 +2325,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
         except Exception:
-            await query.message.reply_text(msg.quality_set(value))
+            await query.message.reply_text(
+                msg.quality_set(value), reply_markup=_back_button(),
+            )
         return
 
     if data.startswith("follow:"):
@@ -2124,7 +2375,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         name, tracks = await TrackMetadata.create_collection(url, _ydl_opts_factory)
         if not tracks:
-            await query.message.reply_text(msg.collection_not_found())
+            await query.message.reply_text(msg.collection_not_found(), reply_markup=_back_button())
             return
         await process_playlist(
             update, context, tracks, name, orchestrator,
@@ -2136,7 +2387,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = data.split(":", 1)[1]
         hit = context.user_data.get("search_cache", {}).get(idx)
         if not hit:
-            await query.message.reply_text(msg.pick_expired())
+            await query.message.reply_text(msg.pick_expired(), reply_markup=_back_button())
             return
         if hit.kind == "track":
             if hit.source == "apple" and hit.url:
@@ -2152,7 +2403,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text(str(exc))
                 return
             if not tracks:
-                await query.message.reply_text(msg.collection_not_found())
+                await query.message.reply_text(msg.collection_not_found(), reply_markup=_back_button())
                 return
             await process_playlist(
                 update, context, tracks, name or hit.name, orchestrator,
@@ -2174,7 +2425,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 artist_id = context.user_data.get("artist_search_cache", {}).get(idx)
             if not artist_id:
-                await query.message.reply_text(msg.pick_expired())
+                await query.message.reply_text(msg.pick_expired(), reply_markup=_back_button())
                 return
             await _show_artist_page(query.message, artist_id, context, user_id=update.effective_user.id)
             return
@@ -2182,18 +2433,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "track":
             meta = cache.get("tracks", {}).get(idx)
             if not meta:
-                await query.message.reply_text(msg.pick_expired())
+                await query.message.reply_text(msg.pick_expired(), reply_markup=_back_button())
                 return
             await _download_and_send(query.message, update.effective_user, meta, context)
             return
         if action == "album":
             url = cache.get("albums", {}).get(idx)
             if not url:
-                await query.message.reply_text(msg.pick_expired())
+                await query.message.reply_text(msg.pick_expired(), reply_markup=_back_button())
                 return
             name, tracks = await TrackMetadata.create_collection(url, _ydl_opts_factory)
             if not tracks:
-                await query.message.reply_text(msg.collection_not_found())
+                await query.message.reply_text(msg.collection_not_found(), reply_markup=_back_button())
                 return
             await process_playlist(
                 update, context, tracks, name, orchestrator,
@@ -2208,7 +2459,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.get("reco_cache", {}).get(idx)
         )
         if not meta:
-            await query.message.reply_text(msg.pick_expired())
+            await query.message.reply_text(msg.pick_expired(), reply_markup=_back_button())
             return
         await _download_and_send(query.message, update.effective_user, meta, context)
         return
@@ -2217,7 +2468,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = data.split(":", 1)[1]
         meta = context.user_data.get("top_cache", {}).get(idx)
         if not meta:
-            await query.message.reply_text(msg.pick_expired_short())
+            await query.message.reply_text(msg.pick_expired_short(), reply_markup=_back_button())
             return
         await _download_and_send(query.message, update.effective_user, meta, context)
         return
@@ -2228,7 +2479,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if meta:
             await _download_and_send(query.message, update.effective_user, meta, context)
         else:
-            await query.message.reply_text(msg.pick_expired_short())
+            await query.message.reply_text(msg.pick_expired_short(), reply_markup=_back_button())
         return
 
 
@@ -2339,49 +2590,60 @@ async def _resolve_similar_tracks(
 
 
 async def _offer_nearby_tracks(message, context, metadata, query=None):
-    """After a failed search/download or mismatch, list nearby catalog versions."""
+    """After a failed search/download or mismatch, list nearby YouTube/SoundCloud versions."""
     title = (getattr(metadata, "title", None) or "").strip() if metadata else ""
     artist = (getattr(metadata, "artist", None) or "").strip() if metadata else ""
     search_query = (query or "").strip()
     if not search_query and metadata:
         search_query = (getattr(metadata, "search_query", None) or "").strip()
+        if search_query and (is_music_url(search_query) or "http" in search_query.lower()):
+            search_query = ""
     seed_title = title or search_query
-    if not seed_title and not artist:
-        return
-
-    extra = []
-    if search_query and not is_music_url(search_query) and "http" not in search_query.lower():
-        extra.append(search_query)
-    if title:
-        extra.append(title)
-        cleaned = re.sub(r"[?!.,]+", " ", title).strip()
-        if cleaned and cleaned.lower() != title.lower():
-            extra.append(cleaned)
-    # Title-only first: "title + artist" often returns a single exact iTunes hit.
-    try:
-        results = await AppleMusicMetadata.search_nearby(
-            seed_title, limit=8, extra_queries=extra,
-        )
-    except Exception:
-        logger.exception("Nearby catalog search failed for %r", seed_title)
-        return
-    if not results:
+    if not seed_title:
         return
 
     seed = (title.lower(), artist.lower()) if title else None
-    filtered = []
-    for r in results:
-        key = ((r.title or "").strip().lower(), (r.artist or "").strip().lower())
-        if seed and key == seed:
-            continue
-        filtered.append(r)
-    if len(filtered) < 2:
-        filtered = list(results)
+    results = []
+    seen = set()
+
+    def _add(rows):
+        for r in rows or []:
+            key = (
+                (r.title or "").strip().lower(),
+                (r.artist or "").strip().lower(),
+            )
+            if not key[0] or key in seen:
+                continue
+            if seed and key == seed:
+                continue
+            seen.add(key)
+            results.append(r)
+
+    _add(getattr(metadata, "nearby_hits", None) if metadata else None)
+    if len(results) < 4:
+        try:
+            _add(await downloader.search_nearby(seed_title, limit=8))
+        except Exception:
+            logger.exception("Nearby YT/SC search failed for %r", seed_title)
+    if len(results) < 2:
+        extra = []
+        if search_query:
+            extra.append(search_query)
+        if title:
+            extra.append(title)
+        try:
+            _add(await AppleMusicMetadata.search_nearby(
+                seed_title, limit=8, extra_queries=extra,
+            ))
+        except Exception:
+            logger.exception("Nearby catalog search failed for %r", seed_title)
+    if not results:
+        return
 
     cache = {}
-    lines = [msg.nearby_header(title or seed_title, artist)]
+    lines = [msg.nearby_header(seed_title, "")]
     buttons = []
-    for i, r in enumerate(filtered[:8], 1):
+    for i, r in enumerate(results[:8], 1):
         lines.append(f"{i}. {r.title} — {r.artist}")
         cache[str(i)] = TrackMetadata()._copy_from(r)
         buttons.append([
@@ -2390,6 +2652,7 @@ async def _offer_nearby_tracks(message, context, metadata, query=None):
                 callback_data=f"searchpick:{i}",
             )
         ])
+    _append_back(buttons)
     context.user_data["reco_cache"] = cache
     try:
         await message.reply_text(
@@ -2560,7 +2823,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not is_music_url(text) and not looks_like_music_query(text):
-        await update.message.reply_text(msg.not_music_query())
+        await update.message.reply_text(
+            msg.not_music_query(), reply_markup=_back_button(),
+        )
         return
 
     if await _deny_quota(update.message, context.bot, user):
@@ -2726,12 +2991,9 @@ def _youtube_auth_status():
 async def cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
-    _file_ok, file_detail, updated = _cookie_file_status()
-    healthy, _detail = _youtube_auth_status()
-    if downloader.cookies_from_browser:
-        file_detail += f"\nپشتیبان مرورگر: {downloader.cookies_from_browser}"
     await update.message.reply_text(
-        msg.cookies_status(healthy, file_detail, downloader.cookies_path, updated)
+        _cookies_status_text(),
+        reply_markup=_back_button(admin=True),
     )
 
 
@@ -2743,7 +3005,10 @@ async def cookies_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not doc:
         return
     if doc.file_size and doc.file_size > _COOKIE_MAX_BYTES:
-        await update.message.reply_text(msg.cookies_too_large(_COOKIE_MAX_BYTES // 1024))
+        await update.message.reply_text(
+            msg.cookies_too_large(_COOKIE_MAX_BYTES // 1024),
+            reply_markup=_back_button(admin=True),
+        )
         return
 
     tg_file = await context.bot.get_file(doc.file_id)
@@ -2752,7 +3017,9 @@ async def cookies_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok, detail = cookie_jar_status(text)
     if not ok:
         logger.warning("Rejected uploaded cookie file: %s", detail)
-        await update.message.reply_text(msg.cookies_rejected(detail))
+        await update.message.reply_text(
+            msg.cookies_rejected(detail), reply_markup=_back_button(admin=True),
+        )
         return
 
     path = downloader.cookies_path
@@ -2768,12 +3035,17 @@ async def cookies_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         os.chmod(path, 0o600)
     except OSError as e:
         logger.error("Could not write cookies.txt: %s", e)
-        await update.message.reply_text(msg.cookies_rejected(str(e)))
+        await update.message.reply_text(
+            msg.cookies_rejected(str(e)), reply_markup=_back_button(admin=True),
+        )
         return
 
     logger.info("cookies.txt replaced via admin upload (%s)", detail)
     invalidate_youtube_auth_probe()
-    await update.message.reply_text(msg.cookies_accepted(detail, backed_up))
+    await update.message.reply_text(
+        msg.cookies_accepted(detail, backed_up),
+        reply_markup=_back_button(admin=True),
+    )
     await _check_and_report_cookie_health(context.bot)
 
 
@@ -2913,7 +3185,9 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = user_manager.database
     summary = db.global_report_summary()
     text = rpt.format_global_summary(summary, _platform_fa)
-    await update.message.reply_text(text, reply_markup=rpt.build_global_menu_keyboard())
+    await update.message.reply_text(
+        text, reply_markup=_with_back(rpt.build_global_menu_keyboard(), admin=True),
+    )
 
 
 async def reports_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2925,7 +3199,10 @@ async def reports_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             rid = int(raw)
         except ValueError:
-            await update.message.reply_text("نحوه استفاده: /reports یا /reports <شناسه>")
+            await update.message.reply_text(
+                "نحوه استفاده: /reports یا /reports <شناسه>",
+                reply_markup=_back_button(admin=True),
+            )
             return
         await _show_error_report_detail(update.message, rid)
         return
@@ -2948,7 +3225,10 @@ async def user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
     if not context.args:
-        await update.message.reply_text("نحوه استفاده: /user <شناسه کاربر>")
+        await update.message.reply_text(
+            "نحوه استفاده: /user <شناسه کاربر>",
+            reply_markup=_back_button(admin=True),
+        )
         return
     await _show_user_detail(update.message, context.args[0])
 
@@ -2956,7 +3236,11 @@ async def user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
-    status = await update.message.reply_text("در حال آماده‌سازی خروجی...")
+    await _run_export(context.bot, update.effective_chat.id)
+
+
+async def _run_export(bot, chat_id):
+    status = await bot.send_message(chat_id, "در حال آماده‌سازی خروجی...")
     db = user_manager.database
     payload = db.export_all()
     filename = f"hiit_radio_export_{int(time.time())}.json"
@@ -2965,13 +3249,20 @@ async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         with open(path, "rb") as f:
-            await context.bot.send_document(
-                chat_id=update.effective_chat.id,
+            await bot.send_document(
+                chat_id=chat_id,
                 document=f,
                 filename=filename,
                 caption="خروجی کامل پایگاه داده",
             )
-        await status.delete()
+        try:
+            await status.delete()
+        except Exception:
+            pass
+        await bot.send_message(
+            chat_id, "خروجی آماده است.",
+            reply_markup=_back_button(admin=True),
+        )
     finally:
         if path.exists():
             path.unlink()
@@ -3150,7 +3441,7 @@ async def retry_error_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     user_manager, admin_logger, collection_url=q,
                 )
                 return
-            await message.reply_text(msg.collection_not_found())
+            await message.reply_text(msg.collection_not_found(), reply_markup=_back_button())
             return
         if title:
             meta = TrackMetadata()
@@ -3185,7 +3476,7 @@ async def retry_error_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     user_manager, admin_logger, collection_url=q,
                 )
             else:
-                await message.reply_text(msg.collection_not_found())
+                await message.reply_text(msg.collection_not_found(), reply_markup=_back_button())
             return
         meta = await TrackMetadata.create(q, _ydl_opts_factory)
         if meta and meta.title:
@@ -3212,7 +3503,7 @@ async def retry_error_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 user_manager, admin_logger, collection_url=q,
             )
         else:
-            await message.reply_text(msg.collection_not_found())
+            await message.reply_text(msg.collection_not_found(), reply_markup=_back_button())
         return
 
     if kind == "discover":
@@ -3262,6 +3553,7 @@ async def retry_error_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                         callback_data=f"searchpick:{i}",
                     )
                 ])
+            _append_back(buttons)
             await status.edit_text(
                 "\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons),
             )
@@ -3397,7 +3689,9 @@ async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text(reply)
             return
-        await update.message.reply_text(msg.support_admin_usage())
+        await update.message.reply_text(
+            msg.support_admin_usage(), reply_markup=_back_button(admin=True),
+        )
         return
 
     if not body:
@@ -3430,7 +3724,7 @@ async def supportend_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ok, text = await support_chat.end_admin_session(
         context.bot, user_manager.database, user.id,
     )
-    await update.message.reply_text(text)
+    await update.message.reply_text(text, reply_markup=_back_button(admin=True))
 
 
 async def admin_support_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3587,6 +3881,7 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("lang", lang_command))
     application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(CommandHandler("analytics", analytics_command))

@@ -385,6 +385,28 @@ STRINGS = {
     "menu_cancel": "⛔ Cancel current job",
     "menu_back": "🔙 Back to menu",
     "menu_lang": "🌐 Language",
+    "menu_admin": "🛠 Admin",
+    "menu_admin_back": "🔙 Admin panel",
+    "admin_menu_text": "🛠 Admin panel — pick a tool:",
+    "admin_stats": "📊 Stats",
+    "admin_report": "📈 Dashboard",
+    "admin_reports": "📋 User reports",
+    "admin_users": "👥 Users",
+    "admin_creds": "🔑 Credentials",
+    "admin_cookies": "🍪 Cookies",
+    "admin_export": "📤 Export",
+    "admin_viplog": "🧪 VIP log",
+    "admin_broadcast": "📣 Broadcast",
+    "admin_channelid": "🆔 Channel ID",
+    "admin_grant": "➕ Grant",
+    "admin_topup": "💰 Top-up",
+    "admin_broadcast_usage": "Usage: /broadcast <message>",
+    "admin_grant_usage": "Usage: /grant <user_id> <premium|unlimited> <days>",
+    "admin_topup_usage": "Usage: /topup <user_id> [amount]",
+    "admin_channelid_usage": (
+        "Forward a VIP channel post here (keep sender name),\n"
+        "or send /channelid inside that channel."
+    ),
 
     # --- language selection ---
     "lang_choose": "🌐 Choose the bot language:",

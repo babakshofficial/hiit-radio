@@ -5,6 +5,8 @@ import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
+import messages as msg
+
 PER_PAGE = 10
 
 REQUEST_TYPE_FA = {
@@ -239,6 +241,7 @@ def build_error_reports_keyboard(rows, page, total_pages):
     if nav:
         buttons.append(nav)
     buttons.append([InlineKeyboardButton("منوی گزارش", callback_data="rpt:menu")])
+    buttons.append([InlineKeyboardButton(msg.t("menu_admin_back"), callback_data="admin:menu")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -254,6 +257,7 @@ def build_error_report_detail_keyboard(report_id):
         ],
         [InlineKeyboardButton("همه گزارش‌ها", callback_data="rpt:bugs:0")],
         [InlineKeyboardButton("منوی گزارش", callback_data="rpt:menu")],
+        [InlineKeyboardButton(msg.t("menu_admin_back"), callback_data="admin:menu")],
     ])
 
 
@@ -282,6 +286,7 @@ def build_global_menu_keyboard():
         ],
         [InlineKeyboardButton("گزارش‌های کاربران (/reports)", callback_data="rpt:bugs:0")],
         [InlineKeyboardButton("بازگشت به خلاصه", callback_data="rpt:menu")],
+        [InlineKeyboardButton(msg.t("menu_admin_back"), callback_data="admin:menu")],
     ])
 
 
@@ -300,6 +305,7 @@ def build_user_menu_keyboard(user_id):
             InlineKeyboardButton("هنرمندان", callback_data=f"rpt:user:{uid}:artists"),
             InlineKeyboardButton("بازگشت", callback_data="rpt:users:0"),
         ],
+        [InlineKeyboardButton(msg.t("menu_admin_back"), callback_data="admin:menu")],
     ])
 
 
@@ -311,4 +317,5 @@ def build_pagination_keyboard(scope, page, total_pages, extra=None):
     if nav:
         rows.append(nav)
     rows.append([InlineKeyboardButton("منوی گزارش", callback_data="rpt:menu")])
+    rows.append([InlineKeyboardButton(msg.t("menu_admin_back"), callback_data="admin:menu")])
     return InlineKeyboardMarkup(rows)

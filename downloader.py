@@ -15,7 +15,7 @@ import requests
 from PIL import Image, ImageFilter, ImageChops
 import io
 
-from metadata import score_query_coverage
+from metadata import TrackMetadata, score_query_coverage, score_title_nearness
 
 logger = logging.getLogger(__name__)
 
@@ -425,6 +425,57 @@ def _candidate_url(video, source_label="YouTube"):
         # Flat scsearch results sometimes only expose a numeric/track id.
         return None
     return f"https://www.youtube.com/watch?v={vid}"
+
+
+def _entry_title_artist(video):
+    """Best-effort song title + artist from a flat yt-dlp search entry."""
+    raw = (video.get("title") or "").strip()
+    uploader = (
+        video.get("artist")
+        or video.get("uploader")
+        or video.get("channel")
+        or ""
+    ).strip()
+    uploader = re.sub(r"\s*-\s*Topic\s*$", "", uploader, flags=re.I)
+    uploader = re.sub(r"VEVO\s*$", "", uploader, flags=re.I).strip()
+    if re.search(r"\s+[-–]\s+", raw):
+        left, right = re.split(r"\s+[-–]\s+", raw, maxsplit=1)
+        left, right = left.strip(), right.strip()
+        if left and right:
+            if uploader:
+                left_sim = difflib.SequenceMatcher(
+                    None, left.lower(), uploader.lower()
+                ).ratio()
+                right_sim = difflib.SequenceMatcher(
+                    None, right.lower(), uploader.lower()
+                ).ratio()
+                if right_sim >= 0.5 and right_sim > left_sim:
+                    return left, right
+                if left_sim >= 0.45:
+                    return right, left
+            # YouTube convention: Artist - Title
+            return right, left
+    return raw, uploader
+
+
+def _nearby_track_from_video(video, source_label, query):
+    url = _candidate_url(video, source_label)
+    if not url:
+        return None
+    title, artist = _entry_title_artist(video)
+    if not title:
+        return None
+    meta = TrackMetadata()
+    meta.title = title
+    meta.artist = artist or None
+    meta.source_url = url
+    meta.url = url
+    meta.id = str(video.get("id") or abs(hash(url)))
+    meta.type = "search"
+    meta.search_query = query
+    thumbs = video.get("thumbnails") or []
+    meta.artwork_url = video.get("thumbnail") or (thumbs[-1].get("url") if thumbs else None)
+    return meta
 
 
 def _strip_track_noise(title):
@@ -1031,6 +1082,75 @@ class MusicDownloader:
         }
         return self._apply_auth(ydl_opts, live_browser=False)
 
+    async def search_nearby(self, query, limit=8):
+        """YouTube + SoundCloud tracks whose titles are near ``query``.
+
+        Unlike download matching, this does not require the (possibly wrong)
+        catalog artist. Results have ``source_url`` so a pick downloads that page.
+        """
+        query = (query or "").strip()
+        if len(query) < 3:
+            return []
+        loop = asyncio.get_event_loop()
+        search_opts = self._build_search_opts()
+        n = max(int(limit), 8)
+        scored = []
+        seen_ids = set()
+
+        def _extract(prefix):
+            with self._with_ydl(search_opts) as ydl:
+                return ydl.extract_info(f"{prefix}{n}:{query}", download=False)
+
+        for prefix, label in (("ytsearch", "YouTube"), ("scsearch", "SoundCloud")):
+            try:
+                info = await loop.run_in_executor(
+                    None, lambda p=prefix: _extract(p)
+                )
+            except Exception:
+                logger.exception("Nearby %s search failed for %r", label, query)
+                continue
+            for video in (info or {}).get("entries") or []:
+                if not video:
+                    continue
+                vid = video.get("id")
+                if vid and vid in seen_ids:
+                    continue
+                meta = _nearby_track_from_video(video, label, query)
+                if not meta:
+                    continue
+                if ((meta.title or "") + " " + (meta.artist or "")).count("#") >= 2:
+                    continue
+                if vid:
+                    seen_ids.add(vid)
+                near = score_title_nearness(
+                    query, meta.title, require_distinctive=True,
+                )
+                if near < 45:
+                    continue
+                views = video.get("view_count") or video.get("playback_count") or 0
+                try:
+                    views = int(views)
+                except (TypeError, ValueError):
+                    views = 0
+                scored.append((near, views, meta))
+
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        out = []
+        seen_ta = set()
+        for _near, _views, meta in scored:
+            key = (
+                (meta.title or "").strip().lower(),
+                (meta.artist or "").strip().lower(),
+            )
+            if key in seen_ta:
+                continue
+            seen_ta.add(key)
+            out.append(meta)
+            if len(out) >= limit:
+                break
+        logger.info("Nearby YT/SC: %d tracks for %r", len(out), query)
+        return out
+
     async def download_song(self, metadata, progress_reporter=None, cancel_check=None,
                           quality=DEFAULT_QUALITY):
         """Download song with multi-candidate search and multi-layer validation.
@@ -1550,7 +1670,28 @@ class MusicDownloader:
                 if cand[0] >= MATCH_THRESHOLD:
                     download_queue.append(cand)
 
+        def _collect_nearby():
+            hits = []
+            seen = set()
+            for label in ("YouTube", "SoundCloud"):
+                for _score, video in found_by_source.get(label) or []:
+                    meta = _nearby_track_from_video(video, label, original_query)
+                    if not meta:
+                        continue
+                    key = (
+                        (meta.title or "").strip().lower(),
+                        (meta.artist or "").strip().lower(),
+                        meta.source_url,
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    hits.append(meta)
+            if hits:
+                metadata.nearby_hits = hits
+
         if not download_queue:
+            _collect_nearby()
             score_txt = f"{best[0]:.1f}%" if best else "n/a"
             logger.error(
                 f"No candidate passed validation on any source (title >= {TITLE_THRESHOLD:.0f}% and "
@@ -1754,6 +1895,7 @@ class MusicDownloader:
                 return None, "cancelled", failure_trail
 
             if not file_path:
+                _collect_nearby()
                 return None, last_err or ("bot_check" if saw_bot_check else "no_match"), failure_trail
 
             try:

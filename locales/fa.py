@@ -385,6 +385,28 @@ STRINGS = {
     "menu_cancel": "⛔ لغو کار جاری",
     "menu_back": "🔙 بازگشت به منو",
     "menu_lang": "🌐 زبان",
+    "menu_admin": "🛠 مدیریت",
+    "menu_admin_back": "🔙 پنل مدیریت",
+    "admin_menu_text": "🛠 پنل مدیریت — یک ابزار را انتخاب کن:",
+    "admin_stats": "📊 آمار",
+    "admin_report": "📈 داشبورد",
+    "admin_reports": "📋 گزارش کاربران",
+    "admin_users": "👥 کاربران",
+    "admin_creds": "🔑 اعتبارنامه‌ها",
+    "admin_cookies": "🍪 کوکی",
+    "admin_export": "📤 خروجی",
+    "admin_viplog": "🧪 لاگ VIP",
+    "admin_broadcast": "📣 پیام همگانی",
+    "admin_channelid": "🆔 شناسه کانال",
+    "admin_grant": "➕ گرنت",
+    "admin_topup": "💰 شارژ سهمیه",
+    "admin_broadcast_usage": "نحوه استفاده: /broadcast <پیام>",
+    "admin_grant_usage": "نحوه استفاده: /grant <user_id> <premium|unlimited> <days>",
+    "admin_topup_usage": "نحوه استفاده: /topup <user_id> [amount]",
+    "admin_channelid_usage": (
+        "یک پیام از کانال VIP را به این چت فوروارد کن (با حفظ نام فرستنده).\n"
+        "یا در خود کانال /channelid را بزن."
+    ),
 
     # --- language selection ---
     "lang_choose": "🌐 زبان ربات را انتخاب کن:",

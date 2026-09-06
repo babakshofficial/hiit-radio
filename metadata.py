@@ -233,7 +233,7 @@ def score_query_match(query, title, artist):
     return min(score, 100.0)
 
 
-def score_title_nearness(seed_title, candidate_title):
+def score_title_nearness(seed_title, candidate_title, require_distinctive=False):
     """How close two song titles are (0-100), ignoring artist.
 
     Used to list covers / nearby versions when the exact catalog hit failed.
@@ -251,6 +251,14 @@ def score_title_nearness(seed_title, candidate_title):
         return 0.0
     if len(seed_tokens) >= 3 and hits < 2:
         return 0.0
+    if require_distinctive:
+        distinctive = [
+            t for t in seed_tokens if t not in _TITLE_HOOKS and len(t) >= 5
+        ]
+        if distinctive and not all(
+            _token_in_haystack(t, cand_tokens, cand) for t in distinctive
+        ):
+            return 0.0
     coverage = 100.0 * hits / len(seed_tokens)
     seq = difflib.SequenceMatcher(None, seed, cand).ratio() * 100.0
     return min(100.0, coverage * 0.65 + seq * 0.35)

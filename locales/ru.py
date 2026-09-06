@@ -413,6 +413,28 @@ STRINGS = {
     "menu_cancel": "⛔ Отменить текущую задачу",
     "menu_back": "🔙 Назад в меню",
     "menu_lang": "🌐 Язык",
+    "menu_admin": "🛠 Админ",
+    "menu_admin_back": "🔙 Админ-панель",
+    "admin_menu_text": "🛠 Админ-панель — выбери инструмент:",
+    "admin_stats": "📊 Статистика",
+    "admin_report": "📈 Дашборд",
+    "admin_reports": "📋 Жалобы пользователей",
+    "admin_users": "👥 Пользователи",
+    "admin_creds": "🔑 Доступы",
+    "admin_cookies": "🍪 Cookies",
+    "admin_export": "📤 Экспорт",
+    "admin_viplog": "🧪 VIP-лог",
+    "admin_broadcast": "📣 Рассылка",
+    "admin_channelid": "🆔 ID канала",
+    "admin_grant": "➕ Выдать",
+    "admin_topup": "💰 Пополнить",
+    "admin_broadcast_usage": "Использование: /broadcast <сообщение>",
+    "admin_grant_usage": "Использование: /grant <user_id> <premium|unlimited> <days>",
+    "admin_topup_usage": "Использование: /topup <user_id> [amount]",
+    "admin_channelid_usage": (
+        "Перешли сюда пост из VIP-канала (с именем отправителя)\n"
+        "или отправь /channelid в самом канале."
+    ),
 
     # --- language selection ---
     "lang_choose": "🌐 Выбери язык бота:",

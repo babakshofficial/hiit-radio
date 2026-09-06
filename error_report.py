@@ -31,7 +31,10 @@ def build_keyboard(report_id, *, include_retry=True):
                 callback_data=f"retry:{report_id}",
             )
         )
-    return InlineKeyboardMarkup([row])
+    return InlineKeyboardMarkup([
+        row,
+        [InlineKeyboardButton(msg.t("menu_back"), callback_data="menu:back")],
+    ])
 
 
 def create_context(db, user, *, kind, code, user_message, **context):
