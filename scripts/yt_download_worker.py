@@ -79,7 +79,14 @@ def main() -> int:
         opts["cookiefile"] = d.cookies_path
     else:
         opts.pop("cookiefile", None)
-    opts.pop("proxy", None)
+
+    # Native yt-dlp proxy (set by parent after clearing proxychains LD_PRELOAD).
+    proxy = (os.environ.get("YTDLP_PROXY") or "").strip()
+    if proxy:
+        opts["proxy"] = proxy
+        print(f"yt_worker proxy={proxy}", flush=True)
+    else:
+        opts.pop("proxy", None)
 
     auth = "browser" if opts.get("cookiesfrombrowser") else (
         "cookiefile" if opts.get("cookiefile") else "none"

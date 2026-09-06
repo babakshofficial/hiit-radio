@@ -81,6 +81,94 @@ def downloads_in_progress():
 _BROWSER_RETRY_DELAYS = (2, 6, 15)
 
 
+def _under_proxychains(env=None):
+    """True when this process (or env) is wrapped by proxychains LD_PRELOAD."""
+    e = env if env is not None else os.environ
+    preload = (e.get("LD_PRELOAD") or "").lower()
+    if "proxychains" in preload:
+        return True
+    if any(k.upper().startswith("PROXYCHAINS") for k in e):
+        return True
+    return False
+
+
+def _proxy_from_proxychains_conf():
+    """Parse the first socks/http proxy from proxychains config → yt-dlp URL."""
+    for path in (
+        os.getenv("PROXYCHAINS_CONF_FILE", "").strip(),
+        "/etc/proxychains4.conf",
+        "/etc/proxychains.conf",
+    ):
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split()
+                    if len(parts) < 3:
+                        continue
+                    kind = parts[0].lower()
+                    host, port = parts[1], parts[2]
+                    if kind.startswith("socks5"):
+                        # socks5h = resolve DNS through the proxy (matches proxy_dns)
+                        return f"socks5h://{host}:{port}"
+                    if kind.startswith("socks4"):
+                        return f"socks4://{host}:{port}"
+                    if kind.startswith("http"):
+                        return f"http://{host}:{port}"
+        except OSError:
+            continue
+    return ""
+
+
+def _youtube_proxy_url(env=None):
+    """Proxy for YouTube yt-dlp calls (native, not LD_PRELOAD).
+
+    proxychains LD_PRELOAD commonly yields empty format lists /
+    \"Requested format is not available\". Prefer yt-dlp's own socks/http proxy
+    while stripping LD_PRELOAD from the worker.
+    """
+    explicit = os.getenv("YTDLP_PROXY", "").strip()
+    if explicit:
+        return explicit
+    e = env if env is not None else os.environ
+    if _under_proxychains(e) or os.getenv("YTDLP_USE_PROXYCHAINS_PROXY", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        return _proxy_from_proxychains_conf()
+    return ""
+
+
+def _prepare_youtube_worker_env(base_env=None):
+    """Env for yt_download_worker: no proxychains preload; optional YTDLP_PROXY."""
+    src = dict(base_env or os.environ)
+    under = _under_proxychains(src)
+    inherit = os.getenv("YTDLP_INHERIT_PROXYCHAINS", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    env = dict(src)
+    proxy = _youtube_proxy_url(src) or (
+        _proxy_from_proxychains_conf() if under else ""
+    )
+
+    if inherit:
+        # Keep LD_PRELOAD (usually breaks formats). Only pass explicit proxy.
+        explicit = (os.getenv("YTDLP_PROXY") or "").strip()
+        if explicit:
+            env["YTDLP_PROXY"] = explicit
+        return env, explicit or None
+
+    env.pop("LD_PRELOAD", None)
+    for key in list(env):
+        if key.upper().startswith("PROXYCHAINS"):
+            env.pop(key, None)
+    if proxy:
+        env["YTDLP_PROXY"] = proxy
+    return env, proxy or None
+
 def _deno_js_runtimes():
     """Return yt-dlp ``js_runtimes`` config pointing at deno when installed."""
     explicit = os.getenv("YTDLP_DENO_PATH", "").strip()
@@ -769,21 +857,12 @@ class MusicDownloader:
         _ensure_youtube_session_env()
         root = os.path.dirname(os.path.abspath(__file__))
         worker = os.path.join(root, "scripts", "yt_download_worker.py")
-        env = os.environ.copy()
+        env, proxy = _prepare_youtube_worker_env(os.environ)
         deno_bin = os.path.expanduser("~/.deno/bin")
         venv_bin = os.path.join(root, ".venv", "bin")
         env["PATH"] = f"{deno_bin}:{venv_bin}:" + env.get("PATH", "")
-
-        # Optional: drop proxychains LD_PRELOAD for YouTube (can fix format errors,
-        # but breaks YouTube if it only works through the proxy).
-        force_direct = os.getenv("YTDLP_CLEAR_PROXYCHAINS", "").strip().lower() in (
-            "1", "true", "yes", "on",
-        )
-        if force_direct:
-            env.pop("LD_PRELOAD", None)
-            for key in list(env):
-                if key.upper().startswith("PROXYCHAINS"):
-                    env.pop(key, None)
+        if proxy:
+            logger.info("YouTube worker using native proxy %s (LD_PRELOAD cleared)", proxy)
 
         def _run_once(run_env):
             last_err = ""
@@ -813,7 +892,10 @@ class MusicDownloader:
                             cwd=root,
                         )
                     for line in (completed.stdout or "").splitlines():
-                        if line.startswith("yt_worker ") or line == "PROBE_OK":
+                        if (
+                            line.startswith("yt_worker ")
+                            or line == "PROBE_OK"
+                        ):
                             logger.info("%s", line)
                     if completed.returncode == 0:
                         return True, f"subprocess OK (auth={auth})"
@@ -838,38 +920,7 @@ class MusicDownloader:
                     break
             return False, last_err or "YouTube worker failed"
 
-        ok, detail = _run_once(env)
-        if ok:
-            return True, detail
-
-        # If still under proxychains and format listing failed, retry direct once.
-        err_l = (detail or "").lower()
-        format_fail = (
-            "format is not available" in err_l
-            or "no video formats" in err_l
-            or "probe_no_formats" in err_l
-        )
-        if (
-            format_fail
-            and not force_direct
-            and env.get("LD_PRELOAD")
-            and os.getenv("YTDLP_INHERIT_PROXYCHAINS", "").strip().lower()
-            not in ("1", "true", "yes", "on")
-        ):
-            direct_env = env.copy()
-            direct_env.pop("LD_PRELOAD", None)
-            for key in list(direct_env):
-                if key.upper().startswith("PROXYCHAINS"):
-                    direct_env.pop(key, None)
-            logger.info(
-                "YouTube worker format failure under proxychains — retrying without LD_PRELOAD"
-            )
-            ok2, detail2 = _run_once(direct_env)
-            if ok2:
-                return True, detail2 + " (direct, no proxychains)"
-            return False, detail2 or detail
-        return False, detail
-
+        return _run_once(env)
     def _download_youtube_subprocess(self, url, output_template, quality=DEFAULT_QUALITY):
         """Download in a fresh worker subprocess (isolates Chrome cookie access)."""
         logger.info("YouTube subprocess download: %s", url)
@@ -1139,8 +1190,13 @@ class MusicDownloader:
                             return None
                         combined -= 12.0
 
-            if _has_noise(raw_title, metadata.title or original_query or ""):
-                combined -= 25.0
+            expected_for_noise = metadata.title or original_query or ""
+            if _has_noise(raw_title, expected_for_noise) or _has_noise(
+                hay, expected_for_noise
+            ):
+                # Catalog originals must not land on remixes/bootlegs just because
+                # title+artist still score high (penalty of -25 still passed MATCH_THRESHOLD).
+                return None
 
             return (
                 combined, title_sim, artist_sim, token_sim, yt_title, yt_artist,
@@ -1157,6 +1213,11 @@ class MusicDownloader:
         if q_title and q_primary:
             yt_search_strategies.append(f'{q_title} {q_primary} - Topic')
             yt_search_strategies.append(f'{q_title} {q_primary} official audio')
+            if not version_required:
+                # Push remix/extended uploads down in the search ranking.
+                yt_search_strategies.append(
+                    f'{q_title} {q_primary} official audio -remix -extended -slowed'
+                )
         if original_query:
             yt_search_strategies.append(original_query)
             yt_search_strategies.append(f'{original_query} audio')
@@ -1464,23 +1525,26 @@ class MusicDownloader:
                 return "SoundCloud"
             return "YouTube"
 
-        yt_items = [c for c in download_queue if _source_label_for(c[1]) == "YouTube"]
-        other_items = [c for c in download_queue if _source_label_for(c[1]) != "YouTube"]
-        # Probe URL can bot-check while real track downloads still work — never drop
-        # YouTube candidates solely on probe failure. Prefer SoundCloud first when the
-        # cached probe is bad; keep YouTube as fallback (e.g. SoundCloud DRM).
+        # Rank by score. Do NOT put SoundCloud ahead of better YouTube matches just
+        # because the auth probe is unhealthy — that was downloading remixes (SC)
+        # while originals (YT) sat unused. Probe failures often don't mean downloads fail.
+        def _queue_key(cand):
+            score, video = cand
+            is_yt = 1 if _source_label_for(video) == "YouTube" else 0
+            return (score, is_yt)
+
+        download_queue.sort(key=_queue_key, reverse=True)
         yt_usable = self.youtube_auth_ok()
-        if yt_usable:
-            download_queue = yt_items[:3] + other_items[:3]
-        else:
+        if not yt_usable:
             logger.warning(
-                "YouTube probe unhealthy — trying other sources first, "
-                "YouTube kept as fallback (%d candidates)",
-                len(yt_items),
+                "YouTube probe unhealthy — still ranking by match score "
+                "(%d YouTube / %d other in queue)",
+                sum(1 for c in download_queue if _source_label_for(c[1]) == "YouTube"),
+                sum(1 for c in download_queue if _source_label_for(c[1]) != "YouTube"),
             )
-            download_queue = other_items[:3] + yt_items[:4]
-            if not download_queue:
-                return None, "bot_check", failure_trail
+        download_queue = download_queue[:7]
+        if not download_queue:
+            return None, "bot_check", failure_trail
 
         def _yt_hook(d):
             try:
