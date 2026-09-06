@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import re
-import secrets
 import shutil
 import sys
 import time
@@ -87,6 +86,7 @@ import referrals
 import reporting as rpt
 import error_report
 import support_chat
+import admin_wizard
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
@@ -458,13 +458,17 @@ _AWAIT_PROMPT_KINDS = {
 
 def clear_await_input(context) -> bool:
     """Clear pending input intent. Returns True if something was cleared."""
+    context.user_data.pop("awiz_uids", None)
     if not context.user_data.pop("await_input", None):
         return False
     return True
 
 
-def set_await_input(context, kind: str) -> None:
-    context.user_data["await_input"] = {"kind": kind, "ts": time.time()}
+def set_await_input(context, kind: str, data=None) -> None:
+    payload = {"kind": kind, "ts": time.time()}
+    if data is not None:
+        payload["data"] = data
+    context.user_data["await_input"] = payload
 
 
 def peek_await_input(context):
@@ -495,8 +499,11 @@ async def consume_await_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not pending:
         return False
     kind = pending.get("kind")
-    text = (update.message.text or "").strip()
+    if admin_wizard.is_wizard(pending):
+        await admin_wizard.on_text(update, context, pending)
+        return True
     clear_await_input(context)
+    text = (update.message.text or "").strip()
     context.args = text.split() if text else []
     if kind == "search":
         await search_command(update, context)
@@ -780,25 +787,28 @@ async def invite_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def grant_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
-    # /grant <user_id> <premium|unlimited> <days>
+    # /grant <user_id> <premium|unlimited> <days> still works; otherwise Q&A.
     args = context.args or []
     if len(args) < 3:
-        await update.message.reply_text(
-            msg.t("admin_grant_usage"), reply_markup=_back_button(admin=True),
+        await admin_wizard.start_grant(
+            update.effective_message,
+            context,
+            user_id=args[0] if args else None,
+            tier=args[1] if len(args) > 1 else None,
         )
         return
-    target, tier, days_s = args[0], args[1].lower(), args[2]
+    target = admin_wizard.resolve_user_id(args[0]) or args[0]
+    tier, days_s = args[1].lower(), args[2]
     if tier not in ("premium", "unlimited"):
-        await update.message.reply_text(
-            "tier باید premium یا unlimited باشد.",
-            reply_markup=_back_button(admin=True),
+        await admin_wizard.start_grant(
+            update.effective_message, context, user_id=target,
         )
         return
     try:
         days = int(days_s)
     except ValueError:
-        await update.message.reply_text(
-            "days باید عدد باشد.", reply_markup=_back_button(admin=True),
+        await admin_wizard.start_grant(
+            update.effective_message, context, user_id=target, tier=tier,
         )
         return
     user_manager.touch_user(target)
@@ -814,23 +824,21 @@ async def grant_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def topup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
-    # /topup <user_id> [amount]
+    # /topup <user_id> [amount] — amount missing starts the Q&A amount step.
     args = context.args or []
-    if not args:
-        await update.message.reply_text(
-            msg.t("admin_topup_usage"), reply_markup=_back_button(admin=True),
+    if len(args) < 2:
+        await admin_wizard.start_topup(
+            update.effective_message,
+            context,
+            user_id=args[0] if args else None,
         )
         return
-    target = args[0]
-    amount = None
-    if len(args) > 1:
-        try:
-            amount = int(args[1])
-        except ValueError:
-            await update.message.reply_text(
-                "amount باید عدد باشد.", reply_markup=_back_button(admin=True),
-            )
-            return
+    target = admin_wizard.resolve_user_id(args[0]) or args[0]
+    try:
+        amount = int(args[1])
+    except ValueError:
+        await admin_wizard.start_topup(update.effective_message, context, user_id=target)
+        return
     user_manager.touch_user(target)
     granted, day = payments.apply_manual_topup(
         user_manager.database, target, amount=amount, admin_id=update.effective_user.id,
@@ -925,28 +933,20 @@ async def channelid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if chat.username:
             lines.append(f"یوزرنیم: @{chat.username}")
         lines.append("\nدر .env قرار بده:\nVIP_LOG_CHANNEL_ID=" + str(chat.id))
-        await msg.reply_text("\n".join(lines), parse_mode="Markdown")
+        await msg.reply_text(
+            "\n".join(lines),
+            parse_mode="Markdown",
+            reply_markup=_back_button(admin=True),
+        )
         return
 
-    await msg.reply_text(
-        "یک پیام از کانال VIP را به این چت **فوروارد** کن (با حفظ نام فرستنده).\n"
-        "یا در خود کانال یک پیام بفرست و همانجا /channelid را بزن."
-    )
+    await admin_wizard.start_channelid(msg, context)
 
 
 async def viplogtest_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
-    status = vip_status_text()
-    ok, detail = await send_test_message(context.bot)
-    if ok:
-        await update.message.reply_text(
-            f"✅ {detail}\n\n{status}", reply_markup=_back_button(admin=True),
-        )
-    else:
-        await update.message.reply_text(
-            f"❌ {detail}\n\n{status}", reply_markup=_back_button(admin=True),
-        )
+    await admin_wizard.start_viplog(update.effective_message, context)
 
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1217,9 +1217,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     parts = text.split(maxsplit=1)
     if len(parts) < 2:
-        await update.message.reply_text(
-            msg.t("admin_broadcast_usage"), reply_markup=_back_button(admin=True),
-        )
+        await admin_wizard.start_broadcast(update.effective_message, context)
         return
     msg_body = parts[1].strip()
     if msg_body.startswith("confirm "):
@@ -1232,11 +1230,18 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         msg_body = confirmed
     else:
-        token = secrets.token_hex(4)
-        user_manager.database.save_broadcast_pending(token, msg_body)
+        admin_wizard.set_state(context, "broadcast", "confirm", {"text": msg_body})
+        count = len(user_manager.get_all_user_ids())
+        preview = msg_body if len(msg_body) <= 800 else msg_body[:800] + "…"
         await update.message.reply_text(
-            f"برای تأیید:\n/broadcast confirm {token}",
-            reply_markup=_back_button(admin=True),
+            msg.t("awiz_broadcast_confirm", count=count, preview=preview),
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(msg.t("awiz_confirm"), callback_data="awiz:ok"),
+                    InlineKeyboardButton(msg.t("awiz_cancel"), callback_data="awiz:cancel"),
+                ],
+                _admin_home_row(),
+            ]),
         )
         return
 
@@ -1664,6 +1669,7 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     target = _ChatReply(bot, chat_id)
 
     if action == "menu":
+        admin_wizard.clear(context)
         await bot.send_message(
             chat_id, msg.t("admin_menu_text"),
             reply_markup=_admin_menu_keyboard(),
@@ -1691,46 +1697,28 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         await target.reply_text(text, reply_markup=rpt.build_global_menu_keyboard())
         return
     if action == "reports":
-        await _show_global_section(target, "bugs", 0)
+        await admin_wizard.start_reports(target, context)
         return
     if action == "users":
         await _show_users_page(target, 0)
         return
     if action == "export":
-        await _run_export(bot, chat_id)
+        await admin_wizard.start_export(target, context)
         return
     if action == "viplog":
-        status = vip_status_text()
-        ok, detail = await send_test_message(bot)
-        mark = "✅" if ok else "❌"
-        await bot.send_message(
-            chat_id, f"{mark} {detail}\n\n{status}",
-            reply_markup=_back_button(admin=True),
-        )
+        await admin_wizard.start_viplog(target, context)
         return
     if action == "broadcast":
-        await bot.send_message(
-            chat_id, msg.t("admin_broadcast_usage"),
-            reply_markup=_back_button(admin=True),
-        )
+        await admin_wizard.start_broadcast(target, context)
         return
     if action == "grant":
-        await bot.send_message(
-            chat_id, msg.t("admin_grant_usage"),
-            reply_markup=_back_button(admin=True),
-        )
+        await admin_wizard.start_grant(target, context)
         return
     if action == "topup":
-        await bot.send_message(
-            chat_id, msg.t("admin_topup_usage"),
-            reply_markup=_back_button(admin=True),
-        )
+        await admin_wizard.start_topup(target, context)
         return
     if action == "channelid":
-        await bot.send_message(
-            chat_id, msg.t("admin_channelid_usage"),
-            reply_markup=_back_button(admin=True),
-        )
+        await admin_wizard.start_channelid(target, context)
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1739,6 +1727,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_access(update, context):
         return
     data = query.data or ""
+
+    if data.startswith("awiz:"):
+        if not _is_admin(update.effective_user.id):
+            return
+        await admin_wizard.on_callback(update, context)
+        return
 
     if data.startswith("admin:"):
         await _handle_admin_callback(update, context)
@@ -2787,6 +2781,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
 
+    if admin_wizard.is_wizard(peek_await_input(context)):
+        await consume_await_input(update, context)
+        return
+
     # Music / collection URLs always download (clear any pending prompt).
     tl = text.lower()
     is_collection = await TrackMetadata.is_collection_url(text)
@@ -3001,6 +2999,10 @@ async def cookies_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Replace cookies.txt from an admin's uploaded file, if it validates."""
     if not _is_admin(update.effective_user.id):
         return
+    pending = peek_await_input(context)
+    if admin_wizard.is_wizard(pending):
+        await admin_wizard.on_text(update, context, pending)
+        return
     doc = update.message.document
     if not doc:
         return
@@ -3159,6 +3161,7 @@ async def _on_startup(application):
 
 
 async def _send_report(message, text, reply_markup=None, edit=False):
+    reply_markup = _with_back(reply_markup, admin=True)
     if edit and hasattr(message, "edit_text"):
         await message.edit_text(text, reply_markup=reply_markup)
     else:
@@ -3199,14 +3202,11 @@ async def reports_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             rid = int(raw)
         except ValueError:
-            await update.message.reply_text(
-                "نحوه استفاده: /reports یا /reports <شناسه>",
-                reply_markup=_back_button(admin=True),
-            )
+            await admin_wizard.start_reports(update.message, context)
             return
         await _show_error_report_detail(update.message, rid)
         return
-    await _show_global_section(update.message, "bugs", 0)
+    await admin_wizard.start_reports(update.message, context)
 
 
 async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3225,18 +3225,19 @@ async def user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
     if not context.args:
-        await update.message.reply_text(
-            "نحوه استفاده: /user <شناسه کاربر>",
-            reply_markup=_back_button(admin=True),
-        )
+        await admin_wizard.start_user(update.message, context)
         return
-    await _show_user_detail(update.message, context.args[0])
+    uid = admin_wizard.resolve_user_id(context.args[0])
+    if not uid:
+        await admin_wizard.start_user(update.message, context)
+        return
+    await _show_user_detail(update.message, uid)
 
 
 async def export_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
-    await _run_export(context.bot, update.effective_chat.id)
+    await admin_wizard.start_export(update.effective_message, context)
 
 
 async def _run_export(bot, chat_id):
@@ -3727,10 +3728,25 @@ async def supportend_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text(text, reply_markup=_back_button(admin=True))
 
 
+async def admin_wizard_nontext_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Forwarded media (channel id wizard) is not TEXT, so it misses the text handlers."""
+    user = update.effective_user
+    if not user or not _is_admin(user.id):
+        return
+    pending = peek_await_input(context)
+    if not admin_wizard.is_wizard(pending):
+        return
+    await admin_wizard.on_text(update, context, pending)
+
+
 async def admin_support_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Forward admin private text to user while compose session is active."""
     user = update.effective_user
     if not user or not _is_admin(user.id):
+        return
+
+    if admin_wizard.is_wizard(peek_await_input(context)):
+        await consume_await_input(update, context)
         return
 
     session = user_manager.database.get_admin_support_session(user.id)
@@ -3879,6 +3895,17 @@ def main():
     application.add_handler(TypeHandler(Update, clear_await_on_slash), group=-2)
     application.add_handler(TypeHandler(Update, vip_update_logger), group=-1)
 
+    admin_wizard.init(
+        user_manager=user_manager,
+        show_user_detail=_show_user_detail,
+        show_global_section=_show_global_section,
+        show_error_report_detail=_show_error_report_detail,
+        run_export=_run_export,
+        send_test_message=send_test_message,
+        vip_status_text=vip_status_text,
+        log_broadcast=log_broadcast,
+    )
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("admin", admin_command))
@@ -3950,6 +3977,15 @@ def main():
                 admin_support_message_handler,
             ),
             group=0,
+        )
+        application.add_handler(
+            MessageHandler(
+                filters.ChatType.PRIVATE
+                & filters.User(user_id=int(ADMIN_ID))
+                & ~filters.COMMAND
+                & ~filters.TEXT,
+                admin_wizard_nontext_handler,
+            ),
         )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
