@@ -119,14 +119,13 @@ def main() -> int:
         if opts.get("cookiefile"):
             base["cookiefile"] = opts["cookiefile"]
         client_sets = [
-            list(_YT_PLAYER_CLIENTS),
-            ["android", "ios"],
-            ["tv", "web"],
-            ["web"],
+            ["web", "android"],
+            ["android"],
         ]
         last_err = None
         for clients in client_sets:
             attempt = dict(base)
+            attempt["socket_timeout"] = 15
             attempt["extractor_args"] = {"youtube": {"player_client": list(clients)}}
             try:
                 with d._with_ydl(attempt) as ydl:

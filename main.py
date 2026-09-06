@@ -2733,7 +2733,7 @@ async def _release_check_job(context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _check_and_report_cookie_health(bot):
-    healthy, detail = _youtube_auth_status()
+    healthy, detail = await asyncio.to_thread(_youtube_auth_status)
     await report_cookie_health_transition(bot, healthy, detail=detail)
     if not healthy:
         await maybe_alert_cookie_issue(bot, detail=detail)
@@ -2761,7 +2761,11 @@ async def _deferred_youtube_setup(bot):
             logger.warning("YouTube cookie refresh failed: %s", exc)
 
     invalidate_youtube_auth_probe()
-    status_text, yt_ok = get_credentials_status()
+    try:
+        status_text, yt_ok = await asyncio.to_thread(get_credentials_status)
+    except Exception as exc:
+        logger.warning("YouTube credential probe failed: %s", exc)
+        status_text, yt_ok = f"probe error: {exc}", False
     for line in status_text.splitlines():
         logger.info(line)
     if not yt_ok:
@@ -2769,7 +2773,10 @@ async def _deferred_youtube_setup(bot):
             "YouTube live probe failed after deferred startup. "
             "Downloads retry with backoff + cookie refresh on bot_check."
         )
-    await _check_and_report_cookie_health(bot)
+    try:
+        await _check_and_report_cookie_health(bot)
+    except Exception as exc:
+        logger.warning("Cookie health report failed: %s", exc)
 
 
 async def _on_startup(application):

@@ -45,16 +45,17 @@ _YT_AUTH_HINT_NAMES = _YT_AUTH_COOKIE_NAMES
 _YT_PLAYER_CLIENTS = ["android", "ios", "web", "web_safari", "tv"]
 # Prefer short, widely available videos for live auth probes.
 _DEFAULT_PROBE_URLS = (
+    "https://www.youtube.com/watch?v=jNQXAC9IVRw",  # me at the zoo — short, stable
     "https://www.youtube.com/watch?v=BaW_jenozKc",
-    "https://www.youtube.com/watch?v=jNQXAC9IVRw",
 )
 
 # Representative music video for health / auth checks (override via YTDLP_HEALTH_PROBE_URL).
 _HEALTH_PROBE_URL = os.getenv(
     "YTDLP_HEALTH_PROBE_URL",
-    "https://www.youtube.com/watch?v=MO4cP8zsgY0",
+    "https://www.youtube.com/watch?v=jNQXAC9IVRw",
 ).strip()
-
+_PROBE_TIMEOUT_SEC = int(os.getenv("YTDLP_PROBE_TIMEOUT", "30"))
+_PROBE_TTL_SEC = int(os.getenv("YTDLP_PROBE_TTL", "600"))
 
 def _probe_urls():
     explicit = os.getenv("YTDLP_PROBE_URL", "").strip()
@@ -67,7 +68,6 @@ def _probe_urls():
 
 
 _YT_PROBE_URL = _DEFAULT_PROBE_URLS[-1]  # legacy single-URL callers
-_PROBE_TTL_SEC = 600
 _PROBE_CACHE = {"monotonic": 0.0, "ok": False, "detail": ""}
 # Chrome cookie DB + keyring decrypt fails when multiple yt-dlp instances run at once.
 _YTDLP_LOCK = threading.Lock()
@@ -728,7 +728,11 @@ class MusicDownloader:
 
         use_subprocess = bool(self.cookies_from_browser)
         if use_subprocess:
-            ok, detail = self._probe_youtube_subprocess(thorough=force)
+            try:
+                ok, detail = self._probe_youtube_subprocess(thorough=force)
+            except Exception as exc:
+                ok, detail = False, f"probe error: {exc}"[:300]
+                logger.warning("YouTube subprocess probe crashed: %s", exc)
             _PROBE_CACHE.update(monotonic=now, ok=ok, detail=detail)
             return ok, detail
 
@@ -798,10 +802,123 @@ class MusicDownloader:
             invalidate_youtube_auth_probe()
         return self.probe_youtube_auth(force=True)
 
-    def youtube_auth_ok(self):
-        """True when yt-dlp can pass YouTube's bot check (live probe)."""
-        ok, _detail = self.probe_youtube_auth()
+    def youtube_auth_ok(self, *, live=False):
+        """Whether YouTube downloads should be attempted.
+
+        Non-live (default): always True. Health probes are advisory and must never
+        block downloads or hide YouTube behind SoundCloud remixes when the probe
+        flakes/timeouts under proxychains.
+        Pass ``live=True`` from background health jobs only.
+        """
+        if not live:
+            return True
+        ok, _detail = self.probe_youtube_auth(force=True)
         return ok
+
+    def _youtube_subprocess_attempts(self, *, probe=False):
+        """Auth modes for subprocess YouTube operations.
+
+        Probes prefer cookiefile (fast, no Chrome DB lock). Downloads prefer live
+        browser cookies when configured.
+        """
+        if probe:
+            # Prefer cookiefile only — Chrome DB reads under systemd often hang and
+            # freeze health checks. Downloads still use live browser cookies.
+            if os.path.exists(self.cookies_path):
+                return ["cookiefile"]
+            if self.cookies_from_browser:
+                return ["browser"]
+            return ["cookiefile"]
+        if self.cookies_from_browser:
+            return ["browser"]
+        if _cookies_look_authenticated(self.cookies_path):
+            return ["cookiefile"]
+        return ["browser"]
+
+    def _run_youtube_worker(self, url, *, probe=False, output_template="", quality=DEFAULT_QUALITY):
+        """Invoke yt_download_worker.py in an isolated subprocess."""
+        _ensure_youtube_session_env()
+        root = os.path.dirname(os.path.abspath(__file__))
+        worker = os.path.join(root, "scripts", "yt_download_worker.py")
+        env, proxy = _prepare_youtube_worker_env(os.environ)
+        deno_bin = os.path.expanduser("~/.deno/bin")
+        venv_bin = os.path.join(root, ".venv", "bin")
+        env["PATH"] = f"{deno_bin}:{venv_bin}:" + env.get("PATH", "")
+        if proxy:
+            logger.info("YouTube worker using native proxy %s (LD_PRELOAD cleared)", proxy)
+
+        def _run_once(run_env):
+            last_err = ""
+            for auth in self._youtube_subprocess_attempts(probe=probe):
+                retry_delays = () if probe else (
+                    _BROWSER_RETRY_DELAYS if auth == "browser" else ()
+                )
+                max_attempts = 1 + len(retry_delays)
+                for attempt in range(max_attempts):
+                    cmd = [
+                        sys.executable,
+                        worker,
+                        "--url", url,
+                        "--outtmpl", output_template or os.path.join(
+                            root, "downloads", "_probe.%(ext)s"
+                        ),
+                        "--quality", str(quality),
+                        "--auth", auth,
+                    ]
+                    if probe:
+                        cmd.append("--probe")
+                    timeout = _PROBE_TIMEOUT_SEC if probe else 600
+                    try:
+                        with _YTDLP_LOCK:
+                            completed = subprocess.run(
+                                cmd,
+                                env=run_env,
+                                capture_output=True,
+                                text=True,
+                                timeout=timeout,
+                                cwd=root,
+                            )
+                    except subprocess.TimeoutExpired as exc:
+                        # Ensure zombie workers are reaped (run() usually kills, but be safe).
+                        try:
+                            if exc.process:
+                                exc.process.kill()
+                                exc.process.wait(timeout=5)
+                        except Exception:
+                            pass
+                        last_err = f"timeout after {timeout}s (auth={auth})"
+                        logger.warning("YouTube worker %s", last_err)
+                        break
+                    for line in (completed.stdout or "").splitlines():
+                        if (
+                            line.startswith("yt_worker ")
+                            or line == "PROBE_OK"
+                        ):
+                            logger.info("%s", line)
+                    if completed.returncode == 0:
+                        return True, f"subprocess OK (auth={auth})"
+                    err = (completed.stderr or completed.stdout or "").strip() or (
+                        f"worker exited {completed.returncode}"
+                    )
+                    last_err = err or last_err
+                    if (
+                        attempt + 1 < max_attempts
+                        and auth == "browser"
+                        and _is_bot_check_error(last_err)
+                    ):
+                        delay = retry_delays[attempt]
+                        logger.info(
+                            "YouTube browser auth bot_check — retry %d/%d after %ds",
+                            attempt + 2,
+                            max_attempts,
+                            delay,
+                        )
+                        time.sleep(delay)
+                        continue
+                    break
+            return False, last_err or "YouTube worker failed"
+
+        return _run_once(env)
 
     def _build_ydl_opts(
         self, output_template, progress_hooks=None, quality=DEFAULT_QUALITY,
@@ -844,83 +961,6 @@ class MusicDownloader:
             ydl_opts['progress_hooks'] = list(progress_hooks)
         return self._apply_auth(ydl_opts, live_browser=live_browser)
 
-    def _youtube_subprocess_attempts(self):
-        """Auth modes for subprocess YouTube operations (browser preferred)."""
-        if self.cookies_from_browser:
-            return ["browser"]
-        if _cookies_look_authenticated(self.cookies_path):
-            return ["cookiefile"]
-        return ["browser"]
-
-    def _run_youtube_worker(self, url, *, probe=False, output_template="", quality=DEFAULT_QUALITY):
-        """Invoke yt_download_worker.py in an isolated subprocess."""
-        _ensure_youtube_session_env()
-        root = os.path.dirname(os.path.abspath(__file__))
-        worker = os.path.join(root, "scripts", "yt_download_worker.py")
-        env, proxy = _prepare_youtube_worker_env(os.environ)
-        deno_bin = os.path.expanduser("~/.deno/bin")
-        venv_bin = os.path.join(root, ".venv", "bin")
-        env["PATH"] = f"{deno_bin}:{venv_bin}:" + env.get("PATH", "")
-        if proxy:
-            logger.info("YouTube worker using native proxy %s (LD_PRELOAD cleared)", proxy)
-
-        def _run_once(run_env):
-            last_err = ""
-            for auth in self._youtube_subprocess_attempts():
-                retry_delays = _BROWSER_RETRY_DELAYS if auth == "browser" else ()
-                max_attempts = 1 + len(retry_delays)
-                for attempt in range(max_attempts):
-                    cmd = [
-                        sys.executable,
-                        worker,
-                        "--url", url,
-                        "--outtmpl", output_template or os.path.join(
-                            root, "downloads", "_probe.%(ext)s"
-                        ),
-                        "--quality", str(quality),
-                        "--auth", auth,
-                    ]
-                    if probe:
-                        cmd.append("--probe")
-                    with _YTDLP_LOCK:
-                        completed = subprocess.run(
-                            cmd,
-                            env=run_env,
-                            capture_output=True,
-                            text=True,
-                            timeout=120 if probe else 600,
-                            cwd=root,
-                        )
-                    for line in (completed.stdout or "").splitlines():
-                        if (
-                            line.startswith("yt_worker ")
-                            or line == "PROBE_OK"
-                        ):
-                            logger.info("%s", line)
-                    if completed.returncode == 0:
-                        return True, f"subprocess OK (auth={auth})"
-                    err = (completed.stderr or completed.stdout or "").strip() or (
-                        f"worker exited {completed.returncode}"
-                    )
-                    last_err = err or last_err
-                    if (
-                        attempt + 1 < max_attempts
-                        and auth == "browser"
-                        and _is_bot_check_error(last_err)
-                    ):
-                        delay = retry_delays[attempt]
-                        logger.info(
-                            "YouTube browser auth bot_check — retry %d/%d after %ds",
-                            attempt + 2,
-                            max_attempts,
-                            delay,
-                        )
-                        time.sleep(delay)
-                        continue
-                    break
-            return False, last_err or "YouTube worker failed"
-
-        return _run_once(env)
     def _download_youtube_subprocess(self, url, output_template, quality=DEFAULT_QUALITY):
         """Download in a fresh worker subprocess (isolates Chrome cookie access)."""
         logger.info("YouTube subprocess download: %s", url)
@@ -946,7 +986,7 @@ class MusicDownloader:
         raise RuntimeError(detail)
 
     def _probe_youtube_subprocess(self, thorough=False):
-        """Health-check via subprocess with live Chrome cookies (browser auth only)."""
+        """Health-check via subprocess (cookiefile preferred; short timeout)."""
         urls = []
         if _HEALTH_PROBE_URL:
             urls.append(_HEALTH_PROBE_URL)
