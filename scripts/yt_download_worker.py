@@ -91,18 +91,96 @@ def main() -> int:
         flush=True,
     )
 
-    from downloader import _info_has_formats
+    from downloader import _info_has_formats, _YT_PLAYER_CLIENTS, _deno_js_runtimes
 
-    with d._with_ydl(opts) as ydl:
-        if args.probe:
-            info = ydl.extract_info(args.url, download=False)
-            if not _info_has_formats(info):
-                print("PROBE_NO_FORMATS", file=sys.stderr)
-                return 1
-            print("PROBE_OK", flush=True)
+    if args.probe:
+        # Health check must NOT select a download format — restrictive
+        # bestaudio[...] filters fail with "Requested format is not available"
+        # even when cookies are fine and formats exist.
+        base = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "ignore_no_formats_error": True,
+            "socket_timeout": 25,
+            "remote_components": ["ejs:github"],
+            "js_runtimes": _deno_js_runtimes(),
+            "http_headers": opts.get("http_headers") or {},
+        }
+        if opts.get("cookiesfrombrowser"):
+            base["cookiesfrombrowser"] = opts["cookiesfrombrowser"]
+        if opts.get("cookiefile"):
+            base["cookiefile"] = opts["cookiefile"]
+        client_sets = [
+            list(_YT_PLAYER_CLIENTS),
+            ["android", "ios"],
+            ["tv", "web"],
+            ["web"],
+        ]
+        last_err = None
+        for clients in client_sets:
+            attempt = dict(base)
+            attempt["extractor_args"] = {"youtube": {"player_client": list(clients)}}
+            try:
+                with d._with_ydl(attempt) as ydl:
+                    info = ydl.extract_info(args.url, download=False)
+                if _info_has_formats(info):
+                    print("PROBE_OK", flush=True)
+                    return 0
+                last_err = RuntimeError(
+                    f"PROBE_NO_FORMATS clients={','.join(clients)}"
+                )
+                print(
+                    f"yt_worker probe no formats clients={','.join(clients)}",
+                    flush=True,
+                )
+            except Exception as exc:
+                last_err = exc
+                print(
+                    f"yt_worker probe retry clients={','.join(clients)} "
+                    f"err={str(exc).splitlines()[-1][:120]}",
+                    flush=True,
+                )
+                continue
+        if last_err is not None:
+            raise last_err
+        print("PROBE_NO_FORMATS", file=sys.stderr)
+        return 1
+
+    def _try_download(player_clients, fmt):
+        attempt_opts = dict(opts)
+        attempt_opts["format"] = fmt
+        attempt_opts["extractor_args"] = {
+            "youtube": {"player_client": list(player_clients)}
+        }
+        with d._with_ydl(attempt_opts) as ydl:
+            ydl.download([args.url])
+
+    attempts = [
+        (list(_YT_PLAYER_CLIENTS), opts.get("format") or "bestaudio/best"),
+        (["android", "ios"], "bestaudio/best"),
+        (["android", "web"], "bestaudio/best/best"),
+        (["tv", "web"], "best"),
+        (["web"], "best/bestaudio"),
+    ]
+    last_err = None
+    for clients, fmt in attempts:
+        try:
+            _try_download(clients, fmt)
             return 0
-        ydl.download([args.url])
-    return 0
+        except Exception as exc:
+            last_err = exc
+            err = str(exc).lower()
+            if "format is not available" in err or "no video formats" in err:
+                print(
+                    f"yt_worker format retry clients={','.join(clients)} fmt={fmt}",
+                    flush=True,
+                )
+                continue
+            break
+    if last_err is not None:
+        raise last_err
+    return 1
 
 
 if __name__ == "__main__":

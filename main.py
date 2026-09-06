@@ -2613,14 +2613,34 @@ def _youtube_auth_status():
                 f"({downloader.cookies_from_browser})"
             )
         return True, f"cookies.txt OK — {live_detail} ({path})"
+    detail = str(live_detail or "")
+    detail_l = detail.lower()
+    format_issue = (
+        "format is not available" in detail_l
+        or "no video formats" in detail_l
+        or "probe_no_formats" in detail_l
+    )
+    proxy_issue = "proxychains" in detail_l
     if downloader.cookies_from_browser:
+        if format_issue or proxy_issue:
+            return False, (
+                f"YouTube format/probe failed ({detail[:220]}). "
+                "Cookies may be fine — proxychains/format client issue. "
+                "Worker retries without LD_PRELOAD on format errors; "
+                "set YTDLP_CLEAR_PROXYCHAINS=1 to always skip proxychains for YouTube."
+            )
         return False, (
-            f"browser cookies failed ({live_detail}); "
+            f"browser cookies failed ({detail}); "
             f"check {downloader.cookies_from_browser} is logged into YouTube"
         )
     if file_ok:
+        if format_issue or proxy_issue:
+            return False, (
+                f"YouTube format/probe failed ({detail[:220]}) with cookies at {path}. "
+                "Jar may still be valid — check proxychains / player clients."
+            )
         return False, (
-            f"cookies.txt stale ({live_detail}) at {path}. "
+            f"cookies.txt stale ({detail}) at {path}. "
             "Send a fresh cookies.txt to the bot as a file to fix it — see /cookies."
         )
     return False, (

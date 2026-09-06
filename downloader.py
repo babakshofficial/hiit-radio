@@ -40,7 +40,9 @@ _YT_SESSION_COOKIE_NAMES = (
 _YT_AUTH_HINT_NAMES = _YT_AUTH_COOKIE_NAMES
 
 # web_safari + ejs:github pass YouTube bot-checks in 2026; android skips cookie auth.
-_YT_PLAYER_CLIENTS = ["web_safari", "web", "tv"]
+# android/ios tend to expose downloadable progressive audio; web_safari alone often
+# yields HLS-only picks that fail with "Requested format is not available".
+_YT_PLAYER_CLIENTS = ["android", "ios", "web", "web_safari", "tv"]
 # Prefer short, widely available videos for live auth probes.
 _DEFAULT_PROBE_URLS = (
     "https://www.youtube.com/watch?v=BaW_jenozKc",
@@ -202,6 +204,7 @@ _NOISE_PATTERNS = (
     r'\bnightcore\b', r'#shorts\b', r'\breaction\b', r'\binstrumental\b',
     r'\bremake\b', r'\bmashup\b', r'\b8d\s*audio\b',
     r'\bremix(?:es|ed)?\b', r'\bbootleg\b', r'\brework\b', r'\bvip\b',
+    r'\bextended(?:\s+mix)?\b', r'\bclub\s*mix\b', r'\bradio\s*edit\b',
 )
 
 _VERSION_GROUP_HINT = re.compile(
@@ -261,6 +264,62 @@ def _has_noise(text, expected_title=""):
         if re.search(pat, hay, re.I) and not re.search(pat, expected, re.I):
             return True
     return False
+
+
+def _significant_title_tokens(title):
+    """Title words used for hard match checks (skip tiny/stop words)."""
+    stop = {
+        "the", "a", "an", "and", "of", "or", "to", "feat", "ft", "featuring",
+        "with", "vs", "official", "audio", "video", "lyrics", "music",
+    }
+    return [
+        w for w in re.findall(r"[a-z0-9]+", (title or "").lower())
+        if len(w) >= 2 and w not in stop
+    ]
+
+
+def _title_tokens_present(expected_title, haystack, min_ratio=0.7):
+    """Fraction of expected title tokens found in haystack; True if enough match."""
+    tokens = _significant_title_tokens(expected_title)
+    if not tokens:
+        return True
+    hay = (haystack or "").lower()
+    # Short titles (Echo, Stay): require whole-word presence.
+    if len(tokens) == 1 and len(tokens[0]) <= 5:
+        return bool(re.search(rf"\b{re.escape(tokens[0])}\b", hay))
+    hits = sum(1 for t in tokens if t in hay)
+    return (hits / len(tokens)) >= min_ratio
+
+
+def _artist_presence(expected_artist, raw_title, uploader):
+    """How clearly the credited artist appears in title/uploader (0-100)."""
+    if not (expected_artist or "").strip():
+        return 100.0
+    primary = _primary_artist(expected_artist)
+    hay = f"{raw_title or ''} {uploader or ''}".lower()
+    scores = [
+        difflib.SequenceMatcher(
+            None, (uploader or "").lower(), expected_artist.lower()
+        ).ratio() * 100,
+    ]
+    if primary:
+        scores.append(
+            difflib.SequenceMatcher(
+                None, (uploader or "").lower(), primary.lower()
+            ).ratio() * 100
+        )
+        if primary.lower() in hay:
+            scores.append(90.0)
+    # Shared artist tokens (zerb, khalid / chainsmokers, oaks)
+    art_tokens = [
+        w for w in re.findall(r"[a-z0-9]+", expected_artist.lower())
+        if len(w) >= 3 and w not in {"the", "and", "feat", "featuring"}
+    ]
+    if art_tokens:
+        hits = sum(1 for t in art_tokens if t in hay)
+        scores.append(100.0 * hits / len(art_tokens))
+    scores.append(score_query_coverage(expected_artist, raw_title, uploader))
+    return max(scores) if scores else 0.0
 
 
 def _candidate_url(video, source_label="YouTube"):
@@ -663,7 +722,8 @@ class MusicDownloader:
         """Build yt-dlp options for the final audio download."""
         clients = player_clients or list(_YT_PLAYER_CLIENTS)
         ydl_opts = {
-            'format': 'bestaudio/best',
+            # Prefer progressive audio; fall back broadly so android/ios clients work.
+            'format': 'bestaudio/best/bestaudio*/best*',
             'outtmpl': output_template,
             'quiet': True,
             'no_warnings': True,
@@ -714,55 +774,101 @@ class MusicDownloader:
         venv_bin = os.path.join(root, ".venv", "bin")
         env["PATH"] = f"{deno_bin}:{venv_bin}:" + env.get("PATH", "")
 
-        last_err = ""
-        for auth in self._youtube_subprocess_attempts():
-            retry_delays = _BROWSER_RETRY_DELAYS if auth == "browser" else ()
-            max_attempts = 1 + len(retry_delays)
-            for attempt in range(max_attempts):
-                cmd = [
-                    sys.executable,
-                    worker,
-                    "--url", url,
-                    "--outtmpl", output_template or os.path.join(root, "downloads", "_probe.%(ext)s"),
-                    "--quality", str(quality),
-                    "--auth", auth,
-                ]
-                if probe:
-                    cmd.append("--probe")
-                with _YTDLP_LOCK:
-                    completed = subprocess.run(
-                        cmd,
-                        env=env,
-                        capture_output=True,
-                        text=True,
-                        timeout=120 if probe else 600,
-                        cwd=root,
+        # Optional: drop proxychains LD_PRELOAD for YouTube (can fix format errors,
+        # but breaks YouTube if it only works through the proxy).
+        force_direct = os.getenv("YTDLP_CLEAR_PROXYCHAINS", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if force_direct:
+            env.pop("LD_PRELOAD", None)
+            for key in list(env):
+                if key.upper().startswith("PROXYCHAINS"):
+                    env.pop(key, None)
+
+        def _run_once(run_env):
+            last_err = ""
+            for auth in self._youtube_subprocess_attempts():
+                retry_delays = _BROWSER_RETRY_DELAYS if auth == "browser" else ()
+                max_attempts = 1 + len(retry_delays)
+                for attempt in range(max_attempts):
+                    cmd = [
+                        sys.executable,
+                        worker,
+                        "--url", url,
+                        "--outtmpl", output_template or os.path.join(
+                            root, "downloads", "_probe.%(ext)s"
+                        ),
+                        "--quality", str(quality),
+                        "--auth", auth,
+                    ]
+                    if probe:
+                        cmd.append("--probe")
+                    with _YTDLP_LOCK:
+                        completed = subprocess.run(
+                            cmd,
+                            env=run_env,
+                            capture_output=True,
+                            text=True,
+                            timeout=120 if probe else 600,
+                            cwd=root,
+                        )
+                    for line in (completed.stdout or "").splitlines():
+                        if line.startswith("yt_worker ") or line == "PROBE_OK":
+                            logger.info("%s", line)
+                    if completed.returncode == 0:
+                        return True, f"subprocess OK (auth={auth})"
+                    err = (completed.stderr or completed.stdout or "").strip() or (
+                        f"worker exited {completed.returncode}"
                     )
-                for line in (completed.stdout or "").splitlines():
-                    if line.startswith("yt_worker ") or line == "PROBE_OK":
-                        logger.info("%s", line)
-                if completed.returncode == 0:
-                    return True, f"subprocess OK (auth={auth})"
-                err = (completed.stderr or completed.stdout or "").strip() or (
-                    f"worker exited {completed.returncode}"
-                )
-                last_err = err or last_err
-                if (
-                    attempt + 1 < max_attempts
-                    and auth == "browser"
-                    and _is_bot_check_error(last_err)
-                ):
-                    delay = retry_delays[attempt]
-                    logger.info(
-                        "YouTube browser auth bot_check — retry %d/%d after %ds",
-                        attempt + 2,
-                        max_attempts,
-                        delay,
-                    )
-                    time.sleep(delay)
-                    continue
-                break
-        return False, last_err or "YouTube worker failed"
+                    last_err = err or last_err
+                    if (
+                        attempt + 1 < max_attempts
+                        and auth == "browser"
+                        and _is_bot_check_error(last_err)
+                    ):
+                        delay = retry_delays[attempt]
+                        logger.info(
+                            "YouTube browser auth bot_check — retry %d/%d after %ds",
+                            attempt + 2,
+                            max_attempts,
+                            delay,
+                        )
+                        time.sleep(delay)
+                        continue
+                    break
+            return False, last_err or "YouTube worker failed"
+
+        ok, detail = _run_once(env)
+        if ok:
+            return True, detail
+
+        # If still under proxychains and format listing failed, retry direct once.
+        err_l = (detail or "").lower()
+        format_fail = (
+            "format is not available" in err_l
+            or "no video formats" in err_l
+            or "probe_no_formats" in err_l
+        )
+        if (
+            format_fail
+            and not force_direct
+            and env.get("LD_PRELOAD")
+            and os.getenv("YTDLP_INHERIT_PROXYCHAINS", "").strip().lower()
+            not in ("1", "true", "yes", "on")
+        ):
+            direct_env = env.copy()
+            direct_env.pop("LD_PRELOAD", None)
+            for key in list(direct_env):
+                if key.upper().startswith("PROXYCHAINS"):
+                    direct_env.pop(key, None)
+            logger.info(
+                "YouTube worker format failure under proxychains — retrying without LD_PRELOAD"
+            )
+            ok2, detail2 = _run_once(direct_env)
+            if ok2:
+                return True, detail2 + " (direct, no proxychains)"
+            return False, detail2 or detail
+        return False, detail
 
     def _download_youtube_subprocess(self, url, output_template, quality=DEFAULT_QUALITY):
         """Download in a fresh worker subprocess (isolates Chrome cookie access)."""
@@ -881,21 +987,40 @@ class MusicDownloader:
             return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio() * 100
 
         def clean_title(title, artist=""):
+            """Normalize a display title without destroying Artist - Song layouts."""
             if not title:
                 return ""
             title = re.sub(r'\s*\([^)]*official[^)]*\)', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\[[^]]*audio[^]]*\]', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\[[^]]*music video[^]]*\]', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\([^)]*lyrics[^)]*\)', '', title, flags=re.IGNORECASE)
+            title = re.sub(r'\s*\([^)]*visualizer[^)]*\)', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\([^)]*remaster[^)]*\)', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\([^)]*(?:from|feat\.?|ft\.?)[^)]*\)', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\[[^]]*(?:from|feat\.?|ft\.?)[^]]*\]', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\|.*$', '', title)
             title = title.replace('"', '').replace("'", '')
+            primary = _primary_artist(artist) if artist else ""
+            # YouTube style: "Artist - Song" → keep the song side when left looks like artist.
+            parts = re.split(r'\s*[-–]\s*', title, maxsplit=1)
+            if len(parts) == 2:
+                left, right = parts[0].strip(), parts[1].strip()
+                left_is_artist = False
+                if artist:
+                    left_is_artist = (
+                        title_similarity(left, artist) >= 55
+                        or (primary and title_similarity(left, primary) >= 55)
+                        or _artist_presence(artist, left, "") >= 70
+                    )
+                if left_is_artist or (not artist and right):
+                    title = right
+                # else keep full string — do not strip after dash
             if artist:
-                pattern = r'^\s*' + re.escape(artist) + r'\s*[-–|]\s*'
+                pattern = r'^\s*' + re.escape(artist) + r'\s*[-–|:]\s*'
                 title = re.sub(pattern, '', title, flags=re.IGNORECASE)
-            title = re.sub(r'\s*[-–].*$', '', title)
+                if primary and primary != artist:
+                    pattern = r'^\s*' + re.escape(primary) + r'\s*[-–|:]\s*'
+                    title = re.sub(pattern, '', title, flags=re.IGNORECASE)
             return title.strip()
 
         def search_title(title):
@@ -919,12 +1044,11 @@ class MusicDownloader:
                 left, right = raw.split(" - ", 1)
                 scores.append(score_query_coverage(original_query, left, right))
                 scores.append(score_query_coverage(original_query, right, left))
-            # Also compare against cleaned title + expected artist
             scores.append(
                 score_query_coverage(
                     original_query,
                     clean_title(raw, metadata.artist),
-                    metadata.artist or uploader,
+                    uploader,
                 )
             )
             return max(scores)
@@ -939,6 +1063,12 @@ class MusicDownloader:
         if not version_required and original_query:
             version_required = _required_version_tokens(original_query)
 
+        catalog_url = (getattr(metadata, "url", None) or "").lower()
+        had_catalog = any(
+            host in catalog_url
+            for host in ("spotify.com", "music.apple.com", "deezer.com")
+        )
+
         def score(video):
             raw_title = video.get('title', '') or ''
             yt_title = clean_title(raw_title, metadata.artist)
@@ -947,32 +1077,43 @@ class MusicDownloader:
             hay = f"{raw_title} {yt_artist}"
             if version_required and not _version_tokens_satisfied(version_required, hay):
                 return None
+
+            # Expected song title must appear in the candidate title (not only artist names).
+            if expected_title and not _title_tokens_present(expected_title, raw_title):
+                return None
+
             seq_title_sim = title_similarity(yt_title, expected_title)
-            token_sim = _token_title_similarity(expected_title, yt_title)
-            # Also score against the original free-text query title guess
-            if original_query:
-                token_sim = max(
-                    token_sim,
-                    _token_title_similarity(original_query, raw_title),
-                    _token_title_similarity(original_query, f"{raw_title} {yt_artist}"),
-                )
+            token_sim = max(
+                _token_title_similarity(expected_title, yt_title),
+                _token_title_similarity(expected_title, raw_title),
+            )
+            # Do NOT boost title_sim from the full original_query — that lets
+            # "Artist - OtherSong" score 100% when the query lists the artist.
             title_sim = max(seq_title_sim, token_sim)
+
             artist_sim = title_similarity(yt_artist, metadata.artist or "")
             primary = _primary_artist(metadata.artist or "")
             if primary:
                 artist_sim = max(artist_sim, title_similarity(yt_artist, primary))
+            presence = _artist_presence(metadata.artist or "", raw_title, yt_artist)
+            artist_sim = max(artist_sim, presence)
+
+            # Catalog links (Apple/Spotify): refuse weak artist matches so DRM
+            # fallbacks cannot land on unrelated same-title uploads.
+            if had_catalog and presence < 55.0 and artist_sim < 55.0:
+                return None
+
             combined = (title_sim * 0.7) + (artist_sim * 0.3)
 
             coverage = query_coverage(video)
             if coverage < QUERY_COVERAGE_MIN:
                 return None
-            # When a specific mix/version is required, do not let shared base-title
-            # coverage alone clear the title gate for a non-version upload.
             coverage_gate = 75.0
             if version_required:
                 coverage_gate = 92.0
+            if had_catalog:
+                coverage_gate = max(coverage_gate, 80.0)
 
-            # Blend in query coverage so strong original-query matches win.
             combined = (combined * 0.75) + (coverage * 0.25)
 
             uploader_raw = (video.get('uploader', '') or video.get('channel', '') or '').lower()
@@ -994,6 +1135,8 @@ class MusicDownloader:
                     if ratio <= 0.15:
                         combined = min(100.0, combined + 6.0)
                     elif ratio > 0.35:
+                        if had_catalog and ratio > 0.45:
+                            return None
                         combined -= 12.0
 
             if _has_noise(raw_title, metadata.title or original_query or ""):
@@ -1008,30 +1151,34 @@ class MusicDownloader:
         q_artist = (metadata.artist or "").replace('"', '').strip()
         q_primary = _primary_artist(q_artist) or q_artist
 
-        # Prefer the exact user query first — avoids swapped title/artist traps.
+        # Prefer Topic / official audio first for catalog tracks — higher chance
+        # of the real song before lyric-channel noise floods early-accept.
         yt_search_strategies = []
+        if q_title and q_primary:
+            yt_search_strategies.append(f'{q_title} {q_primary} - Topic')
+            yt_search_strategies.append(f'{q_title} {q_primary} official audio')
         if original_query:
             yt_search_strategies.append(original_query)
             yt_search_strategies.append(f'{original_query} audio')
         if q_title and q_artist:
             yt_search_strategies.append(f'"{q_title}" "{q_artist}" audio')
             yt_search_strategies.append(f'{q_title} {q_artist}')
-        if q_title and q_primary:
-            yt_search_strategies.append(f'{q_title} {q_primary} - Topic')
-            yt_search_strategies.append(f'{q_title} {q_primary} official audio')
         seen_q = set()
         yt_search_strategies = [
             s for s in yt_search_strategies
             if s and not (s in seen_q or seen_q.add(s))
-        ][:5]
+        ][:6]
 
         sc_search_strategies = []
         if original_query:
             sc_search_strategies.append(original_query)
-        sc_search_strategies.extend([
-            f'{q_title} {q_primary}' if q_primary else f'{q_title} {q_artist}',
-            f'{q_title}',
-        ])
+        sc_search_strategies.append(
+            f'{q_title} {q_primary}' if q_primary else f'{q_title} {q_artist}'
+        )
+        # Avoid bare title-only search when an artist is known — it floods
+        # unrelated same-name tracks (e.g. "Echo" → Vortex Records).
+        if not q_primary and not q_artist and q_title:
+            sc_search_strategies.append(q_title)
         sc_search_strategies = [s for s in sc_search_strategies if s and s.strip()]
         seen_sc = set()
         sc_search_strategies = [
