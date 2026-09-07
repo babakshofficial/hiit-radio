@@ -95,7 +95,7 @@ class DownloadOrchestrator:
             file_id = self.cache.get_telegram_file_id(
                 metadata.title, metadata.artist, cache_source,
             )
-            if file_id:
+            if file_id and self.music_downloader.file_has_watermark(cached_path):
                 self.music_downloader.sync_metadata_from_file(cached_path, metadata)
                 if (
                     progress_reporter
@@ -122,7 +122,7 @@ class DownloadOrchestrator:
             if self.cache.copy_for_send(metadata.title, metadata.artist, cache_source, send_copy):
                 self.music_downloader.sync_metadata_from_file(send_copy, metadata)
                 try:
-                    self.music_downloader.rewatermark_from_file(send_copy)
+                    self.music_downloader.ensure_watermarked_cover(send_copy, metadata)
                 except Exception:
                     pass
                 if (

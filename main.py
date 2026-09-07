@@ -54,7 +54,6 @@ from admin_logger import (
     validate_vip_log_channel,
     vip_status_text,
     report_cookie_health_transition,
-    maybe_alert_cookie_issue,
     message_media_kind,
 )
 import admin_logger
@@ -1614,6 +1613,12 @@ async def _send_track_audio(message, metadata, file_path, platform, reply_markup
     }
     if platform and str(platform).endswith("_cache_id"):
         return await message.reply_audio(audio=file_path, **kwargs)
+    thumb = downloader.telegram_thumbnail_jpeg(file_path)
+    if thumb:
+        from io import BytesIO
+        bio = BytesIO(thumb)
+        bio.name = "cover.jpg"
+        kwargs["thumbnail"] = bio
     with open(file_path, "rb") as audio:
         return await message.reply_audio(audio=audio, **kwargs)
 
@@ -2951,6 +2956,11 @@ def _cookie_file_status():
     return ok, detail, updated
 
 
+def _probe_is_inconclusive(detail):
+    d = (detail or "").lower()
+    return "timeout" in d or "timed out" in d
+
+
 def _youtube_auth_status():
     """Return ``(healthy, detail)`` for the credentials yt-dlp will actually use."""
     file_ok, file_detail, _updated = _cookie_file_status()
@@ -2971,6 +2981,12 @@ def _youtube_auth_status():
         or "probe_no_formats" in detail_l
     )
     proxy_issue = "proxychains" in detail_l
+    if _probe_is_inconclusive(detail):
+        jar = "ok" if file_ok else (file_detail or "unverified")
+        return False, (
+            f"health probe timed out ({detail}). "
+            f"Cookies not proven bad (jar={jar}). YouTube/proxy was slow."
+        )
     if downloader.cookies_from_browser:
         if format_issue or proxy_issue:
             return False, (
@@ -3095,9 +3111,13 @@ async def _release_check_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def _check_and_report_cookie_health(bot):
     healthy, detail = await asyncio.to_thread(_youtube_auth_status)
+    if _probe_is_inconclusive(detail):
+        logger.warning(
+            "Skipping VIP cookie alert (probe timed out, cookies not proven bad): %s",
+            detail,
+        )
+        return
     await report_cookie_health_transition(bot, healthy, detail=detail)
-    if not healthy:
-        await maybe_alert_cookie_issue(bot, detail=detail)
 
 
 async def _cache_sweep_fallback_loop(bot):

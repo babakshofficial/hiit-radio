@@ -15,7 +15,7 @@ import requests
 from PIL import Image, ImageFilter, ImageChops
 import io
 
-from metadata import TrackMetadata, score_query_coverage, score_title_nearness
+from metadata import score_query_coverage
 
 logger = logging.getLogger(__name__)
 
@@ -45,17 +45,16 @@ _YT_AUTH_HINT_NAMES = _YT_AUTH_COOKIE_NAMES
 _YT_PLAYER_CLIENTS = ["android", "ios", "web", "web_safari", "tv"]
 # Prefer short, widely available videos for live auth probes.
 _DEFAULT_PROBE_URLS = (
-    "https://www.youtube.com/watch?v=jNQXAC9IVRw",  # me at the zoo — short, stable
     "https://www.youtube.com/watch?v=BaW_jenozKc",
+    "https://www.youtube.com/watch?v=jNQXAC9IVRw",
 )
 
 # Representative music video for health / auth checks (override via YTDLP_HEALTH_PROBE_URL).
 _HEALTH_PROBE_URL = os.getenv(
     "YTDLP_HEALTH_PROBE_URL",
-    "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    "https://www.youtube.com/watch?v=MO4cP8zsgY0",
 ).strip()
-_PROBE_TIMEOUT_SEC = int(os.getenv("YTDLP_PROBE_TIMEOUT", "30"))
-_PROBE_TTL_SEC = int(os.getenv("YTDLP_PROBE_TTL", "600"))
+
 
 def _probe_urls():
     explicit = os.getenv("YTDLP_PROBE_URL", "").strip()
@@ -68,6 +67,7 @@ def _probe_urls():
 
 
 _YT_PROBE_URL = _DEFAULT_PROBE_URLS[-1]  # legacy single-URL callers
+_PROBE_TTL_SEC = 600
 _PROBE_CACHE = {"monotonic": 0.0, "ok": False, "detail": ""}
 # Chrome cookie DB + keyring decrypt fails when multiple yt-dlp instances run at once.
 _YTDLP_LOCK = threading.Lock()
@@ -80,94 +80,6 @@ def downloads_in_progress():
 
 _BROWSER_RETRY_DELAYS = (2, 6, 15)
 
-
-def _under_proxychains(env=None):
-    """True when this process (or env) is wrapped by proxychains LD_PRELOAD."""
-    e = env if env is not None else os.environ
-    preload = (e.get("LD_PRELOAD") or "").lower()
-    if "proxychains" in preload:
-        return True
-    if any(k.upper().startswith("PROXYCHAINS") for k in e):
-        return True
-    return False
-
-
-def _proxy_from_proxychains_conf():
-    """Parse the first socks/http proxy from proxychains config → yt-dlp URL."""
-    for path in (
-        os.getenv("PROXYCHAINS_CONF_FILE", "").strip(),
-        "/etc/proxychains4.conf",
-        "/etc/proxychains.conf",
-    ):
-        if not path or not os.path.isfile(path):
-            continue
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    parts = line.split()
-                    if len(parts) < 3:
-                        continue
-                    kind = parts[0].lower()
-                    host, port = parts[1], parts[2]
-                    if kind.startswith("socks5"):
-                        # socks5h = resolve DNS through the proxy (matches proxy_dns)
-                        return f"socks5h://{host}:{port}"
-                    if kind.startswith("socks4"):
-                        return f"socks4://{host}:{port}"
-                    if kind.startswith("http"):
-                        return f"http://{host}:{port}"
-        except OSError:
-            continue
-    return ""
-
-
-def _youtube_proxy_url(env=None):
-    """Proxy for YouTube yt-dlp calls (native, not LD_PRELOAD).
-
-    proxychains LD_PRELOAD commonly yields empty format lists /
-    \"Requested format is not available\". Prefer yt-dlp's own socks/http proxy
-    while stripping LD_PRELOAD from the worker.
-    """
-    explicit = os.getenv("YTDLP_PROXY", "").strip()
-    if explicit:
-        return explicit
-    e = env if env is not None else os.environ
-    if _under_proxychains(e) or os.getenv("YTDLP_USE_PROXYCHAINS_PROXY", "").strip().lower() in (
-        "1", "true", "yes", "on",
-    ):
-        return _proxy_from_proxychains_conf()
-    return ""
-
-
-def _prepare_youtube_worker_env(base_env=None):
-    """Env for yt_download_worker: no proxychains preload; optional YTDLP_PROXY."""
-    src = dict(base_env or os.environ)
-    under = _under_proxychains(src)
-    inherit = os.getenv("YTDLP_INHERIT_PROXYCHAINS", "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
-    env = dict(src)
-    proxy = _youtube_proxy_url(src) or (
-        _proxy_from_proxychains_conf() if under else ""
-    )
-
-    if inherit:
-        # Keep LD_PRELOAD (usually breaks formats). Only pass explicit proxy.
-        explicit = (os.getenv("YTDLP_PROXY") or "").strip()
-        if explicit:
-            env["YTDLP_PROXY"] = explicit
-        return env, explicit or None
-
-    env.pop("LD_PRELOAD", None)
-    for key in list(env):
-        if key.upper().startswith("PROXYCHAINS"):
-            env.pop(key, None)
-    if proxy:
-        env["YTDLP_PROXY"] = proxy
-    return env, proxy or None
 
 def _deno_js_runtimes():
     """Return yt-dlp ``js_runtimes`` config pointing at deno when installed."""
@@ -425,57 +337,6 @@ def _candidate_url(video, source_label="YouTube"):
         # Flat scsearch results sometimes only expose a numeric/track id.
         return None
     return f"https://www.youtube.com/watch?v={vid}"
-
-
-def _entry_title_artist(video):
-    """Best-effort song title + artist from a flat yt-dlp search entry."""
-    raw = (video.get("title") or "").strip()
-    uploader = (
-        video.get("artist")
-        or video.get("uploader")
-        or video.get("channel")
-        or ""
-    ).strip()
-    uploader = re.sub(r"\s*-\s*Topic\s*$", "", uploader, flags=re.I)
-    uploader = re.sub(r"VEVO\s*$", "", uploader, flags=re.I).strip()
-    if re.search(r"\s+[-–]\s+", raw):
-        left, right = re.split(r"\s+[-–]\s+", raw, maxsplit=1)
-        left, right = left.strip(), right.strip()
-        if left and right:
-            if uploader:
-                left_sim = difflib.SequenceMatcher(
-                    None, left.lower(), uploader.lower()
-                ).ratio()
-                right_sim = difflib.SequenceMatcher(
-                    None, right.lower(), uploader.lower()
-                ).ratio()
-                if right_sim >= 0.5 and right_sim > left_sim:
-                    return left, right
-                if left_sim >= 0.45:
-                    return right, left
-            # YouTube convention: Artist - Title
-            return right, left
-    return raw, uploader
-
-
-def _nearby_track_from_video(video, source_label, query):
-    url = _candidate_url(video, source_label)
-    if not url:
-        return None
-    title, artist = _entry_title_artist(video)
-    if not title:
-        return None
-    meta = TrackMetadata()
-    meta.title = title
-    meta.artist = artist or None
-    meta.source_url = url
-    meta.url = url
-    meta.id = str(video.get("id") or abs(hash(url)))
-    meta.type = "search"
-    meta.search_query = query
-    thumbs = video.get("thumbnails") or []
-    meta.artwork_url = video.get("thumbnail") or (thumbs[-1].get("url") if thumbs else None)
-    return meta
 
 
 def _strip_track_noise(title):
@@ -779,11 +640,7 @@ class MusicDownloader:
 
         use_subprocess = bool(self.cookies_from_browser)
         if use_subprocess:
-            try:
-                ok, detail = self._probe_youtube_subprocess(thorough=force)
-            except Exception as exc:
-                ok, detail = False, f"probe error: {exc}"[:300]
-                logger.warning("YouTube subprocess probe crashed: %s", exc)
+            ok, detail = self._probe_youtube_subprocess(thorough=force)
             _PROBE_CACHE.update(monotonic=now, ok=ok, detail=detail)
             return ok, detail
 
@@ -853,123 +710,10 @@ class MusicDownloader:
             invalidate_youtube_auth_probe()
         return self.probe_youtube_auth(force=True)
 
-    def youtube_auth_ok(self, *, live=False):
-        """Whether YouTube downloads should be attempted.
-
-        Non-live (default): always True. Health probes are advisory and must never
-        block downloads or hide YouTube behind SoundCloud remixes when the probe
-        flakes/timeouts under proxychains.
-        Pass ``live=True`` from background health jobs only.
-        """
-        if not live:
-            return True
-        ok, _detail = self.probe_youtube_auth(force=True)
+    def youtube_auth_ok(self):
+        """True when yt-dlp can pass YouTube's bot check (live probe)."""
+        ok, _detail = self.probe_youtube_auth()
         return ok
-
-    def _youtube_subprocess_attempts(self, *, probe=False):
-        """Auth modes for subprocess YouTube operations.
-
-        Probes prefer cookiefile (fast, no Chrome DB lock). Downloads prefer live
-        browser cookies when configured.
-        """
-        if probe:
-            # Prefer cookiefile only — Chrome DB reads under systemd often hang and
-            # freeze health checks. Downloads still use live browser cookies.
-            if os.path.exists(self.cookies_path):
-                return ["cookiefile"]
-            if self.cookies_from_browser:
-                return ["browser"]
-            return ["cookiefile"]
-        if self.cookies_from_browser:
-            return ["browser"]
-        if _cookies_look_authenticated(self.cookies_path):
-            return ["cookiefile"]
-        return ["browser"]
-
-    def _run_youtube_worker(self, url, *, probe=False, output_template="", quality=DEFAULT_QUALITY):
-        """Invoke yt_download_worker.py in an isolated subprocess."""
-        _ensure_youtube_session_env()
-        root = os.path.dirname(os.path.abspath(__file__))
-        worker = os.path.join(root, "scripts", "yt_download_worker.py")
-        env, proxy = _prepare_youtube_worker_env(os.environ)
-        deno_bin = os.path.expanduser("~/.deno/bin")
-        venv_bin = os.path.join(root, ".venv", "bin")
-        env["PATH"] = f"{deno_bin}:{venv_bin}:" + env.get("PATH", "")
-        if proxy:
-            logger.info("YouTube worker using native proxy %s (LD_PRELOAD cleared)", proxy)
-
-        def _run_once(run_env):
-            last_err = ""
-            for auth in self._youtube_subprocess_attempts(probe=probe):
-                retry_delays = () if probe else (
-                    _BROWSER_RETRY_DELAYS if auth == "browser" else ()
-                )
-                max_attempts = 1 + len(retry_delays)
-                for attempt in range(max_attempts):
-                    cmd = [
-                        sys.executable,
-                        worker,
-                        "--url", url,
-                        "--outtmpl", output_template or os.path.join(
-                            root, "downloads", "_probe.%(ext)s"
-                        ),
-                        "--quality", str(quality),
-                        "--auth", auth,
-                    ]
-                    if probe:
-                        cmd.append("--probe")
-                    timeout = _PROBE_TIMEOUT_SEC if probe else 600
-                    try:
-                        with _YTDLP_LOCK:
-                            completed = subprocess.run(
-                                cmd,
-                                env=run_env,
-                                capture_output=True,
-                                text=True,
-                                timeout=timeout,
-                                cwd=root,
-                            )
-                    except subprocess.TimeoutExpired as exc:
-                        # Ensure zombie workers are reaped (run() usually kills, but be safe).
-                        try:
-                            if exc.process:
-                                exc.process.kill()
-                                exc.process.wait(timeout=5)
-                        except Exception:
-                            pass
-                        last_err = f"timeout after {timeout}s (auth={auth})"
-                        logger.warning("YouTube worker %s", last_err)
-                        break
-                    for line in (completed.stdout or "").splitlines():
-                        if (
-                            line.startswith("yt_worker ")
-                            or line == "PROBE_OK"
-                        ):
-                            logger.info("%s", line)
-                    if completed.returncode == 0:
-                        return True, f"subprocess OK (auth={auth})"
-                    err = (completed.stderr or completed.stdout or "").strip() or (
-                        f"worker exited {completed.returncode}"
-                    )
-                    last_err = err or last_err
-                    if (
-                        attempt + 1 < max_attempts
-                        and auth == "browser"
-                        and _is_bot_check_error(last_err)
-                    ):
-                        delay = retry_delays[attempt]
-                        logger.info(
-                            "YouTube browser auth bot_check — retry %d/%d after %ds",
-                            attempt + 2,
-                            max_attempts,
-                            delay,
-                        )
-                        time.sleep(delay)
-                        continue
-                    break
-            return False, last_err or "YouTube worker failed"
-
-        return _run_once(env)
 
     def _build_ydl_opts(
         self, output_template, progress_hooks=None, quality=DEFAULT_QUALITY,
@@ -1012,6 +756,120 @@ class MusicDownloader:
             ydl_opts['progress_hooks'] = list(progress_hooks)
         return self._apply_auth(ydl_opts, live_browser=live_browser)
 
+    def _youtube_subprocess_attempts(self):
+        """Auth modes for subprocess YouTube operations (browser preferred)."""
+        if self.cookies_from_browser:
+            return ["browser"]
+        if _cookies_look_authenticated(self.cookies_path):
+            return ["cookiefile"]
+        return ["browser"]
+
+    def _run_youtube_worker(self, url, *, probe=False, output_template="", quality=DEFAULT_QUALITY):
+        """Invoke yt_download_worker.py in an isolated subprocess."""
+        _ensure_youtube_session_env()
+        root = os.path.dirname(os.path.abspath(__file__))
+        worker = os.path.join(root, "scripts", "yt_download_worker.py")
+        env = os.environ.copy()
+        deno_bin = os.path.expanduser("~/.deno/bin")
+        venv_bin = os.path.join(root, ".venv", "bin")
+        env["PATH"] = f"{deno_bin}:{venv_bin}:" + env.get("PATH", "")
+
+        # Optional: drop proxychains LD_PRELOAD for YouTube (can fix format errors,
+        # but breaks YouTube if it only works through the proxy).
+        force_direct = os.getenv("YTDLP_CLEAR_PROXYCHAINS", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if force_direct:
+            env.pop("LD_PRELOAD", None)
+            for key in list(env):
+                if key.upper().startswith("PROXYCHAINS"):
+                    env.pop(key, None)
+
+        def _run_once(run_env):
+            last_err = ""
+            for auth in self._youtube_subprocess_attempts():
+                retry_delays = _BROWSER_RETRY_DELAYS if auth == "browser" else ()
+                max_attempts = 1 + len(retry_delays)
+                for attempt in range(max_attempts):
+                    cmd = [
+                        sys.executable,
+                        worker,
+                        "--url", url,
+                        "--outtmpl", output_template or os.path.join(
+                            root, "downloads", "_probe.%(ext)s"
+                        ),
+                        "--quality", str(quality),
+                        "--auth", auth,
+                    ]
+                    if probe:
+                        cmd.append("--probe")
+                    with _YTDLP_LOCK:
+                        completed = subprocess.run(
+                            cmd,
+                            env=run_env,
+                            capture_output=True,
+                            text=True,
+                            timeout=120 if probe else 600,
+                            cwd=root,
+                        )
+                    for line in (completed.stdout or "").splitlines():
+                        if line.startswith("yt_worker ") or line == "PROBE_OK":
+                            logger.info("%s", line)
+                    if completed.returncode == 0:
+                        return True, f"subprocess OK (auth={auth})"
+                    err = (completed.stderr or completed.stdout or "").strip() or (
+                        f"worker exited {completed.returncode}"
+                    )
+                    last_err = err or last_err
+                    if (
+                        attempt + 1 < max_attempts
+                        and auth == "browser"
+                        and _is_bot_check_error(last_err)
+                    ):
+                        delay = retry_delays[attempt]
+                        logger.info(
+                            "YouTube browser auth bot_check — retry %d/%d after %ds",
+                            attempt + 2,
+                            max_attempts,
+                            delay,
+                        )
+                        time.sleep(delay)
+                        continue
+                    break
+            return False, last_err or "YouTube worker failed"
+
+        ok, detail = _run_once(env)
+        if ok:
+            return True, detail
+
+        # If still under proxychains and format listing failed, retry direct once.
+        err_l = (detail or "").lower()
+        format_fail = (
+            "format is not available" in err_l
+            or "no video formats" in err_l
+            or "probe_no_formats" in err_l
+        )
+        if (
+            format_fail
+            and not force_direct
+            and env.get("LD_PRELOAD")
+            and os.getenv("YTDLP_INHERIT_PROXYCHAINS", "").strip().lower()
+            not in ("1", "true", "yes", "on")
+        ):
+            direct_env = env.copy()
+            direct_env.pop("LD_PRELOAD", None)
+            for key in list(direct_env):
+                if key.upper().startswith("PROXYCHAINS"):
+                    direct_env.pop(key, None)
+            logger.info(
+                "YouTube worker format failure under proxychains — retrying without LD_PRELOAD"
+            )
+            ok2, detail2 = _run_once(direct_env)
+            if ok2:
+                return True, detail2 + " (direct, no proxychains)"
+            return False, detail2 or detail
+        return False, detail
+
     def _download_youtube_subprocess(self, url, output_template, quality=DEFAULT_QUALITY):
         """Download in a fresh worker subprocess (isolates Chrome cookie access)."""
         logger.info("YouTube subprocess download: %s", url)
@@ -1037,7 +895,7 @@ class MusicDownloader:
         raise RuntimeError(detail)
 
     def _probe_youtube_subprocess(self, thorough=False):
-        """Health-check via subprocess (cookiefile preferred; short timeout)."""
+        """Health-check via subprocess with live Chrome cookies (browser auth only)."""
         urls = []
         if _HEALTH_PROBE_URL:
             urls.append(_HEALTH_PROBE_URL)
@@ -1081,75 +939,6 @@ class MusicDownloader:
             },
         }
         return self._apply_auth(ydl_opts, live_browser=False)
-
-    async def search_nearby(self, query, limit=8):
-        """YouTube + SoundCloud tracks whose titles are near ``query``.
-
-        Unlike download matching, this does not require the (possibly wrong)
-        catalog artist. Results have ``source_url`` so a pick downloads that page.
-        """
-        query = (query or "").strip()
-        if len(query) < 3:
-            return []
-        loop = asyncio.get_event_loop()
-        search_opts = self._build_search_opts()
-        n = max(int(limit), 8)
-        scored = []
-        seen_ids = set()
-
-        def _extract(prefix):
-            with self._with_ydl(search_opts) as ydl:
-                return ydl.extract_info(f"{prefix}{n}:{query}", download=False)
-
-        for prefix, label in (("ytsearch", "YouTube"), ("scsearch", "SoundCloud")):
-            try:
-                info = await loop.run_in_executor(
-                    None, lambda p=prefix: _extract(p)
-                )
-            except Exception:
-                logger.exception("Nearby %s search failed for %r", label, query)
-                continue
-            for video in (info or {}).get("entries") or []:
-                if not video:
-                    continue
-                vid = video.get("id")
-                if vid and vid in seen_ids:
-                    continue
-                meta = _nearby_track_from_video(video, label, query)
-                if not meta:
-                    continue
-                if ((meta.title or "") + " " + (meta.artist or "")).count("#") >= 2:
-                    continue
-                if vid:
-                    seen_ids.add(vid)
-                near = score_title_nearness(
-                    query, meta.title, require_distinctive=True,
-                )
-                if near < 45:
-                    continue
-                views = video.get("view_count") or video.get("playback_count") or 0
-                try:
-                    views = int(views)
-                except (TypeError, ValueError):
-                    views = 0
-                scored.append((near, views, meta))
-
-        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
-        out = []
-        seen_ta = set()
-        for _near, _views, meta in scored:
-            key = (
-                (meta.title or "").strip().lower(),
-                (meta.artist or "").strip().lower(),
-            )
-            if key in seen_ta:
-                continue
-            seen_ta.add(key)
-            out.append(meta)
-            if len(out) >= limit:
-                break
-        logger.info("Nearby YT/SC: %d tracks for %r", len(out), query)
-        return out
 
     async def download_song(self, metadata, progress_reporter=None, cancel_check=None,
                           quality=DEFAULT_QUALITY):
@@ -1350,13 +1139,8 @@ class MusicDownloader:
                             return None
                         combined -= 12.0
 
-            expected_for_noise = metadata.title or original_query or ""
-            if _has_noise(raw_title, expected_for_noise) or _has_noise(
-                hay, expected_for_noise
-            ):
-                # Catalog originals must not land on remixes/bootlegs just because
-                # title+artist still score high (penalty of -25 still passed MATCH_THRESHOLD).
-                return None
+            if _has_noise(raw_title, metadata.title or original_query or ""):
+                combined -= 25.0
 
             return (
                 combined, title_sim, artist_sim, token_sim, yt_title, yt_artist,
@@ -1373,11 +1157,6 @@ class MusicDownloader:
         if q_title and q_primary:
             yt_search_strategies.append(f'{q_title} {q_primary} - Topic')
             yt_search_strategies.append(f'{q_title} {q_primary} official audio')
-            if not version_required:
-                # Push remix/extended uploads down in the search ranking.
-                yt_search_strategies.append(
-                    f'{q_title} {q_primary} official audio -remix -extended -slowed'
-                )
         if original_query:
             yt_search_strategies.append(original_query)
             yt_search_strategies.append(f'{original_query} audio')
@@ -1670,28 +1449,7 @@ class MusicDownloader:
                 if cand[0] >= MATCH_THRESHOLD:
                     download_queue.append(cand)
 
-        def _collect_nearby():
-            hits = []
-            seen = set()
-            for label in ("YouTube", "SoundCloud"):
-                for _score, video in found_by_source.get(label) or []:
-                    meta = _nearby_track_from_video(video, label, original_query)
-                    if not meta:
-                        continue
-                    key = (
-                        (meta.title or "").strip().lower(),
-                        (meta.artist or "").strip().lower(),
-                        meta.source_url,
-                    )
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    hits.append(meta)
-            if hits:
-                metadata.nearby_hits = hits
-
         if not download_queue:
-            _collect_nearby()
             score_txt = f"{best[0]:.1f}%" if best else "n/a"
             logger.error(
                 f"No candidate passed validation on any source (title >= {TITLE_THRESHOLD:.0f}% and "
@@ -1706,26 +1464,23 @@ class MusicDownloader:
                 return "SoundCloud"
             return "YouTube"
 
-        # Rank by score. Do NOT put SoundCloud ahead of better YouTube matches just
-        # because the auth probe is unhealthy — that was downloading remixes (SC)
-        # while originals (YT) sat unused. Probe failures often don't mean downloads fail.
-        def _queue_key(cand):
-            score, video = cand
-            is_yt = 1 if _source_label_for(video) == "YouTube" else 0
-            return (score, is_yt)
-
-        download_queue.sort(key=_queue_key, reverse=True)
+        yt_items = [c for c in download_queue if _source_label_for(c[1]) == "YouTube"]
+        other_items = [c for c in download_queue if _source_label_for(c[1]) != "YouTube"]
+        # Probe URL can bot-check while real track downloads still work — never drop
+        # YouTube candidates solely on probe failure. Prefer SoundCloud first when the
+        # cached probe is bad; keep YouTube as fallback (e.g. SoundCloud DRM).
         yt_usable = self.youtube_auth_ok()
-        if not yt_usable:
+        if yt_usable:
+            download_queue = yt_items[:3] + other_items[:3]
+        else:
             logger.warning(
-                "YouTube probe unhealthy — still ranking by match score "
-                "(%d YouTube / %d other in queue)",
-                sum(1 for c in download_queue if _source_label_for(c[1]) == "YouTube"),
-                sum(1 for c in download_queue if _source_label_for(c[1]) != "YouTube"),
+                "YouTube probe unhealthy — trying other sources first, "
+                "YouTube kept as fallback (%d candidates)",
+                len(yt_items),
             )
-        download_queue = download_queue[:7]
-        if not download_queue:
-            return None, "bot_check", failure_trail
+            download_queue = other_items[:3] + yt_items[:4]
+            if not download_queue:
+                return None, "bot_check", failure_trail
 
         def _yt_hook(d):
             try:
@@ -1895,7 +1650,6 @@ class MusicDownloader:
                 return None, "cancelled", failure_trail
 
             if not file_path:
-                _collect_nearby()
                 return None, last_err or ("bot_check" if saw_bot_check else "no_match"), failure_trail
 
             try:
@@ -1963,6 +1717,35 @@ class MusicDownloader:
             return bool(audio.tags.getall("APIC"))
         except Exception:
             return False
+
+    def file_has_watermark(self, file_path):
+        """True when APIC was embedded with the HiiT logo processor."""
+        try:
+            audio = MutagenMP3(file_path, ID3=ID3)
+            if not audio.tags or not audio.tags.getall("APIC"):
+                return False
+            for frame in audio.tags.getall("TXXX"):
+                if getattr(frame, "desc", "") == "HIIT_WATERMARK_STYLE":
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def telegram_thumbnail_jpeg(self, file_path, max_px=320):
+        """JPEG bytes suitable for Telegram sendAudio thumbnail (≤320px)."""
+        data = self.extract_cover(file_path)
+        if not data:
+            return None
+        try:
+            img = Image.open(io.BytesIO(data))
+            if img.mode != "RGB":
+                img = img.convert("RGB")
+            img.thumbnail((max_px, max_px), Image.Resampling.LANCZOS)
+            out = io.BytesIO()
+            img.save(out, format="JPEG", quality=85)
+            return out.getvalue()
+        except Exception:
+            return None
 
     def extract_cover(self, file_path):
         """Return watermarked JPEG cover bytes from an MP3's APIC frame, or None."""
@@ -2122,17 +1905,13 @@ class MusicDownloader:
                 f"(source was '{src_title}' by '{src_artist}')"
             )
 
+        # Keep iTunes / Deezer / Spotify / Apple art so the HiiT watermark can
+        # be drawn on real album covers. YouTube thumbs are a last resort only.
         thumb = _video_thumbnail_url(video)
-        if thumb and (
-            not getattr(metadata, "artwork_url", None)
-            or not had_catalog
-        ):
-            # Text search: always prefer source thumbnail for watermarking when
-            # we have no catalog art. For catalog links keep Spotify/Apple art.
-            if not had_catalog or not metadata.artwork_url:
-                metadata.artwork_url = thumb
-                metadata._artwork_from_youtube = True
-                logger.info(f"Using video thumbnail for watermarked cover: {thumb[:80]}")
+        if thumb and not getattr(metadata, "artwork_url", None):
+            metadata.artwork_url = thumb
+            metadata._artwork_from_youtube = True
+            logger.info(f"Using video thumbnail for watermarked cover: {thumb[:80]}")
 
     def _apply_lyrics(self, audio, lyrics):
         if not lyrics or not lyrics.get("text"):
@@ -2185,76 +1964,140 @@ class MusicDownloader:
             if lyrics:
                 self._apply_lyrics(audio, lyrics)
 
-            if metadata.artwork_url:
-                try:
-                    headers = {
-                        "User-Agent": (
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/131.0.0.0 Safari/537.36"
-                        ),
-                        "Referer": "https://www.youtube.com/",
-                    }
-                    response = requests.get(
-                        metadata.artwork_url, timeout=15, headers=headers,
-                    )
-                    if response.status_code == 200 and response.content:
-                        original_artwork = response.content
-
-                        source = "unknown"
-                        from_yt = getattr(metadata, "_artwork_from_youtube", False)
-                        if from_yt:
-                            # YouTube thumbnail: same watermark as text-search (border + logo)
-                            processed_artwork = self._process_itunes_query_artwork(original_artwork)
-                            source = "youtube"
-                        elif hasattr(metadata, 'url') and metadata.url:
-                            if "spotify.com" in metadata.url:
-                                processed_artwork = self._process_apple_music_artwork(original_artwork)
-                                source = "spotify"
-                            elif "music.apple.com" in metadata.url:
-                                processed_artwork = self._process_apple_music_artwork(original_artwork)
-                                source = "apple"
-                            else:
-                                processed_artwork = self._process_itunes_query_artwork(original_artwork)
-                                source = "itunes"
-                        else:
-                            processed_artwork = self._process_itunes_query_artwork(original_artwork)
-                            source = "fallback"
-
-                        if processed_artwork:
-                            audio.tags.delall("APIC")
-                            audio.tags.delall("TXXX:HIIT_WATERMARK_STYLE")
-                            audio.tags.add(
-                                TXXX(
-                                    encoding=3,
-                                    desc="HIIT_WATERMARK_STYLE",
-                                    text=[source],
-                                )
-                            )
-                            audio.tags.add(APIC(
-                                encoding=3,
-                                mime="image/jpeg",
-                                type=3,
-                                desc="Cover",
-                                data=processed_artwork
-                            ))
-                            logger.info(f"Embedded {source} artwork with HiiT Radio logo")
-                        else:
-                            logger.warning("Artwork processing returned None")
-                    else:
-                        logger.warning(
-                            f"Artwork fetch failed: status={getattr(response, 'status_code', '?')}"
-                        )
-                except Exception as e:
-                    logger.error(f"Artwork error: {e}", exc_info=True)
-            else:
-                logger.info("No artwork URL - sending audio without cover")
+            if not self._embed_watermarked_cover(audio, metadata):
+                logger.info("No artwork embedded for '%s'", metadata.title)
 
             audio.save(v2_version=3, v1=1)
             logger.info(f"Metadata applied: '{metadata.title}' by '{metadata.artist}'")
 
         except Exception as e:
             logger.error(f"Metadata error: {e}", exc_info=True)
+
+    def ensure_watermarked_cover(self, file_path, metadata):
+        """Embed (or refresh) watermarked APIC on an existing MP3."""
+        if not file_path or not os.path.exists(file_path):
+            return False
+        if self.file_has_watermark(file_path):
+            try:
+                return self.rewatermark_from_file(file_path)
+            except Exception:
+                return True
+        self._apply_metadata(file_path, metadata)
+        return self.file_has_watermark(file_path)
+
+    @staticmethod
+    def _artwork_headers(url):
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        }
+        u = (url or "").lower()
+        if "ytimg.com" in u or "youtube.com" in u or "ggpht.com" in u:
+            headers["Referer"] = "https://www.youtube.com/"
+        elif "mzstatic.com" in u or "apple.com" in u:
+            headers["Referer"] = "https://music.apple.com/"
+        elif "deezer.com" in u or "dzcdn.net" in u:
+            headers["Referer"] = "https://www.deezer.com/"
+        elif "scdn.co" in u or "spotify.com" in u:
+            headers["Referer"] = "https://open.spotify.com/"
+        return headers
+
+    @staticmethod
+    def _style_for_art_url(metadata, art_url):
+        u = (art_url or "").lower()
+        page = (getattr(metadata, "url", None) or "").lower()
+        if "ytimg.com" in u or "ggpht.com" in u:
+            return "youtube"
+        if "spotify.com" in page or "scdn.co" in u:
+            return "spotify"
+        if "music.apple.com" in page:
+            return "apple"
+        if "deezer.com" in page or "dzcdn.net" in u:
+            return "apple"
+        if "mzstatic.com" in u:
+            return "itunes"
+        if getattr(metadata, "_artwork_from_youtube", False):
+            return "youtube"
+        return "itunes"
+
+    def _itunes_artwork_url(self, title, artist):
+        query = f"{title or ''} {artist or ''}".strip()
+        if len(query) < 3:
+            return None
+        try:
+            response = requests.get(
+                "https://itunes.apple.com/search",
+                params={"term": query, "media": "music", "entity": "song", "limit": 1},
+                timeout=10,
+                headers={"User-Agent": "Mozilla/5.0", "Referer": "https://music.apple.com/"},
+            )
+            results = (response.json() or {}).get("results") or []
+            if not results:
+                return None
+            art = results[0].get("artworkUrl100") or ""
+            if not art:
+                return None
+            return (
+                art.replace("100x100bb", "3000x3000bb")
+                .replace("100x100", "3000x3000")
+                .replace("600x600bb", "3000x3000bb")
+            )
+        except Exception as exc:
+            logger.debug("iTunes artwork fallback failed: %s", exc)
+            return None
+
+    def _embed_watermarked_cover(self, audio, metadata):
+        urls = []
+        primary = getattr(metadata, "artwork_url", None)
+        if primary:
+            urls.append(primary)
+        fallback = self._itunes_artwork_url(metadata.title, metadata.artist)
+        if fallback and fallback not in urls:
+            urls.append(fallback)
+        if not urls:
+            return False
+
+        for art_url in urls:
+            try:
+                response = requests.get(
+                    art_url, timeout=15, headers=self._artwork_headers(art_url),
+                )
+                if response.status_code != 200 or not response.content:
+                    logger.warning(
+                        "Artwork fetch failed: status=%s url=%s",
+                        getattr(response, "status_code", "?"),
+                        art_url[:80],
+                    )
+                    continue
+                style = self._style_for_art_url(metadata, art_url)
+                if style in ("spotify", "apple"):
+                    processed = self._process_apple_music_artwork(response.content)
+                else:
+                    processed = self._process_itunes_query_artwork(response.content)
+                if not processed:
+                    logger.warning("Artwork processing returned None")
+                    continue
+                audio.tags.delall("APIC")
+                audio.tags.delall("TXXX:HIIT_WATERMARK_STYLE")
+                audio.tags.add(
+                    TXXX(encoding=3, desc="HIIT_WATERMARK_STYLE", text=[style])
+                )
+                audio.tags.add(APIC(
+                    encoding=3,
+                    mime="image/jpeg",
+                    type=3,
+                    desc="Cover",
+                    data=processed,
+                ))
+                logger.info("Embedded %s artwork with HiiT Radio logo", style)
+                return True
+            except Exception as exc:
+                logger.error("Artwork error for %s: %s", art_url[:80], exc)
+        return False
 
     def _process_apple_music_artwork(self, original_artwork_bytes):
         """Apple Music & Spotify: center-crop to square, add logo (25% of size). NO white border."""

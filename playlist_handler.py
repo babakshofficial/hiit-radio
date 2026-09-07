@@ -211,6 +211,11 @@ async def process_playlist(update, context, tracks, collection_name, orchestrato
                         audio=file_path, **send_kwargs,
                     )
                 else:
+                    thumb = orchestrator.music_downloader.telegram_thumbnail_jpeg(file_path)
+                    if thumb:
+                        bio_thumb = BytesIO(thumb)
+                        bio_thumb.name = "cover.jpg"
+                        send_kwargs["thumbnail"] = bio_thumb
                     with open(file_path, 'rb') as audio:
                         sent_msg = await message.reply_audio(
                             audio=audio, **send_kwargs,
