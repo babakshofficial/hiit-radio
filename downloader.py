@@ -16,6 +16,7 @@ from PIL import Image, ImageFilter, ImageChops
 import io
 
 from metadata import score_query_coverage
+import jobs
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,91 @@ def downloads_in_progress():
 
 
 _BROWSER_RETRY_DELAYS = (2, 6, 15)
+
+
+def _kill_proc(proc):
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=3)
+    except Exception:
+        pass
+
+
+def _run_interruptible(cmd, *, env, cwd, timeout, cancel_check=None, user_id=None):
+    """Run ``cmd``; kill it if ``cancel_check()`` becomes true.
+
+    Returns ``(returncode, stdout, stderr, cancelled)``.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+    )
+    jobs.register_proc(user_id, proc)
+    deadline = time.monotonic() + float(timeout)
+    stdout = stderr = ""
+    try:
+        while True:
+            if (cancel_check and cancel_check()) or jobs.abort_requested(user_id):
+                _kill_proc(proc)
+                try:
+                    stdout, stderr = proc.communicate(timeout=5)
+                except Exception:
+                    pass
+                return -9, stdout or "", stderr or "", True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _kill_proc(proc)
+                try:
+                    stdout, stderr = proc.communicate(timeout=5)
+                except Exception:
+                    pass
+                raise subprocess.TimeoutExpired(
+                    cmd, timeout, output=stdout, stderr=stderr,
+                )
+            try:
+                stdout, stderr = proc.communicate(timeout=min(0.2, remaining))
+                return proc.returncode, stdout or "", stderr or "", False
+            except subprocess.TimeoutExpired:
+                continue
+    except subprocess.TimeoutExpired:
+        raise
+    except Exception:
+        _kill_proc(proc)
+        raise
+    finally:
+        jobs.unregister_proc(user_id, proc)
+
+
+def _lock_or_cancel(cancel_check, poll=0.15):
+    """Acquire ``_YTDLP_LOCK`` unless cancel is requested while waiting."""
+    while True:
+        if cancel_check and cancel_check():
+            return False
+        if _YTDLP_LOCK.acquire(timeout=poll):
+            return True
+
+
+async def _await_interruptible(loop, fn, cancel_check, poll=0.2):
+    """Run ``fn`` in a thread; stop waiting as soon as cancel is requested.
+
+    Returns ``(result, cancelled)``. The worker thread may still finish later.
+    """
+    fut = loop.run_in_executor(None, fn)
+    while not fut.done():
+        if cancel_check and cancel_check():
+            return None, True
+        try:
+            await asyncio.wait_for(asyncio.shield(fut), timeout=poll)
+        except asyncio.TimeoutError:
+            continue
+    return fut.result(), False
 
 
 def _deno_js_runtimes():
@@ -442,12 +528,14 @@ class MusicDownloader:
             # Artwork will gracefully fall back to "no logo" if the file is missing/broken.
             self._logo_base = None
 
-    def _with_ydl(self, opts):
+    def _with_ydl(self, opts, *, lock=True):
         """Serialize yt-dlp — Chrome cookie decrypt is not safe concurrently."""
         class _YtdlCtx:
             def __enter__(ctx_self):
                 _ensure_youtube_session_env()
-                _YTDLP_LOCK.acquire()
+                ctx_self._locked = bool(lock)
+                if ctx_self._locked:
+                    _YTDLP_LOCK.acquire()
                 ctx_self._ydl = yt_dlp.YoutubeDL(opts)
                 ctx_self._ydl.__enter__()
                 return ctx_self._ydl
@@ -456,7 +544,8 @@ class MusicDownloader:
                 try:
                     return ctx_self._ydl.__exit__(exc_type, exc, tb)
                 finally:
-                    _YTDLP_LOCK.release()
+                    if ctx_self._locked:
+                        _YTDLP_LOCK.release()
 
         return _YtdlCtx()
 
@@ -764,7 +853,10 @@ class MusicDownloader:
             return ["cookiefile"]
         return ["browser"]
 
-    def _run_youtube_worker(self, url, *, probe=False, output_template="", quality=DEFAULT_QUALITY):
+    def _run_youtube_worker(
+        self, url, *, probe=False, output_template="", quality=DEFAULT_QUALITY,
+        cancel_check=None, user_id=None,
+    ):
         """Invoke yt_download_worker.py in an isolated subprocess."""
         _ensure_youtube_session_env()
         root = os.path.dirname(os.path.abspath(__file__))
@@ -803,24 +895,39 @@ class MusicDownloader:
                     ]
                     if probe:
                         cmd.append("--probe")
-                    with _YTDLP_LOCK:
-                        completed = subprocess.run(
+                    timeout = 120 if probe else 600
+                    if cancel_check and cancel_check():
+                        return False, "cancelled"
+                    if not _lock_or_cancel(None if probe else cancel_check):
+                        return False, "cancelled"
+                    try:
+                        code, stdout, stderr, cancelled = _run_interruptible(
                             cmd,
                             env=run_env,
-                            capture_output=True,
-                            text=True,
-                            timeout=120 if probe else 600,
                             cwd=root,
+                            timeout=timeout,
+                            cancel_check=None if probe else cancel_check,
+                            user_id=user_id,
                         )
-                    for line in (completed.stdout or "").splitlines():
+                    except subprocess.TimeoutExpired:
+                        last_err = f"timeout after {timeout}s (auth={auth})"
+                        logger.warning("YouTube worker %s", last_err)
+                        break
+                    finally:
+                        _YTDLP_LOCK.release()
+                    if cancelled:
+                        return False, "cancelled"
+                    for line in (stdout or "").splitlines():
                         if line.startswith("yt_worker ") or line == "PROBE_OK":
                             logger.info("%s", line)
-                    if completed.returncode == 0:
+                    if code == 0:
                         return True, f"subprocess OK (auth={auth})"
-                    err = (completed.stderr or completed.stdout or "").strip() or (
-                        f"worker exited {completed.returncode}"
+                    err = (stderr or stdout or "").strip() or (
+                        f"worker exited {code}"
                     )
                     last_err = err or last_err
+                    if cancel_check and cancel_check():
+                        return False, "cancelled"
                     if (
                         attempt + 1 < max_attempts
                         and auth == "browser"
@@ -833,7 +940,11 @@ class MusicDownloader:
                             max_attempts,
                             delay,
                         )
-                        time.sleep(delay)
+                        deadline = time.monotonic() + delay
+                        while time.monotonic() < deadline:
+                            if cancel_check and cancel_check():
+                                return False, "cancelled"
+                            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
                         continue
                     break
             return False, last_err or "YouTube worker failed"
@@ -870,13 +981,21 @@ class MusicDownloader:
             return False, detail2 or detail
         return False, detail
 
-    def _download_youtube_subprocess(self, url, output_template, quality=DEFAULT_QUALITY):
+    def _download_youtube_subprocess(
+        self, url, output_template, quality=DEFAULT_QUALITY, cancel_check=None,
+        user_id=None,
+    ):
         """Download in a fresh worker subprocess (isolates Chrome cookie access)."""
         logger.info("YouTube subprocess download: %s", url)
         ok, detail = self._run_youtube_worker(
             url, probe=False, output_template=output_template, quality=quality,
+            cancel_check=cancel_check, user_id=user_id,
         )
+        if not ok and (detail or "").lower() == "cancelled":
+            raise RuntimeError("cancelled")
         if not ok and _is_bot_check_error(detail) and self.cookies_from_browser:
+            if cancel_check and cancel_check():
+                raise RuntimeError("cancelled")
             logger.info(
                 "YouTube download bot_check — exporting browser cookies and retrying once"
             )
@@ -886,9 +1005,16 @@ class MusicDownloader:
                 refresh_ok,
                 refresh_detail,
             )
-            time.sleep(3)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if cancel_check and cancel_check():
+                    raise RuntimeError("cancelled")
+                time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+            if cancel_check and cancel_check():
+                raise RuntimeError("cancelled")
             ok, detail = self._run_youtube_worker(
                 url, probe=False, output_template=output_template, quality=quality,
+                cancel_check=cancel_check, user_id=user_id,
             )
         if ok:
             return True
@@ -941,7 +1067,7 @@ class MusicDownloader:
         return self._apply_auth(ydl_opts, live_browser=False)
 
     async def download_song(self, metadata, progress_reporter=None, cancel_check=None,
-                          quality=DEFAULT_QUALITY):
+                          quality=DEFAULT_QUALITY, user_id=None):
         """Download song with multi-candidate search and multi-layer validation.
 
         Flat YouTube searches score candidates on title + artist + duration/topic
@@ -960,12 +1086,16 @@ class MusicDownloader:
 
         def _is_cancelled():
             try:
-                return bool(cancel_check and cancel_check())
+                if cancel_check and cancel_check():
+                    return True
             except Exception:
-                return False
+                pass
+            return bool(user_id is not None and jobs.abort_requested(user_id))
 
         def _classify_error(err):
             text = str(err or "").lower()
+            if "cancelled" in text:
+                return "cancelled"
             if "confirm you're not a bot" in text or "sign in to confirm" in text:
                 return "bot_check"
             if "no video formats found" in text:
@@ -1235,8 +1365,16 @@ class MusicDownloader:
                 output_template, progress_hooks=[_direct_hook], quality=quality,
             )
             try:
-                with self._with_ydl(ydl_opts) as ydl:
-                    await loop.run_in_executor(None, ydl.download, [source_url])
+                def _do_direct():
+                    _ensure_youtube_session_env()
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        return ydl.download([source_url])
+
+                _direct_result, direct_cancelled = await _await_interruptible(
+                    loop, _do_direct, _is_cancelled,
+                )
+                if direct_cancelled or _is_cancelled():
+                    return None, "cancelled", direct_trail
             except Exception as e:
                 logger.error("Direct URL download failed: %s", e, exc_info=True)
                 code = _classify_error(e)
@@ -1282,100 +1420,108 @@ class MusicDownloader:
             seen_ids = set()
             bot_blocked = False
             n = max(len(strategies), 1)
-            with self._with_ydl(search_opts) as ydl:
-                for strategy_idx, search_query in enumerate(strategies):
-                    if _is_cancelled():
-                        return [], False, True
-                    pct = pct_start + int((pct_end - pct_start) * (strategy_idx / n))
-                    await _report(
-                        pct,
-                        f"{metadata.title} — {metadata.artist}\n"
-                        f"در حال جستجو ({strategy_idx + 1}/{n})...",
+
+            def _extract_search(q):
+                _ensure_youtube_session_env()
+                with yt_dlp.YoutubeDL(search_opts) as ydl:
+                    return ydl.extract_info(
+                        f"{search_prefix}{RESULTS_PER_QUERY}:{q}", download=False
                     )
-                    try:
-                        logger.info(
-                            f"[{source_label}] Search attempt {strategy_idx + 1}/{len(strategies)}: {search_query}"
-                        )
-                        info = await loop.run_in_executor(
-                            None,
-                            lambda q=search_query: ydl.extract_info(
-                                f"{search_prefix}{RESULTS_PER_QUERY}:{q}", download=False
-                            )
-                        )
-                        entries = info.get('entries') if info else None
-                        if not entries:
-                            logger.warning(f"[{source_label}] Strategy {strategy_idx + 1} returned no results")
+
+            for strategy_idx, search_query in enumerate(strategies):
+                if _is_cancelled():
+                    return [], False, True
+                pct = pct_start + int((pct_end - pct_start) * (strategy_idx / n))
+                await _report(
+                    pct,
+                    f"{metadata.title} — {metadata.artist}\n"
+                    f"در حال جستجو ({strategy_idx + 1}/{n})...",
+                )
+                try:
+                    logger.info(
+                        f"[{source_label}] Search attempt {strategy_idx + 1}/{len(strategies)}: {search_query}"
+                    )
+                    info, search_cancelled = await _await_interruptible(
+                        loop,
+                        lambda q=search_query: _extract_search(q),
+                        _is_cancelled,
+                    )
+                    if search_cancelled or _is_cancelled():
+                        return [], False, True
+                    entries = info.get('entries') if info else None
+                    if not entries:
+                        logger.warning(f"[{source_label}] Strategy {strategy_idx + 1} returned no results")
+                        continue
+
+                    for video in entries:
+                        if not video:
                             continue
+                        vid = video.get('id')
+                        if not vid or vid in seen_ids:
+                            continue
+                        if not _candidate_url(video, source_label):
+                            continue
+                        seen_ids.add(vid)
 
-                        for video in entries:
-                            if not video:
-                                continue
-                            vid = video.get('id')
-                            if not vid or vid in seen_ids:
-                                continue
-                            if not _candidate_url(video, source_label):
-                                continue
-                            seen_ids.add(vid)
-
-                            scored = score(video)
-                            if scored is None:
-                                continue
-                            (
-                                combined, title_sim, artist_sim, token_sim,
-                                c_title, c_artist, primary, is_topic, coverage,
-                                coverage_gate,
-                            ) = scored
-                            logger.info(
-                                f"[{source_label}] Candidate: Title {title_sim:.1f}%, Artist {artist_sim:.1f}%, "
-                                f"Coverage {coverage:.1f}%, Combined {combined:.1f}% | "
-                                f"'{c_title}' by '{c_artist}' | "
-                                f"Expected: '{expected_title_clean}' by '{metadata.artist}'"
-                            )
-                            if title_sim < TITLE_THRESHOLD and coverage < coverage_gate:
-                                topic_ok = (
-                                    is_topic
-                                    and token_sim >= 85.0
-                                    and artist_sim >= 80.0
-                                    and (
-                                        not version_required
-                                        or _version_tokens_satisfied(
-                                            version_required, f"{c_title} {c_artist} {video.get('title', '')}"
-                                        )
+                        scored = score(video)
+                        if scored is None:
+                            continue
+                        (
+                            combined, title_sim, artist_sim, token_sim,
+                            c_title, c_artist, primary, is_topic, coverage,
+                            coverage_gate,
+                        ) = scored
+                        logger.info(
+                            f"[{source_label}] Candidate: Title {title_sim:.1f}%, Artist {artist_sim:.1f}%, "
+                            f"Coverage {coverage:.1f}%, Combined {combined:.1f}% | "
+                            f"'{c_title}' by '{c_artist}' | "
+                            f"Expected: '{expected_title_clean}' by '{metadata.artist}'"
+                        )
+                        if title_sim < TITLE_THRESHOLD and coverage < coverage_gate:
+                            topic_ok = (
+                                is_topic
+                                and token_sim >= 85.0
+                                and artist_sim >= 80.0
+                                and (
+                                    not version_required
+                                    or _version_tokens_satisfied(
+                                        version_required, f"{c_title} {c_artist} {video.get('title', '')}"
                                     )
                                 )
-                                if not topic_ok:
-                                    continue
-                            ranked.append((combined, video))
+                            )
+                            if not topic_ok:
+                                continue
+                        ranked.append((combined, video))
 
-                        ranked.sort(key=lambda x: x[0], reverse=True)
-                        ranked = ranked[:MAX_CANDIDATES_PER_SOURCE]
-                        best_score = ranked[0][0] if ranked else 0
+                    ranked.sort(key=lambda x: x[0], reverse=True)
+                    ranked = ranked[:MAX_CANDIDATES_PER_SOURCE]
+                    best_score = ranked[0][0] if ranked else 0
 
-                        if best_score >= EARLY_ACCEPT:
-                            logger.info(
-                                f"[{source_label}] Early accept at {best_score:.1f}% "
-                                f"(strategy {strategy_idx + 1})"
-                            )
+                    if best_score >= EARLY_ACCEPT:
+                        logger.info(
+                            f"[{source_label}] Early accept at {best_score:.1f}% "
+                            f"(strategy {strategy_idx + 1})"
+                        )
+                        break
+                    if strategy_idx >= 1 and best_score >= MATCH_THRESHOLD:
+                        logger.info(
+                            f"[{source_label}] Stopping early — best {best_score:.1f}% "
+                            f"after strategy {strategy_idx + 1}"
+                        )
+                        break
+                except Exception as e:
+                    err = str(e)
+                    if "confirm you're not a bot" in err or "Sign in to confirm" in err:
+                        bot_blocked = True
+                        logger.error(
+                            f"[{source_label}] Strategy {strategy_idx + 1} blocked by YouTube bot check. "
+                            "Refresh logged-in cookies (cookies.txt) or set YTDLP_COOKIES_FROM_BROWSER=chrome"
+                        )
+                        if source_label == "YouTube":
                             break
-                        if strategy_idx >= 1 and best_score >= MATCH_THRESHOLD:
-                            logger.info(
-                                f"[{source_label}] Stopping early — best {best_score:.1f}% "
-                                f"after strategy {strategy_idx + 1}"
-                            )
-                            break
-                    except Exception as e:
-                        err = str(e)
-                        if "confirm you're not a bot" in err or "Sign in to confirm" in err:
-                            bot_blocked = True
-                            logger.error(
-                                f"[{source_label}] Strategy {strategy_idx + 1} blocked by YouTube bot check. "
-                                "Refresh logged-in cookies (cookies.txt) or set YTDLP_COOKIES_FROM_BROWSER=chrome"
-                            )
-                            if source_label == "YouTube":
-                                break
-                        else:
-                            logger.error(f"[{source_label}] Strategy {strategy_idx + 1} failed: {e}")
-                        continue
+                    else:
+                        logger.error(f"[{source_label}] Strategy {strategy_idx + 1} failed: {e}")
+                    continue
             ranked.sort(key=lambda x: x[0], reverse=True)
             ranked = ranked[:MAX_CANDIDATES_PER_SOURCE]
             if bot_blocked and source_label == "YouTube" and not ranked:
@@ -1483,6 +1629,8 @@ class MusicDownloader:
                 return None, "bot_check", failure_trail
 
         def _yt_hook(d):
+            if _is_cancelled():
+                raise RuntimeError("cancelled")
             try:
                 if d.get("status") == "downloading":
                     total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
@@ -1519,7 +1667,9 @@ class MusicDownloader:
             )
             if need_hydrate:
                 await _report(50, f"{metadata.title} — {metadata.artist}\nآماده‌سازی لینک دانلود...")
-                video = await self._hydrate_video_info(url, video, loop)
+                video = await self._hydrate_video_info(
+                    url, video, loop, cancel_check=_is_cancelled,
+                )
             else:
                 await _report(50, f"{metadata.title} — {metadata.artist}\nشروع دانلود...")
 
@@ -1552,17 +1702,23 @@ class MusicDownloader:
             if source_label == "YouTube":
                 heartbeat = asyncio.create_task(_heartbeat())
                 try:
-                    await loop.run_in_executor(
-                        None,
+                    _yt_result, yt_cancelled = await _await_interruptible(
+                        loop,
                         lambda: self._download_youtube_subprocess(
-                            url, output_template, quality
+                            url, output_template, quality,
+                            cancel_check=_is_cancelled,
+                            user_id=user_id,
                         ),
+                        _is_cancelled,
                     )
+                    if yt_cancelled or _is_cancelled():
+                        return None, None, "cancelled"
                 except Exception as e:
                     code = _classify_error(e)
-                    logger.warning(
-                        f"Download of {source_label} match failed ({code}): {url} — {e}"
-                    )
+                    if code != "cancelled":
+                        logger.warning(
+                            f"Download of {source_label} match failed ({code}): {url} — {e}"
+                        )
                     return None, None, code
                 finally:
                     heartbeat.cancel()
@@ -1570,6 +1726,9 @@ class MusicDownloader:
                         await heartbeat
                     except asyncio.CancelledError:
                         pass
+
+                if _is_cancelled():
+                    return None, None, "cancelled"
 
                 path = os.path.join(self.download_dir, f"{metadata.id}.mp3")
                 if not os.path.exists(path):
@@ -1592,13 +1751,22 @@ class MusicDownloader:
             )
             heartbeat = asyncio.create_task(_heartbeat())
             try:
-                with self._with_ydl(ydl_opts) as ydl:
-                    await loop.run_in_executor(None, ydl.download, [url])
+                def _do_sc():
+                    _ensure_youtube_session_env()
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        return ydl.download([url])
+
+                _sc_result, sc_cancelled = await _await_interruptible(
+                    loop, _do_sc, _is_cancelled,
+                )
+                if sc_cancelled or _is_cancelled():
+                    return None, None, "cancelled"
             except Exception as e:
                 code = _classify_error(e)
-                logger.warning(
-                    f"Download of {source_label} match failed ({code}): {url} — {e}"
-                )
+                if code != "cancelled":
+                    logger.warning(
+                        f"Download of {source_label} match failed ({code}): {url} — {e}"
+                    )
                 return None, None, code
             finally:
                 heartbeat.cancel()
@@ -1607,6 +1775,8 @@ class MusicDownloader:
                 except asyncio.CancelledError:
                     pass
 
+            if _is_cancelled():
+                return None, None, "cancelled"
             path = os.path.join(self.download_dir, f"{metadata.id}.mp3")
             if not os.path.exists(path):
                 logger.warning(f"{source_label} download completed but output file not found")
@@ -1628,6 +1798,8 @@ class MusicDownloader:
                     return None, "cancelled", failure_trail
                 score, _video = candidate
                 file_path, best_video, dl_err = await _download_candidate(candidate)
+                if dl_err == "cancelled" or _is_cancelled():
+                    return None, "cancelled", failure_trail
                 if file_path:
                     best_score = score
                     break
@@ -1678,7 +1850,7 @@ class MusicDownloader:
         finally:
             _ACTIVE_DOWNLOADS = max(0, _ACTIVE_DOWNLOADS - 1)
 
-    async def _hydrate_video_info(self, download_url, flat_video, loop):
+    async def _hydrate_video_info(self, download_url, flat_video, loop, cancel_check=None):
         """Replace flat-search stub with full metadata (title, uploader, thumbnail)."""
         opts = {
             "quiet": True,
@@ -1692,10 +1864,16 @@ class MusicDownloader:
         }
         self._apply_auth(opts, live_browser=False)
         try:
-            with self._with_ydl(opts) as ydl:
-                full = await loop.run_in_executor(
-                    None, lambda: ydl.extract_info(download_url, download=False)
-                )
+            def _extract_full():
+                _ensure_youtube_session_env()
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    return ydl.extract_info(download_url, download=False)
+
+            full, hydrate_cancelled = await _await_interruptible(
+                loop, _extract_full, lambda: bool(cancel_check and cancel_check()),
+            )
+            if hydrate_cancelled:
+                return flat_video
             if full:
                 # Preserve flat fields that full extract might omit oddly
                 merged = dict(flat_video or {})

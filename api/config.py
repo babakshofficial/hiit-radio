@@ -26,5 +26,6 @@ BOT_USERNAME = (
     or "HiiTRadioBot"
 )
 MAX_ACTIVE_JOBS = int(os.getenv("MAX_ACTIVE_JOBS", "3"))
+MAX_PLAYLIST_TRACKS = max(1, int(os.getenv("MAX_PLAYLIST_TRACKS", "5")))
 DATABASE_PATH = os.getenv("DATABASE_PATH", str(ROOT / "hiit_radio.db"))
 CACHE_DIR = os.getenv("CACHE_DIR", str(ROOT / "cache"))

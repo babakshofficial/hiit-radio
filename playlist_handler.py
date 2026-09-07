@@ -1,4 +1,4 @@
-"""Sequential unlimited playlist/album download handler."""
+"""Sequential playlist/album download handler (capped per collection)."""
 
 import logging
 import os
@@ -26,6 +26,7 @@ from recommendations import recommendation_keyboard
 import error_report
 
 logger = logging.getLogger(__name__)
+MAX_PLAYLIST_TRACKS = max(1, int(os.getenv("MAX_PLAYLIST_TRACKS", "5")))
 TG_CONNECT_TIMEOUT = float(os.getenv("TG_CONNECT_TIMEOUT", "30"))
 TG_READ_TIMEOUT = float(os.getenv("TG_READ_TIMEOUT", "300"))
 TG_WRITE_TIMEOUT = float(os.getenv("TG_WRITE_TIMEOUT", "300"))
@@ -85,215 +86,247 @@ async def _send_playlist_zip(message, collection_name, entries, bot):
 
 
 async def process_playlist(update, context, tracks, collection_name, orchestrator,
-                           user_manager, admin_logger, collection_url=None):
+                           user_manager, admin_logger, collection_url=None, job=None):
     """Download and send all tracks sequentially with progress."""
     user = update.effective_user
     user_id = user.id
     bot = context.bot
     message = update.effective_message
-    total = len(tracks)
-    if total == 0:
+    original = len(tracks)
+    if original == 0:
         await message.reply_text(playlist_empty())
         return
-
-    job = jobs.start(context, "playlist")
-    failed_tracks = []
-    try:
-        status = await message.reply_text(playlist_start(collection_name, total))
-        await admin_logger.log_playlist_start(bot, user, collection_name, total)
-
-        reporter = ProgressReporter(
-            status, total, collection_name or "پلی‌لیست", bot=bot, user=user,
+    if original > MAX_PLAYLIST_TRACKS:
+        logger.info(
+            "Capping playlist %s from %d to %d tracks",
+            collection_name, original, MAX_PLAYLIST_TRACKS,
         )
-        sent = 0
-        failed = 0
-        rate_limited = False
-        cancelled = False
-        stop_reason = None
-        zip_entries = []
-        user_quality = user_manager.get_audio_quality(user_id)
+        tracks = tracks[:MAX_PLAYLIST_TRACKS]
+    total = len(tracks)
 
-        for i, track in enumerate(tracks, 1):
-            if jobs.cancelled(job):
-                cancelled = True
-                stop_reason = "لغو توسط کاربر"
-                await reporter.fail(playlist_cancelled(sent, total))
-                break
+    owns_job = job is None
+    if owns_job:
+        job = jobs.start(context, "playlist")
+        jobs.spawn(
+            context,
+            job,
+            _process_playlist_body(
+                update, context, tracks, collection_name, orchestrator,
+                user_manager, admin_logger, collection_url, job,
+                user, user_id, bot, message, total, original,
+            ),
+        )
+        return
+    await _process_playlist_body(
+        update, context, tracks, collection_name, orchestrator,
+        user_manager, admin_logger, collection_url, job,
+        user, user_id, bot, message, total, original,
+    )
 
-            allowed, used, limit, tier = entitlements.check_quota(
-                user_manager.database, user_id,
+
+async def _process_playlist_body(
+    update, context, tracks, collection_name, orchestrator,
+    user_manager, admin_logger, collection_url, job,
+    user, user_id, bot, message, total, original,
+):
+    """Download and send all tracks sequentially with progress."""
+    failed_tracks = []
+    status = await message.reply_text(
+        playlist_start(collection_name, total, original=original),
+    )
+    job["status_message"] = status
+    await admin_logger.log_playlist_start(bot, user, collection_name, total)
+
+    reporter = ProgressReporter(
+        status, total, collection_name or "پلی‌لیست", bot=bot, user=user,
+    )
+    sent = 0
+    failed = 0
+    rate_limited = False
+    cancelled = False
+    stop_reason = None
+    zip_entries = []
+    user_quality = user_manager.get_audio_quality(user_id)
+
+    for i, track in enumerate(tracks, 1):
+        if jobs.cancelled(job):
+            cancelled = True
+            stop_reason = "لغو توسط کاربر"
+            await reporter.fail(playlist_cancelled(sent, total))
+            break
+
+        allowed, used, limit, tier = entitlements.check_quota(
+            user_manager.database, user_id,
+        )
+        if not allowed:
+            rate_limited = True
+            stop_reason = f"سقف روزانه ({used}/{limit})"
+            await admin_logger.log_rate_limit(bot, user, 0)
+            await reporter.fail(playlist_rate_limited(0, sent, total))
+            await message.reply_text(
+                quota_exceeded(used, limit, tier),
+                reply_markup=payments.quota_upsell_keyboard(),
             )
-            if not allowed:
-                rate_limited = True
-                stop_reason = f"سقف روزانه ({used}/{limit})"
-                await admin_logger.log_rate_limit(bot, user, 0)
-                await reporter.fail(playlist_rate_limited(0, sent, total))
-                await message.reply_text(
-                    quota_exceeded(used, limit, tier),
-                    reply_markup=payments.quota_upsell_keyboard(),
-                )
-                break
+            break
 
-            await reporter.update(i, f"{track.title} — {unknown_artist(track.artist)}")
+        await reporter.update(i, f"{track.title} — {unknown_artist(track.artist)}")
+        await admin_logger.log_playlist_track(
+            bot, user, i, total, track.title, track.artist, "در حال دانلود",
+        )
+
+        file_path, platform, cached, error_code = await orchestrator.get_or_download(
+            track, reporter, bot=bot, user=user,
+            cancel_check=lambda: jobs.cancelled(job),
+        )
+        is_file_id = bool(platform and str(platform).endswith("_cache_id"))
+        if not file_path or (not is_file_id and not os.path.exists(file_path)):
+            failed += 1
+            failed_tracks.append({
+                "title": getattr(track, "title", None),
+                "artist": getattr(track, "artist", None),
+                "error": error_code or "unknown",
+            })
             await admin_logger.log_playlist_track(
-                bot, user, i, total, track.title, track.artist, "در حال دانلود",
+                bot, user, i, total, track.title, track.artist,
+                f"ناموفق ({error_code or 'unknown'})",
             )
+            continue
 
-            file_path, platform, cached, error_code = await orchestrator.get_or_download(
-                track, reporter, bot=bot, user=user,
-                cancel_check=lambda: jobs.cancelled(job),
+        zip_path = None
+        if is_file_id:
+            src = "spotify" if track.url and "spotify.com" in track.url else (
+                "apple" if track.url and "music.apple.com" in track.url else "youtube"
             )
-            is_file_id = bool(platform and str(platform).endswith("_cache_id"))
-            if not file_path or (not is_file_id and not os.path.exists(file_path)):
-                failed += 1
-                failed_tracks.append({
-                    "title": getattr(track, "title", None),
-                    "artist": getattr(track, "artist", None),
-                    "error": error_code or "unknown",
-                })
-                await admin_logger.log_playlist_track(
-                    bot, user, i, total, track.title, track.artist,
-                    f"ناموفق ({error_code or 'unknown'})",
-                )
-                continue
+            if platform and platform.endswith("_cache_id"):
+                src = platform.replace("_cache_id", "").rsplit(":", 1)[0]
+            zip_path = orchestrator.cache.get(
+                track.title, track.artist, f"{src}:{user_quality}",
+            ) or orchestrator.cache.get(track.title, track.artist, src)
+        elif os.path.exists(file_path):
+            zip_path = file_path
+        if zip_path:
+            zip_entries.append((
+                zip_path,
+                _safe_zip_name(track.title, track.artist),
+            ))
 
-            zip_path = None
+        if jobs.cancelled(job):
+            cancelled = True
+            stop_reason = "لغو توسط کاربر"
+            await reporter.fail(playlist_cancelled(sent, total))
+            await orchestrator.cleanup(file_path)
+            break
+
+        try:
+            favorited = user_manager.is_favorite(
+                user_id, content_key(track.title, track.artist, ""),
+            )
+            kb = recommendation_keyboard(
+                track.artist,
+                track.title,
+                favorited=favorited,
+                url=getattr(track, "url", None),
+                query=getattr(track, "url", None)
+                or f"{track.title or ''} {track.artist or ''}".strip(),
+                platform=platform,
+                album=getattr(track, "album", None),
+                search_query=getattr(track, "search_query", None),
+            )
+            send_kwargs = dict(
+                title=track.title,
+                performer=track.artist,
+                reply_markup=kb,
+                connect_timeout=TG_CONNECT_TIMEOUT,
+                read_timeout=TG_READ_TIMEOUT,
+                write_timeout=TG_WRITE_TIMEOUT,
+                pool_timeout=TG_POOL_TIMEOUT,
+            )
             if is_file_id:
-                src = "spotify" if track.url and "spotify.com" in track.url else (
+                sent_msg = await message.reply_audio(
+                    audio=file_path, **send_kwargs,
+                )
+            else:
+                thumb = orchestrator.music_downloader.telegram_thumbnail_jpeg(file_path)
+                if thumb:
+                    bio_thumb = BytesIO(thumb)
+                    bio_thumb.name = "cover.jpg"
+                    send_kwargs["thumbnail"] = bio_thumb
+                with open(file_path, 'rb') as audio:
+                    sent_msg = await message.reply_audio(
+                        audio=audio, **send_kwargs,
+                    )
+            if sent_msg and sent_msg.audio:
+                source = "spotify" if track.url and "spotify.com" in track.url else (
                     "apple" if track.url and "music.apple.com" in track.url else "youtube"
                 )
+                if platform and platform.endswith("_cache"):
+                    source = platform.replace("_cache", "")
                 if platform and platform.endswith("_cache_id"):
-                    src = platform.replace("_cache_id", "").rsplit(":", 1)[0]
-                zip_path = orchestrator.cache.get(
-                    track.title, track.artist, f"{src}:{user_quality}",
-                ) or orchestrator.cache.get(track.title, track.artist, src)
-            elif os.path.exists(file_path):
-                zip_path = file_path
-            if zip_path:
-                zip_entries.append((
-                    zip_path,
-                    _safe_zip_name(track.title, track.artist),
-                ))
-
-            if jobs.cancelled(job):
-                cancelled = True
-                stop_reason = "لغو توسط کاربر"
-                await reporter.fail(playlist_cancelled(sent, total))
-                await orchestrator.cleanup(file_path)
-                break
-
-            try:
-                favorited = user_manager.is_favorite(
-                    user_id, content_key(track.title, track.artist, ""),
+                    source = platform.replace("_cache_id", "")
+                orchestrator.cache.save_telegram_file_id(
+                    track.title, track.artist, source, sent_msg.audio.file_id,
                 )
-                kb = recommendation_keyboard(
-                    track.artist,
-                    track.title,
-                    favorited=favorited,
-                    url=getattr(track, "url", None),
-                    query=getattr(track, "url", None)
-                    or f"{track.title or ''} {track.artist or ''}".strip(),
-                    platform=platform,
-                    album=getattr(track, "album", None),
-                    search_query=getattr(track, "search_query", None),
-                )
-                send_kwargs = dict(
-                    title=track.title,
-                    performer=track.artist,
-                    reply_markup=kb,
-                    connect_timeout=TG_CONNECT_TIMEOUT,
-                    read_timeout=TG_READ_TIMEOUT,
-                    write_timeout=TG_WRITE_TIMEOUT,
-                    pool_timeout=TG_POOL_TIMEOUT,
-                )
-                if is_file_id:
-                    sent_msg = await message.reply_audio(
-                        audio=file_path, **send_kwargs,
-                    )
-                else:
-                    thumb = orchestrator.music_downloader.telegram_thumbnail_jpeg(file_path)
-                    if thumb:
-                        bio_thumb = BytesIO(thumb)
-                        bio_thumb.name = "cover.jpg"
-                        send_kwargs["thumbnail"] = bio_thumb
-                    with open(file_path, 'rb') as audio:
-                        sent_msg = await message.reply_audio(
-                            audio=audio, **send_kwargs,
-                        )
-                if sent_msg and sent_msg.audio:
-                    source = "spotify" if track.url and "spotify.com" in track.url else (
-                        "apple" if track.url and "music.apple.com" in track.url else "youtube"
-                    )
-                    if platform and platform.endswith("_cache"):
-                        source = platform.replace("_cache", "")
-                    if platform and platform.endswith("_cache_id"):
-                        source = platform.replace("_cache_id", "")
-                    orchestrator.cache.save_telegram_file_id(
-                        track.title, track.artist, source, sent_msg.audio.file_id,
-                    )
-                user_manager.record_download(
-                    user_id, track.title, track.artist, platform,
-                    track.url, track.album, cached=cached,
-                )
-                await admin_logger.log_download(
-                    bot, user, track.title, track.artist, platform,
-                    cached=cached, playlist_info=f"{i}/{total} {collection_name}",
-                )
-                await admin_logger.log_playlist_track(
-                    bot, user, i, total, track.title, track.artist, "ارسال شد",
-                )
-                sent += 1
-            except Exception as e:
-                logger.error(f"Playlist send failed track {i}: {e}")
-                failed += 1
-                failed_tracks.append({
-                    "title": getattr(track, "title", None),
-                    "artist": getattr(track, "artist", None),
-                    "error": str(e)[:200],
-                })
-                await admin_logger.log_error(bot, user, "Playlist send failed", str(e))
-                await admin_logger.log_playlist_track(
-                    bot, user, i, total, track.title, track.artist, f"خطا: {e}",
-                )
-            finally:
-                await orchestrator.cleanup(file_path)
-
-        if cancelled or rate_limited:
-            await admin_logger.log_playlist_done(
-                bot, user, collection_name, sent, total, failed, reason=stop_reason,
+            user_manager.record_download(
+                user_id, track.title, track.artist, platform,
+                track.url, track.album, cached=cached,
             )
-        elif not rate_limited and not cancelled:
-            summary = playlist_summary(sent, total, failed)
-            report_kb = None
-            if failed > 0:
-                rid = error_report.create_context(
-                    user_manager.database,
-                    user,
-                    kind="playlist",
-                    code="partial_fail" if sent else "all_failed",
-                    user_message=summary,
-                    collection=collection_name,
-                    collection_url=collection_url,
-                    query=collection_url,
-                    sent=sent,
-                    total=total,
-                    failed=failed,
-                    failed_tracks=failed_tracks[:20],
-                )
-                report_kb = error_report.build_keyboard(
-                    rid,
-                    include_retry=error_report.kind_supports_retry(
-                        "playlist",
-                        {"retry": {"collection_url": collection_url, "query": collection_url}},
-                    ),
-                )
-            await reporter.done(summary, reply_markup=report_kb)
-            await admin_logger.log_playlist_done(
-                bot, user, collection_name, sent, total, failed,
+            await admin_logger.log_download(
+                bot, user, track.title, track.artist, platform,
+                cached=cached, playlist_info=f"{i}/{total} {collection_name}",
             )
-            if sent >= 2:
-                await _send_playlist_zip(
-                    message, collection_name, zip_entries, bot,
-                )
-    finally:
-        jobs.end(context, job)
+            await admin_logger.log_playlist_track(
+                bot, user, i, total, track.title, track.artist, "ارسال شد",
+            )
+            sent += 1
+        except Exception as e:
+            logger.error(f"Playlist send failed track {i}: {e}")
+            failed += 1
+            failed_tracks.append({
+                "title": getattr(track, "title", None),
+                "artist": getattr(track, "artist", None),
+                "error": str(e)[:200],
+            })
+            await admin_logger.log_error(bot, user, "Playlist send failed", str(e))
+            await admin_logger.log_playlist_track(
+                bot, user, i, total, track.title, track.artist, f"خطا: {e}",
+            )
+        finally:
+            await orchestrator.cleanup(file_path)
+
+    if cancelled or rate_limited:
+        await admin_logger.log_playlist_done(
+            bot, user, collection_name, sent, total, failed, reason=stop_reason,
+        )
+    elif not rate_limited and not cancelled:
+        summary = playlist_summary(sent, total, failed)
+        report_kb = None
+        if failed > 0:
+            rid = error_report.create_context(
+                user_manager.database,
+                user,
+                kind="playlist",
+                code="partial_fail" if sent else "all_failed",
+                user_message=summary,
+                collection=collection_name,
+                collection_url=collection_url,
+                query=collection_url,
+                sent=sent,
+                total=total,
+                failed=failed,
+                failed_tracks=failed_tracks[:20],
+            )
+            report_kb = error_report.build_keyboard(
+                rid,
+                include_retry=error_report.kind_supports_retry(
+                    "playlist",
+                    {"retry": {"collection_url": collection_url, "query": collection_url}},
+                ),
+            )
+        await reporter.done(summary, reply_markup=report_kb)
+        await admin_logger.log_playlist_done(
+            bot, user, collection_name, sent, total, failed,
+        )
+        if sent >= 2:
+            await _send_playlist_zip(
+                message, collection_name, zip_entries, bot,
+            )

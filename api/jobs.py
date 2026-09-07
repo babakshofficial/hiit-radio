@@ -256,6 +256,9 @@ class JobManager:
                 await self._run_download(job_id)
                 return
 
+            if len(tracks) > config.MAX_PLAYLIST_TRACKS:
+                tracks = tracks[:config.MAX_PLAYLIST_TRACKS]
+
             job.title = name or "Playlist"
             job.tracks_total = len(tracks)
             results = []

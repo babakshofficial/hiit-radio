@@ -162,6 +162,7 @@ class DownloadOrchestrator:
             progress_reporter=progress_reporter,
             cancel_check=cancel_check,
             quality=quality,
+            user_id=getattr(user, "id", None),
         )
         metadata.last_failure_trail = failure_trail or []
         platform = source if file_path else source

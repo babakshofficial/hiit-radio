@@ -35,7 +35,8 @@ STRINGS = {
         "3. Utilise les boutons ci-dessous pour chercher, les artistes, la qualité, etc.\n"
         "4. Ou en inline : {bot_inline} nom du titre — dans n'importe quel chat\n\n"
         "Limite quotidienne gratuite : 10 téléchargements "
-        "(premium : {premium_daily_limit})."
+        "(premium : {premium_daily_limit}).\n"
+        "Envoie /stop à tout moment pour arrêter un téléchargement."
     ),
     "aboutme_text": (
         "🎙 À propos de HiiT Radio\n"
@@ -87,7 +88,7 @@ STRINGS = {
     "cancel_no_job": "Aucune tâche active de ta part en ce moment.",
     "too_many_jobs": (
         "Tu ne peux pas lancer plus de {limit} tâches en même temps.\n"
-        "Attends qu'elles se terminent ou arrête-les avec /cancel."
+        "Attends qu'elles se terminent ou arrête-les avec /stop."
     ),
     "download_cancelled": "Arrêté.",
     "work_cancelled": "Tâche annulée.",
@@ -242,7 +243,10 @@ STRINGS = {
     "playlist_start": (
         "📋 Début du téléchargement : {name}\n"
         "Nombre : {total} titres\n\n"
-        "/cancel pour arrêter la tâche en cours"
+        "/stop pour arrêter la tâche en cours"
+    ),
+    "playlist_capped": (
+        "Cette playlist contient {original} titres. J'enverrai seulement les {limit} premiers."
     ),
     "playlist_cancelled": "Arrêté. Envoyés : {sent}/{total}",
     "playlist_rate_limited": (

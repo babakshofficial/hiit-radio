@@ -521,9 +521,12 @@ def playlist_empty():
     return t("playlist_empty")
 
 
-def playlist_start(collection_name, total):
+def playlist_start(collection_name, total, original=None):
     name = collection_name or t("playlist_default_name")
-    return t("playlist_start", name=name, total=total)
+    text = t("playlist_start", name=name, total=total)
+    if original and original > total:
+        text = f"{text}\n{t('playlist_capped', original=original, limit=total)}"
+    return text
 
 
 def playlist_cancelled(sent, total):

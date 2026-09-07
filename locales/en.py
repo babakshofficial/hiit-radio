@@ -34,7 +34,8 @@ STRINGS = {
         "2. Or type a song and artist name\n"
         "3. Use the buttons below for search, artists, quality, and more\n"
         "4. Or inline: {bot_inline} song name — in any chat\n\n"
-        "Free daily limit: 10 downloads (premium: {premium_daily_limit})."
+        "Free daily limit: 10 downloads (premium: {premium_daily_limit}).\n"
+        "Send /stop anytime to halt a download in progress."
     ),
     "aboutme_text": (
         "🎙 About HiiT Radio\n"
@@ -77,7 +78,7 @@ STRINGS = {
     "cancel_no_job": "You don't have any active job running right now.",
     "too_many_jobs": (
         "You can't run more than {limit} jobs at the same time.\n"
-        "Wait for them to finish or stop one with /cancel."
+        "Wait for them to finish or stop one with /stop."
     ),
     "download_cancelled": "Stopped.",
     "work_cancelled": "Job cancelled.",
@@ -216,7 +217,10 @@ STRINGS = {
     "playlist_start": (
         "📋 Starting download: {name}\n"
         "Tracks: {total}\n\n"
-        "/cancel to stop the current job"
+        "/stop to cancel the current job"
+    ),
+    "playlist_capped": (
+        "This playlist has {original} tracks. I'll send the first {limit}."
     ),
     "playlist_cancelled": "Stopped. Sent: {sent}/{total}",
     "playlist_rate_limited": "Rate limited ({minutes} minutes). Sent: {sent}/{total}",
