@@ -25,6 +25,7 @@ from telegram import (
 )
 from telegram.ext import (
     ApplicationBuilder,
+    ApplicationHandlerStop,
     CommandHandler,
     MessageHandler,
     CallbackQueryHandler,
@@ -1283,29 +1284,38 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id if update.effective_user else jobs.user_id_of(context)
+    # Kill workers before any Telegram round-trip so abort is not delayed by VIP/logging.
+    if uid is not None:
+        jobs.request_abort(uid)
+    message = update.effective_message
     cleared_await = clear_await_input(context)
     cancelled = jobs.cancel_all(context, user_id=uid)
+    if message is None:
+        raise ApplicationHandlerStop
     if not cancelled:
         if cleared_await:
-            await update.message.reply_text(
+            await message.reply_text(
                 msg.t("prompt_cancelled"), reply_markup=_back_button(),
             )
         else:
-            await update.message.reply_text(
+            await message.reply_text(
                 msg.cancel_no_job(), reply_markup=_back_button(),
             )
-        return
+        raise ApplicationHandlerStop
     kinds = ", ".join(sorted({j.get("kind") or "work" for j in cancelled}))
-    await update.message.reply_text(
+    await message.reply_text(
         msg.cancel_ok(len(cancelled)), reply_markup=_back_button(),
     )
-    await log_system(
-        context.bot,
-        "لغو کار کاربر",
-        user=update.effective_user,
-        kind=kinds,
-        count=len(cancelled),
+    asyncio.create_task(
+        log_system(
+            context.bot,
+            "لغو کار کاربر",
+            user=update.effective_user,
+            kind=kinds,
+            count=len(cancelled),
+        )
     )
+    raise ApplicationHandlerStop
 
 
 def _source_label(metadata):
@@ -3956,6 +3966,7 @@ def main():
     application = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
+        .concurrent_updates(True)
         .connect_timeout(TG_CONNECT_TIMEOUT)
         .read_timeout(TG_READ_TIMEOUT)
         .write_timeout(TG_WRITE_TIMEOUT)
@@ -3966,8 +3977,12 @@ def main():
     )
     application = application.build()
 
-    application.add_handler(TypeHandler(Update, apply_user_lang), group=-2)
-    application.add_handler(CommandHandler(["cancel", "stop"], cancel_command), group=-2)
+    # PTB runs at most one handler per group. Catch-all TypeHandlers must not share
+    # a group with /stop, or cancel_command never runs.
+    application.add_handler(TypeHandler(Update, apply_user_lang), group=-6)
+    application.add_handler(
+        CommandHandler(["cancel", "stop"], cancel_command), group=-5,
+    )
     application.add_handler(TypeHandler(Update, clear_await_on_slash), group=-2)
     application.add_handler(TypeHandler(Update, vip_update_logger), group=-1)
 
@@ -4031,7 +4046,7 @@ def main():
     application.add_handler(CallbackQueryHandler(lang_callback, pattern=r"^lang:"))
     application.add_handler(CallbackQueryHandler(support_callback, pattern=r"^sup:"))
     application.add_handler(CallbackQueryHandler(report_callback, pattern=r"^rpt:"))
-    application.add_handler(CallbackQueryHandler(callback_handler))
+    application.add_handler(CallbackQueryHandler(callback_handler, block=False))
     application.add_handler(InlineQueryHandler(inline_search))
     payments.register_handlers(application)
     if ADMIN_ID:
@@ -4062,7 +4077,9 @@ def main():
                 admin_wizard_nontext_handler,
             ),
         )
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message, block=False),
+    )
 
     application.run_polling()
 

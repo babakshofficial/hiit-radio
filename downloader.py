@@ -1559,7 +1559,12 @@ class MusicDownloader:
 
         # Without usable cookies YouTube downloads hit the bot check anyway, so
         # try SoundCloud first instead of burning every search strategy on it.
-        yt_usable = self.youtube_auth_ok()
+        yt_usable, auth_cancelled = await _await_interruptible(
+            loop, self.youtube_auth_ok, _is_cancelled,
+        )
+        if auth_cancelled or _is_cancelled():
+            return None, "cancelled", failure_trail
+        yt_usable = bool(yt_usable)
         source_order = ("YouTube", "SoundCloud") if yt_usable else ("SoundCloud", "YouTube")
         if not yt_usable:
             logger.warning(
@@ -1615,7 +1620,6 @@ class MusicDownloader:
         # Probe URL can bot-check while real track downloads still work — never drop
         # YouTube candidates solely on probe failure. Prefer SoundCloud first when the
         # cached probe is bad; keep YouTube as fallback (e.g. SoundCloud DRM).
-        yt_usable = self.youtube_auth_ok()
         if yt_usable:
             download_queue = yt_items[:3] + other_items[:3]
         else:
