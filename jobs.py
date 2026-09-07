@@ -183,7 +183,13 @@ def start(context, kind, user_id=None):
         "cancel": False,
         "started": time.time(),
         "user_id": uid,
+        "lang": None,
     }
+    try:
+        import messages as _msg
+        job["lang"] = _msg.get_lang()
+    except Exception:
+        pass
     active(context)[job["id"]] = job
     if uid is not None:
         with _guard:
@@ -205,6 +211,13 @@ def spawn(context, job, coro):
 
     async def _runner():
         uid = job.get("user_id") if job else None
+        lang_token = None
+        try:
+            import messages as msg
+            if job and job.get("lang"):
+                lang_token = msg.use_lang(job["lang"])
+        except Exception:
+            lang_token = None
         try:
             await coro
         except asyncio.CancelledError:
@@ -225,6 +238,12 @@ def spawn(context, job, coro):
         except Exception:
             logger.exception("Job %s crashed", (job or {}).get("kind") or "work")
         finally:
+            if lang_token is not None:
+                try:
+                    import messages as msg
+                    msg.reset_lang(lang_token)
+                except Exception:
+                    pass
             if uid is not None:
                 unregister_task(uid, asyncio.current_task())
             end(context, job)

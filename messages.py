@@ -584,6 +584,13 @@ def progress_fail(label, reason=""):
     return t("progress_fail", label=label)
 
 
+def progress_detail(title, artist, phase_key, **kwargs):
+    """Title/artist line plus a localized download-phase message."""
+    name = (title or "").strip() or t("unknown")
+    who = (artist or "").strip() or t("unknown")
+    return f"{name} — {who}\n{t(phase_key, **kwargs)}"
+
+
 def error_report_button():
     return t("error_report_button")
 

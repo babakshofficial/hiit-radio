@@ -8,6 +8,7 @@ import shutil
 from cache_manager import CacheManager, content_key
 from downloader import DEFAULT_QUALITY, QUALITIES
 from lyrics_service import fetch_lyrics_fast
+import messages as msg
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,9 @@ class DownloadOrchestrator:
                 ):
                     await progress_reporter.update(
                         98,
-                        f"{metadata.title} — {metadata.artist}\nارسال سریع از کش...",
+                        msg.progress_detail(
+                            metadata.title, metadata.artist, "progress_cache_fast",
+                        ),
                         force=True,
                     )
                 self.db.log_event("cache_hit", payload={
@@ -132,7 +135,9 @@ class DownloadOrchestrator:
                 ):
                     await progress_reporter.update(
                         95,
-                        f"{metadata.title} — {metadata.artist}\nآماده ارسال به تلگرام...",
+                        msg.progress_detail(
+                            metadata.title, metadata.artist, "progress_ready_send",
+                        ),
                         force=True,
                     )
                 self.db.log_event("cache_hit", payload={
@@ -154,7 +159,9 @@ class DownloadOrchestrator:
         ):
             await progress_reporter.update(
                 15,
-                f"{metadata.title} — {metadata.artist}\nدر حال جستجو و دانلود...",
+                msg.progress_detail(
+                    metadata.title, metadata.artist, "progress_search_download",
+                ),
                 force=True,
             )
         file_path, error_code, failure_trail = await self.music_downloader.download_song(
@@ -205,7 +212,9 @@ class DownloadOrchestrator:
         ):
             await progress_reporter.update(
                 88,
-                f"{metadata.title} — {metadata.artist}\nدر حال آماده‌سازی...",
+                msg.progress_detail(
+                    metadata.title, metadata.artist, "progress_preparing",
+                ),
                 force=True,
             )
 
@@ -218,7 +227,9 @@ class DownloadOrchestrator:
         ):
             await progress_reporter.update(
                 93,
-                f"{metadata.title} — {metadata.artist}\nآماده ارسال به تلگرام...",
+                msg.progress_detail(
+                    metadata.title, metadata.artist, "progress_ready_send",
+                ),
                 force=True,
             )
 

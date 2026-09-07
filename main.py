@@ -1093,7 +1093,7 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reporter = ProgressReporter(
         status,
         100,
-        "پیشنهاد",
+        msg.t("progress_label_discover"),
         bot=context.bot,
         user=update.effective_user,
         progress_mode="percent",
@@ -1217,7 +1217,7 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["discover_cache"] = {
                 str(i): s for i, s in enumerate(suggestions[:10], 1)
             }
-            await reporter.update(100, "آماده شد", force=True)
+            await reporter.update(100, msg.t("progress_ready"), force=True)
             await status.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
         except Exception as e:
             logger.error(f"Discover failed: {e}", exc_info=True)
@@ -2153,7 +2153,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reporter = ProgressReporter(
             status,
             100,
-            "مشابه",
+            msg.t("progress_label_similar"),
             bot=context.bot,
             user=update.effective_user,
             progress_mode="percent",
@@ -2195,7 +2195,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                     ])
                 _append_back(buttons)
-                await reporter.update(100, "آماده شد", force=True)
+                await reporter.update(100, msg.t("progress_ready"), force=True)
                 await status.edit_text(
                     "\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons)
                 )
@@ -2228,7 +2228,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reporter = ProgressReporter(
             status,
             100,
-            "متن آهنگ",
+            msg.t("progress_label_lyrics"),
             bot=context.bot,
             user=update.effective_user,
             progress_mode="percent",
@@ -2247,7 +2247,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         lambda: _cancel_check(job),
                         25,
                         85,
-                        "در حال دریافت متن آهنگ...",
+                        msg.t("progress_fetching_lyrics"),
                     )
                     if cancelled:
                         await reporter.fail(msg.work_cancelled())
@@ -2717,12 +2717,13 @@ async def _download_and_send(message, user, metadata, context):
 
 async def _download_and_send_job(message, user, metadata, context, job):
     user_id = user.id
+    resolve_lang(user)
     status = await message.reply_text(msg.downloading())
     job["status_message"] = status
     reporter = ProgressReporter(
         status,
         100,
-        "آهنگ",
+        msg.t("progress_label_track"),
         bot=context.bot,
         user=user,
         progress_mode="percent",
@@ -2791,7 +2792,7 @@ async def _download_and_send_job(message, user, metadata, context, job):
             user_id, metadata.title, metadata.artist,
             metadata=metadata, platform=platform,
         )
-        await reporter.update(95, "در حال ارسال به تلگرام...", force=True)
+        await reporter.update(95, msg.t("progress_sending"), force=True)
         sent = await _send_track_audio(
             message, metadata, file_path, platform, reply_markup=kb,
         )
@@ -2896,6 +2897,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _handle_track_job(update, context, text, user, job):
     user_id = user.id
+    resolve_lang(user)
     status_message = await update.message.reply_text(msg.searching())
     job["status_message"] = status_message
     metadata = await TrackMetadata.create(text, _ydl_opts_factory)
@@ -2914,7 +2916,7 @@ async def _handle_track_job(update, context, text, user, job):
     reporter = ProgressReporter(
         status_message,
         100,
-        "آهنگ",
+        msg.t("progress_label_track"),
         bot=context.bot,
         user=user,
         progress_mode="percent",
@@ -2945,7 +2947,7 @@ async def _handle_track_job(update, context, text, user, job):
                     user_id, metadata.title, metadata.artist,
                     metadata=metadata, platform=platform,
                 )
-                await reporter.update(95, "در حال ارسال به تلگرام...", force=True)
+                await reporter.update(95, msg.t("progress_sending"), force=True)
                 sent = await _send_track_audio(
                     update.message, metadata, file_path, platform, reply_markup=kb,
                 )
@@ -3602,7 +3604,7 @@ async def retry_error_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         status = await message.reply_text(msg.similar_preparing())
         job["status_message"] = status
         reporter = ProgressReporter(
-            status, 100, "مشابه", bot=context.bot, user=user, progress_mode="percent",
+            status, 100, msg.t("progress_label_similar"), bot=context.bot, user=user, progress_mode="percent",
         )
         async def _run_retry_similar():
             try:
@@ -3664,7 +3666,7 @@ async def retry_error_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         status = await message.reply_text(msg.searching())
         job["status_message"] = status
         reporter = ProgressReporter(
-            status, 100, "متن آهنگ", bot=context.bot, user=user, progress_mode="percent",
+            status, 100, msg.t("progress_label_lyrics"), bot=context.bot, user=user, progress_mode="percent",
         )
         async def _run_retry_lyrics():
             try:
@@ -3675,7 +3677,7 @@ async def retry_error_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                         fetch_lyrics(title, artist),
                         reporter,
                         lambda: _cancel_check(job),
-                        25, 85, "در حال دریافت متن آهنگ...",
+                        25, 85, msg.t("progress_fetching_lyrics"),
                     )
                     if cancelled:
                         await reporter.fail(msg.work_cancelled())

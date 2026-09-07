@@ -3,7 +3,7 @@
 import logging
 import time
 
-from messages import progress_done, progress_fail, progress_update
+from messages import progress_done, progress_fail, progress_update, t
 
 logger = logging.getLogger(__name__)
 
@@ -13,14 +13,14 @@ class ProgressReporter:
         self,
         status_message,
         total=1,
-        label="در حال دانلود",
+        label=None,
         bot=None,
         user=None,
         progress_mode="tracks",
     ):
         self.status_message = status_message
         self.total = max(total, 1)
-        self.label = label
+        self.label = label or t("progress_label_download")
         self.bot = bot
         self.user = user
         self._last_edit = 0.0

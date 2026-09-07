@@ -17,6 +17,7 @@ import io
 
 from metadata import score_query_coverage
 import jobs
+import messages as msg
 
 logger = logging.getLogger(__name__)
 
@@ -1343,7 +1344,7 @@ class MusicDownloader:
                 return None, "cancelled", direct_trail
             await _report(
                 25,
-                f"{metadata.title} — {metadata.artist}\nدر حال دانلود...",
+                msg.progress_detail(metadata.title, metadata.artist, "progress_downloading"),
             )
             direct_pct = {"value": 0.0}
 
@@ -1407,7 +1408,7 @@ class MusicDownloader:
                 return None, "invalid_file", direct_trail
 
             await _report(
-                82, f"{metadata.title} — {metadata.artist}\nبرچسب‌گذاری و کاور...",
+                82, msg.progress_detail(metadata.title, metadata.artist, "progress_tagging"),
             )
             self._apply_metadata(file_path, metadata)
             return file_path, None, direct_trail
@@ -1434,8 +1435,10 @@ class MusicDownloader:
                 pct = pct_start + int((pct_end - pct_start) * (strategy_idx / n))
                 await _report(
                     pct,
-                    f"{metadata.title} — {metadata.artist}\n"
-                    f"در حال جستجو ({strategy_idx + 1}/{n})...",
+                    msg.progress_detail(
+                        metadata.title, metadata.artist, "progress_searching_n",
+                        current=strategy_idx + 1, total=n,
+                    ),
                 )
                 try:
                     logger.info(
@@ -1535,8 +1538,8 @@ class MusicDownloader:
             return None, "cancelled", failure_trail
 
         _SOURCES = {
-            "YouTube": ("ytsearch", yt_search_strategies, "در حال جستجو..."),
-            "SoundCloud": ("scsearch", sc_search_strategies, "در حال جستجو..."),
+            "YouTube": ("ytsearch", yt_search_strategies, msg.t("progress_searching")),
+            "SoundCloud": ("scsearch", sc_search_strategies, msg.t("progress_searching")),
         }
         found_by_source = {}
         saw_bot_check = False
@@ -1548,7 +1551,8 @@ class MusicDownloader:
                 return found_by_source[label], False
             prefix, strategies, note = _SOURCES[label]
             await _report(
-                max(pct_start - 2, 0), f"{metadata.title} — {metadata.artist}\n{note}"
+                max(pct_start - 2, 0),
+                f"{metadata.title} — {metadata.artist}\n{note}",
             )
             ranked, blocked, cancelled = await gather_best(
                 prefix, label, strategies, pct_start, pct_end
@@ -1670,12 +1674,16 @@ class MusicDownloader:
                 and _video_thumbnail_url(video)
             )
             if need_hydrate:
-                await _report(50, f"{metadata.title} — {metadata.artist}\nآماده‌سازی لینک دانلود...")
+                await _report(50, msg.progress_detail(
+                    metadata.title, metadata.artist, "progress_preparing_link",
+                ))
                 video = await self._hydrate_video_info(
                     url, video, loop, cancel_check=_is_cancelled,
                 )
             else:
-                await _report(50, f"{metadata.title} — {metadata.artist}\nشروع دانلود...")
+                await _report(50, msg.progress_detail(
+                    metadata.title, metadata.artist, "progress_starting_download",
+                ))
 
             if progress_reporter and getattr(progress_reporter, "progress_mode", "") == "percent":
                 progress_reporter.reset_phase(52)
@@ -1688,9 +1696,8 @@ class MusicDownloader:
 
             async def _heartbeat():
                 base = 52
-                detail = (
-                    f"{metadata.title} — {metadata.artist}\n"
-                    "در حال دانلود فایل صوتی..."
+                detail = msg.progress_detail(
+                    metadata.title, metadata.artist, "progress_downloading_audio",
                 )
                 while True:
                     if source_label == "YouTube":
@@ -1847,7 +1854,9 @@ class MusicDownloader:
                 return None, "invalid_file", failure_trail
 
             logger.info(f"Download successful (match {best_score:.1f}%)")
-            await _report(82, f"{metadata.title} — {metadata.artist}\nبرچسب‌گذاری و کاور...")
+            await _report(82, msg.progress_detail(
+                metadata.title, metadata.artist, "progress_tagging",
+            ))
             self._enrich_metadata_from_source(metadata, best_video)
             self._apply_metadata(file_path, metadata)
             return file_path, None, failure_trail

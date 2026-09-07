@@ -20,6 +20,7 @@ from messages import (
     playlist_zip_sending,
     quota_exceeded,
     unknown_artist,
+    t,
 )
 from progress import ProgressReporter
 from recommendations import recommendation_keyboard
@@ -138,7 +139,7 @@ async def _process_playlist_body(
     await admin_logger.log_playlist_start(bot, user, collection_name, total)
 
     reporter = ProgressReporter(
-        status, total, collection_name or "پلی‌لیست", bot=bot, user=user,
+        status, total, collection_name or t("playlist_default_name"), bot=bot, user=user,
     )
     sent = 0
     failed = 0
