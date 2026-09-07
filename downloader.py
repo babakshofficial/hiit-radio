@@ -1719,14 +1719,20 @@ class MusicDownloader:
             return False
 
     def file_has_watermark(self, file_path):
-        """True when APIC was embedded with the HiiT logo processor."""
+        """True when APIC uses the default shrink + bottom-right logo layout."""
         try:
             audio = MutagenMP3(file_path, ID3=ID3)
             if not audio.tags or not audio.tags.getall("APIC"):
                 return False
             for frame in audio.tags.getall("TXXX"):
                 if getattr(frame, "desc", "") == "HIIT_WATERMARK_STYLE":
-                    return True
+                    style = ""
+                    try:
+                        if getattr(frame, "text", None):
+                            style = str(frame.text[0]).lower()
+                    except Exception:
+                        style = str(frame).lower()
+                    return style in ("itunes", "youtube", "default")
             return False
         except Exception:
             return False
@@ -1795,7 +1801,7 @@ class MusicDownloader:
         except Exception as e:
             logger.debug(f"sync_metadata_from_file skipped: {e}")
 
-    def rewatermark_from_file(self, file_path, default_style="youtube"):
+    def rewatermark_from_file(self, file_path, default_style="itunes"):
         """Re-embed APIC with a freshly-drawn logo stroke.
 
         IMPORTANT: we only repaint the logo region on the already-processed
@@ -1837,7 +1843,7 @@ class MusicDownloader:
                 img = img.convert("RGBA")
 
             w, h = img.size
-            # Match the exact logo sizing used in the artwork processors.
+            # Match logo sizing from _process_itunes_query_artwork (30% of canvas).
             if style in {"spotify", "apple"}:
                 logo_w = int(w * 0.25)
             else:
@@ -2006,24 +2012,6 @@ class MusicDownloader:
             headers["Referer"] = "https://open.spotify.com/"
         return headers
 
-    @staticmethod
-    def _style_for_art_url(metadata, art_url):
-        u = (art_url or "").lower()
-        page = (getattr(metadata, "url", None) or "").lower()
-        if "ytimg.com" in u or "ggpht.com" in u:
-            return "youtube"
-        if "spotify.com" in page or "scdn.co" in u:
-            return "spotify"
-        if "music.apple.com" in page:
-            return "apple"
-        if "deezer.com" in page or "dzcdn.net" in u:
-            return "apple"
-        if "mzstatic.com" in u:
-            return "itunes"
-        if getattr(metadata, "_artwork_from_youtube", False):
-            return "youtube"
-        return "itunes"
-
     def _itunes_artwork_url(self, title, artist):
         query = f"{title or ''} {artist or ''}".strip()
         if len(query) < 3:
@@ -2073,11 +2061,8 @@ class MusicDownloader:
                         art_url[:80],
                     )
                     continue
-                style = self._style_for_art_url(metadata, art_url)
-                if style in ("spotify", "apple"):
-                    processed = self._process_apple_music_artwork(response.content)
-                else:
-                    processed = self._process_itunes_query_artwork(response.content)
+                style = "itunes"
+                processed = self._process_itunes_query_artwork(response.content)
                 if not processed:
                     logger.warning("Artwork processing returned None")
                     continue
