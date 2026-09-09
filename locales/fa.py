@@ -481,6 +481,29 @@ STRINGS = {
     "awiz_export_ask": "خروجی کامل پایگاه داده به‌صورت JSON گرفته شود؟",
     "awiz_export_go": "📤 خروجی بگیر",
 
+    # --- changelog broadcast ---
+    "changelog_header": "✨ تازه‌های HiiT Radio",
+    "changelog_admin_prompt": (
+        "بعد از ری‌استارت، یادداشت‌های تغییر در صف پیدا شد.\n"
+        "پیام «تازه‌ها» را به زبان هر کاربر برای همه بفرستم؟"
+    ),
+    "changelog_admin_preview": "پیش‌نمایش یادداشت‌ها:\n{preview}",
+    "changelog_btn_send": "✅ ارسال تغییر‌لاگ",
+    "changelog_btn_skip": "⏭ رد کردن",
+    "changelog_generating": "⏳ در حال ساخت تغییر‌لاگ چندزبانه…",
+    "changelog_done": "ارسال تغییر‌لاگ تمام شد: ارسال‌شده={sent}، ناموفق={failed}",
+    "changelog_skipped": "تغییر‌لاگ رد شد. یادداشت‌ها بایگانی شدند.",
+    "changelog_empty": "یادداشت تغییری در صف نیست.",
+    "changelog_llm_unavailable": (
+        "یادداشت تغییر در صف هست، ولی LLM تنظیم نشده.\n"
+        "LLM_API_KEY / LLM_API_BASE را بگذار و دوباره ری‌استارت کن — یا رد کن تا بایگانی شود."
+    ),
+    "changelog_llm_failed": (
+        "ساخت تغییر‌لاگ با LLM ممکن نشد. یادداشت‌ها سر جایشان ماندند."
+    ),
+    "changelog_busy": "همین الان یک ارسال تغییر‌لاگ در حال اجراست.",
+    "changelog_forbidden": "فقط ادمین می‌تواند از این استفاده کند.",
+
     # --- language selection ---
     "lang_choose": "🌐 زبان ربات را انتخاب کن:",
     "lang_set": "✅ زبان روی {lang_name} تنظیم شد.",

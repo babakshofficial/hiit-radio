@@ -509,6 +509,29 @@ STRINGS = {
     "awiz_export_ask": "Экспортировать всю базу в JSON?",
     "awiz_export_go": "📤 Экспортировать",
 
+    # --- changelog broadcast ---
+    "changelog_header": "✨ Что нового в HiiT Radio",
+    "changelog_admin_prompt": (
+        "После перезапуска найдены заметки для changelog.\n"
+        "Разослать локализованное «Что нового» всем пользователям?"
+    ),
+    "changelog_admin_preview": "Превью заметок:\n{preview}",
+    "changelog_btn_send": "✅ Отправить changelog",
+    "changelog_btn_skip": "⏭ Пропустить",
+    "changelog_generating": "⏳ Готовлю локализованные changelog…",
+    "changelog_done": "Рассылка changelog завершена: отправлено={sent}, ошибок={failed}",
+    "changelog_skipped": "Changelog пропущен. Заметки архивированы.",
+    "changelog_empty": "Нет ожидающих заметок changelog.",
+    "changelog_llm_unavailable": (
+        "Есть заметки changelog, но LLM не настроен.\n"
+        "Задай LLM_API_KEY / LLM_API_BASE и перезапусти — или пропусти, чтобы архивировать."
+    ),
+    "changelog_llm_failed": (
+        "Не удалось сгенерировать changelog через LLM. Заметки остались на месте."
+    ),
+    "changelog_busy": "Рассылка changelog уже идёт.",
+    "changelog_forbidden": "Только для админа.",
+
     # --- language selection ---
     "lang_choose": "🌐 Выбери язык бота:",
     "lang_set": "✅ Язык установлен: {lang_name}.",

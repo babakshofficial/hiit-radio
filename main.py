@@ -87,6 +87,7 @@ import reporting as rpt
 import error_report
 import support_chat
 import admin_wizard
+import changelog
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
@@ -1771,6 +1772,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await admin_wizard.on_callback(update, context)
         return
 
+    if data.startswith("changelog:"):
+        await changelog.handle_callback(update, context)
+        return
+
     if data.startswith("admin:"):
         await _handle_admin_callback(update, context)
         return
@@ -3233,12 +3238,13 @@ async def _on_startup(application):
         application.job_queue.run_repeating(_cache_sweep_job, interval=3600, first=60)
         application.job_queue.run_repeating(_cookie_health_job, interval=3600, first=120)
         application.job_queue.run_repeating(_release_check_job, interval=6 * 3600, first=300)
-        return
-    logger.warning(
-        "JobQueue unavailable; using asyncio fallback for cache sweep. "
-        'Install with: pip install "python-telegram-bot[job-queue]"'
-    )
-    asyncio.create_task(_cache_sweep_fallback_loop(application.bot))
+    else:
+        logger.warning(
+            "JobQueue unavailable; using asyncio fallback for cache sweep. "
+            'Install with: pip install "python-telegram-bot[job-queue]"'
+        )
+        asyncio.create_task(_cache_sweep_fallback_loop(application.bot))
+    asyncio.create_task(changelog.prompt_admin(application.bot))
 
 
 async def _send_report(message, text, reply_markup=None, edit=False):
@@ -3997,6 +4003,14 @@ def main():
         send_test_message=send_test_message,
         vip_status_text=vip_status_text,
         log_broadcast=log_broadcast,
+    )
+    changelog.init(
+        user_manager=user_manager,
+        log_broadcast=log_broadcast,
+        resolve_admin_lang=lambda uid: (
+            msg.normalize_lang(user_manager.get_language(uid)) or msg.DEFAULT_LANG
+        ),
+        admin_id=ADMIN_ID,
     )
 
     application.add_handler(CommandHandler("start", start))

@@ -403,3 +403,100 @@ async def recommend_similar(title, artist, limit=8):
     usage["success"] = True
     usage["recommendations_count"] = len(result)
     return result, usage
+
+
+_LANG_NAMES = {
+    "fa": "Persian (Farsi)",
+    "en": "English",
+    "fr": "French",
+    "es": "Spanish",
+    "ru": "Russian",
+    "it": "Italian",
+}
+
+
+async def _chat_text(system_prompt, user_prompt, *, temperature=0.5):
+    """Low-level chat completion; returns assistant text or None."""
+    if not is_configured():
+        return None
+    model = os.getenv("LLM_MODEL", "gpt-4o-mini").strip()
+    api_base = _api_base()
+    api_key = _api_key()
+    url = _completions_url(api_base)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    if "openrouter.ai" in url:
+        referer = os.getenv("LLM_HTTP_REFERER", "https://t.me/hiit_radio_bot").strip()
+        title = os.getenv("LLM_APP_TITLE", "HiiT Radio Bot").strip()
+        if referer:
+            headers["HTTP-Referer"] = referer
+        if title:
+            headers["X-Title"] = title
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": temperature,
+    }
+    if _truthy_env("LLM_REASONING") or ":free" in model or model.startswith("tencent/"):
+        payload["reasoning"] = {"enabled": True}
+    timeout_sec = int(os.getenv("LLM_TIMEOUT", "90") or 90)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url, headers=headers, json=payload,
+                timeout=aiohttp.ClientTimeout(total=timeout_sec),
+            ) as resp:
+                body = await resp.text()
+                if resp.status != 200:
+                    logger.error(
+                        "LLM API %s model=%r url=%s: %s",
+                        resp.status, model, url, body[:500],
+                    )
+                    return None
+                data = json.loads(body)
+    except Exception as e:
+        logger.error("LLM request failed (%s): %s", url, e, exc_info=True)
+        return None
+    try:
+        content = _message_text(data["choices"][0]["message"])
+    except (KeyError, IndexError, TypeError):
+        logger.error("LLM response missing choices/message")
+        return None
+    text = (content or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:\w+)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    return text or None
+
+
+async def generate_changelog(notes, lang):
+    """Turn developer notes into a short user-facing changelog in ``lang``.
+
+    Returns plain text or ``None`` on failure.
+    """
+    notes = (notes or "").strip()
+    if not notes:
+        return None
+    lang = (lang or "en").strip().lower() or "en"
+    lang_name = _LANG_NAMES.get(lang, lang)
+    system_prompt = (
+        "You write short product update messages for a Telegram music download bot "
+        "called HiiT Radio. "
+        "Turn raw developer notes into a friendly user-facing “What’s new” blurb. "
+        f"Write entirely in {lang_name}. "
+        "Use a few short bullet lines or short paragraphs. "
+        "Do not use markdown code fences. "
+        "Do not invent features that are not in the notes. "
+        "Keep it under 1500 characters. "
+        "Do not include a title line — only the body."
+    )
+    user_prompt = (
+        f"Developer notes:\n{notes}\n\n"
+        f"Write the user-facing update in {lang_name}."
+    )
+    return await _chat_text(system_prompt, user_prompt, temperature=0.4)

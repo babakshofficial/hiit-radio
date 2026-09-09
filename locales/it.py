@@ -515,6 +515,29 @@ STRINGS = {
     "awiz_export_ask": "Esportare l'intero database in JSON?",
     "awiz_export_go": "📤 Esporta ora",
 
+    # --- changelog broadcast ---
+    "changelog_header": "✨ Novità di HiiT Radio",
+    "changelog_admin_prompt": (
+        "Dopo il riavvio ci sono note di changelog in attesa.\n"
+        "Inviare un messaggio «Novità» localizzato a tutti gli utenti?"
+    ),
+    "changelog_admin_preview": "Anteprima note:\n{preview}",
+    "changelog_btn_send": "✅ Invia changelog",
+    "changelog_btn_skip": "⏭ Salta",
+    "changelog_generating": "⏳ Generazione changelog localizzati…",
+    "changelog_done": "Invio changelog terminato: inviati={sent}, falliti={failed}",
+    "changelog_skipped": "Changelog saltato. Le note in attesa sono state archiviate.",
+    "changelog_empty": "Nessuna nota di changelog in attesa.",
+    "changelog_llm_unavailable": (
+        "Ci sono note di changelog, ma l'LLM non è configurato.\n"
+        "Imposta LLM_API_KEY / LLM_API_BASE e riavvia — oppure salta per archiviare."
+    ),
+    "changelog_llm_failed": (
+        "Impossibile generare il changelog con l'LLM. Le note restano in attesa."
+    ),
+    "changelog_busy": "Un invio changelog è già in corso.",
+    "changelog_forbidden": "Solo l'admin può usarlo.",
+
     # --- language selection ---
     "lang_choose": "🌐 Scegli la lingua del bot:",
     "lang_set": "✅ Lingua impostata su {lang_name}.",

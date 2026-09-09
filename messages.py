@@ -873,6 +873,58 @@ def lang_set(lang_code):
     return t("lang_set", lang_name=t(f"lang_name_{lang_code}"))
 
 
+def changelog_header():
+    return t("changelog_header")
+
+
+def changelog_admin_prompt():
+    return t("changelog_admin_prompt")
+
+
+def changelog_admin_preview(preview):
+    return t("changelog_admin_preview", preview=preview)
+
+
+def changelog_btn_send():
+    return t("changelog_btn_send")
+
+
+def changelog_btn_skip():
+    return t("changelog_btn_skip")
+
+
+def changelog_generating():
+    return t("changelog_generating")
+
+
+def changelog_done(sent, failed):
+    return t("changelog_done", sent=sent, failed=failed)
+
+
+def changelog_skipped():
+    return t("changelog_skipped")
+
+
+def changelog_empty():
+    return t("changelog_empty")
+
+
+def changelog_llm_unavailable():
+    return t("changelog_llm_unavailable")
+
+
+def changelog_llm_failed():
+    return t("changelog_llm_failed")
+
+
+def changelog_busy():
+    return t("changelog_busy")
+
+
+def changelog_forbidden():
+    return t("changelog_forbidden")
+
+
 def menu_label(key):
     return t(key)
 
