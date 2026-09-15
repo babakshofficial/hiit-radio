@@ -1910,7 +1910,7 @@ class MusicDownloader:
             return False
 
     def file_has_watermark(self, file_path):
-        """True when APIC uses the default shrink + bottom-right logo layout."""
+        """True when APIC uses the current shrink + bottom-right logo layout."""
         try:
             audio = MutagenMP3(file_path, ID3=ID3)
             if not audio.tags or not audio.tags.getall("APIC"):
@@ -1923,7 +1923,9 @@ class MusicDownloader:
                             style = str(frame.text[0]).lower()
                     except Exception:
                         style = str(frame).lower()
-                    return style in ("itunes", "youtube", "default")
+                    # "shrink" = current single-margin layout. Older itunes/youtube
+                    # tags used 30% pad on *each* side (looked double-shrunk).
+                    return style == "shrink"
             return False
         except Exception:
             return False
@@ -1992,7 +1994,7 @@ class MusicDownloader:
         except Exception as e:
             logger.debug(f"sync_metadata_from_file skipped: {e}")
 
-    def rewatermark_from_file(self, file_path, default_style="itunes"):
+    def rewatermark_from_file(self, file_path, default_style="shrink"):
         """Re-embed APIC with a freshly-drawn logo stroke.
 
         IMPORTANT: we only repaint the logo region on the already-processed
@@ -2171,14 +2173,11 @@ class MusicDownloader:
             logger.error(f"Metadata error: {e}", exc_info=True)
 
     def ensure_watermarked_cover(self, file_path, metadata):
-        """Embed (or refresh) watermarked APIC on an existing MP3."""
+        """Embed watermarked APIC on an existing MP3 (once; never re-shrink)."""
         if not file_path or not os.path.exists(file_path):
             return False
         if self.file_has_watermark(file_path):
-            try:
-                return self.rewatermark_from_file(file_path)
-            except Exception:
-                return True
+            return True
         self._apply_metadata(file_path, metadata)
         return self.file_has_watermark(file_path)
 
@@ -2252,7 +2251,7 @@ class MusicDownloader:
                         art_url[:80],
                     )
                     continue
-                style = "itunes"
+                style = "shrink"
                 processed = self._process_itunes_query_artwork(response.content)
                 if not processed:
                     logger.warning("Artwork processing returned None")
@@ -2327,7 +2326,7 @@ class MusicDownloader:
                 return None
 
     def _process_itunes_query_artwork(self, original_artwork_bytes):
-        """iTunes query: square crop + white border (30%) + logo."""
+        """Square crop + single white margin (art ~77% of canvas) + logo."""
         try:
             img = Image.open(io.BytesIO(original_artwork_bytes))
             if img.mode != 'RGB':
@@ -2340,8 +2339,9 @@ class MusicDownloader:
             top = (h - min_dim) // 2
             img = img.crop((left, top, left + min_dim, top + min_dim))
 
-            # 2. Add white border (30% padding)
-            pad = int(min_dim * 0.3)
+            # 2. One white margin only — 15% of art size per side (~77% art).
+            # Older code used 30% per side (~62% art), which looked double-shrunk.
+            pad = int(min_dim * 0.15)
             new_size = min_dim + 2 * pad
             bordered = Image.new("RGB", (new_size, new_size), "white")
             bordered.paste(img, (pad, pad))
@@ -2368,7 +2368,7 @@ class MusicDownloader:
 
             out = io.BytesIO()
             bordered.save(out, format="JPEG", quality=95)
-            logger.debug("[iTunes] Logo added with white border")
+            logger.debug("[shrink] Logo added with white border")
             return out.getvalue()
 
         except Exception as e:
