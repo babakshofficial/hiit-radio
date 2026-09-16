@@ -4,10 +4,7 @@ venv
 *.db
 *.zip
 *test*
-.cursor*
-.specify*
-.cursor/** */
-.specify/** */
+.cursor
 downloads
 __pycache__
 credentials.json

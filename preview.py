@@ -9,13 +9,15 @@ cancel the timer before anything is sent.
 import asyncio
 import logging
 import os
-import tempfile
 from io import BytesIO
 
 import aiohttp
+import requests
+from PIL import Image
 
 import catalog
 import messages as msg
+from metadata import _normalize_apple_artwork_url
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +54,73 @@ def _preview_filename(url, title, artist):
     return f"{safe_artist} - {safe_title}.{ext}"
 
 
+def _fetch_artwork_bytes(metadata, music_downloader):
+    """Download + watermark cover JPEG for the preview thumbnail, or None."""
+    if not music_downloader:
+        return None
+    urls = []
+    primary = getattr(metadata, "artwork_url", None)
+    if primary:
+        normalized = _normalize_apple_artwork_url(primary)
+        urls.append(normalized)
+        if primary != normalized:
+            urls.append(primary)
+    title = getattr(metadata, "title", "") or ""
+    artist = getattr(metadata, "artist", "") or ""
+    fallback = music_downloader._itunes_artwork_url(title, artist)
+    if fallback and fallback not in urls:
+        urls.append(fallback)
+
+    for art_url in urls:
+        try:
+            response = requests.get(
+                art_url,
+                timeout=12,
+                headers=music_downloader._artwork_headers(art_url),
+            )
+            if response.status_code != 200 or not response.content:
+                continue
+            try:
+                probe = Image.open(BytesIO(response.content))
+                pw, ph = probe.size
+                if pw > 0 and ph > 0 and (pw / ph > 1.25 or ph / pw > 1.25):
+                    continue
+            except Exception:
+                pass
+            processed = music_downloader._process_cover_artwork(response.content)
+            if processed:
+                return processed
+        except Exception as e:
+            logger.debug("Preview artwork fetch failed (%s): %s", (art_url or "")[:60], e)
+    return None
+
+
+def _telegram_thumb_bio(jpeg_bytes, max_px=320):
+    """Shrink watermarked cover to a Telegram audio thumbnail InputFile."""
+    if not jpeg_bytes:
+        return None
+    try:
+        img = Image.open(BytesIO(jpeg_bytes))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        img.thumbnail((max_px, max_px), Image.Resampling.LANCZOS)
+        out = BytesIO()
+        img.save(out, format="JPEG", quality=85)
+        out.seek(0)
+        out.name = "cover.jpg"
+        return out
+    except Exception:
+        return None
+
+
 class PreviewSender:
     """Sends a preview clip only when the real download is taking a while."""
 
-    def __init__(self, message, metadata, delay=None):
+    def __init__(self, message, metadata, delay=None, music_downloader=None):
         self.message = message
         self.metadata = metadata
         self.delay = PREVIEW_DELAY_SEC if delay is None else delay
+        self.music_downloader = music_downloader
         self._task = None
         self._sent = None
         self._done = False
@@ -101,14 +163,26 @@ class PreviewSender:
             bio = BytesIO(data)
             bio.name = filename
 
+            thumb = None
+            try:
+                cover = await asyncio.to_thread(
+                    _fetch_artwork_bytes, self.metadata, self.music_downloader,
+                )
+                thumb = _telegram_thumb_bio(cover)
+            except Exception as e:
+                logger.debug("Preview artwork skipped: %s", e)
+
             if self._done:
                 return
-            self._sent = await self.message.reply_audio(
-                audio=bio,
-                title=title or None,
-                performer=artist or None,
-                caption=caption,
-            )
+            kwargs = {
+                "audio": bio,
+                "title": title or None,
+                "performer": artist or None,
+                "caption": caption,
+            }
+            if thumb is not None:
+                kwargs["thumbnail"] = thumb
+            self._sent = await self.message.reply_audio(**kwargs)
         except asyncio.CancelledError:
             return
         except Exception as e:

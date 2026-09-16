@@ -2737,7 +2737,7 @@ async def _download_and_send_job(message, user, metadata, context, job):
     )
     await reporter.update(10, f"{metadata.title} — {_unknown_artist(metadata.artist)}")
 
-    preview = PreviewSender(message, metadata)
+    preview = PreviewSender(message, metadata, music_downloader=downloader)
     preview.start()
 
     file_path = None
@@ -2930,7 +2930,7 @@ async def _handle_track_job(update, context, text, user, job):
     )
     await reporter.update(10, f"{metadata.title} — {_unknown_artist(metadata.artist)}")
 
-    preview = PreviewSender(update.message, metadata)
+    preview = PreviewSender(update.message, metadata, music_downloader=downloader)
     preview.start()
 
     file_path = None
