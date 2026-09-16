@@ -5,6 +5,9 @@ venv
 *.zip
 *test*
 .cursor
+.specify
+.cursor/** */
+.specify/** */
 downloads
 __pycache__
 credentials.json
