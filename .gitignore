@@ -4,8 +4,8 @@ venv
 *.db
 *.zip
 *test*
-.cursor
-.specify
+.cursor*
+.specify*
 .cursor/** */
 .specify/** */
 downloads
