@@ -515,12 +515,27 @@ STRINGS = {
     "changelog_header": "✨ Novedades de HiiT Radio",
     "changelog_admin_prompt": (
         "Tras el reinicio hay notas de changelog pendientes.\n"
-        "¿Enviar un mensaje de «Novedades» localizado a todos los usuarios?"
+        "Edítalas si hace falta y pulsa Enviar — verás una tarjeta por idioma "
+        "para revisar, editar, regenerar o enviar por separado. O Omite para archivar sin enviar."
     ),
     "changelog_admin_preview": "Vista previa de las notas:\n{preview}",
     "changelog_btn_send": "✅ Enviar changelog",
     "changelog_btn_edit": "✏️ Editar notas",
     "changelog_btn_skip": "⏭ Omitir",
+    "changelog_btn_regenerate": "🔄 Regenerar",
+    "changelog_review_started": "Revisa cada idioma abajo. Envía, omite, edita o regenera por idioma.",
+    "changelog_lang_card": "{lang_name} ({count} usuarios)\n\n{header}\n\n{body}",
+    "changelog_lang_sent": "✅ Enviado: {sent} ok, {failed} fallidos.",
+    "changelog_lang_skipped": "⏭ Omitido para {lang_name}.",
+    "changelog_lang_regenerating": "⏳ Regenerando {lang_name}…",
+    "changelog_lang_edit_prompt": "Envía el mensaje de changelog en {lang_name} en tu próxima respuesta.",
+    "changelog_lang_edit_saved": "✅ Texto de {lang_name} actualizado.",
+    "changelog_lang_edit_empty": "Mensaje vacío — envía el texto de changelog en {lang_name}.",
+    "changelog_lang_llm_failed": "No se pudo generar el texto para {lang_name}. Regenera o edita manualmente.",
+    "changelog_all_done": (
+        "Todos los idiomas gestionados. Enviados: {sent_langs}, omitidos: {skipped_langs}. "
+        "Mensajes a usuarios: {sent} ok, {failed} fallidos."
+    ),
     "changelog_edit_prompt": (
         "Envía las notas de changelog actualizadas en tu próximo mensaje.\n"
         "El inglés está bien — el LLM localizará para cada usuario.\n"

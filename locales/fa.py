@@ -485,12 +485,27 @@ STRINGS = {
     "changelog_header": "✨ تازه‌های HiiT Radio",
     "changelog_admin_prompt": (
         "بعد از ری‌استارت، یادداشت‌های تغییر در صف پیدا شد.\n"
-        "می‌توانی یادداشت‌ها را ویرایش کنی، بعد «تازه‌ها» را برای همه بفرستی — یا رد کنی."
+        "در صورت نیاز ویرایش کن، بعد بفرست — برای هر زبان یک کارت پیش‌نمایش می‌گیری "
+        "تا جداگانه بفرستی، رد کنی، ویرایش کنی یا دوباره بسازی. یا رد کن تا بدون ارسال بایگانی شود."
     ),
     "changelog_admin_preview": "پیش‌نمایش یادداشت‌ها:\n{preview}",
     "changelog_btn_send": "✅ ارسال تغییر‌لاگ",
     "changelog_btn_edit": "✏️ ویرایش یادداشت‌ها",
     "changelog_btn_skip": "⏭ رد کردن",
+    "changelog_btn_regenerate": "🔄 ساخت دوباره",
+    "changelog_review_started": "هر زبان را پایین بررسی کن. برای هر کدام بفرست، رد کن، ویرایش کن یا دوباره بساز.",
+    "changelog_lang_card": "{lang_name} ({count} کاربر)\n\n{header}\n\n{body}",
+    "changelog_lang_sent": "✅ ارسال شد: {sent} موفق، {failed} ناموفق.",
+    "changelog_lang_skipped": "⏭ برای {lang_name} رد شد.",
+    "changelog_lang_regenerating": "⏳ در حال ساخت دوباره {lang_name}…",
+    "changelog_lang_edit_prompt": "متن تغییر‌لاگ {lang_name} را در پیام بعدی بفرست.",
+    "changelog_lang_edit_saved": "✅ متن {lang_name} به‌روز شد.",
+    "changelog_lang_edit_empty": "پیام خالی بود — متن تغییر‌لاگ {lang_name} را بفرست.",
+    "changelog_lang_llm_failed": "ساخت متن برای {lang_name} ممکن نشد. دوباره بساز یا دستی ویرایش کن.",
+    "changelog_all_done": (
+        "همه زبان‌ها انجام شد. ارسال‌شده: {sent_langs}، رد‌شده: {skipped_langs}. "
+        "پیام به کاربران: {sent} موفق، {failed} ناموفق."
+    ),
     "changelog_edit_prompt": (
         "یادداشت‌های به‌روز تغییر‌لاگ را در پیام بعدی بفرست.\n"
         "انگلیسی هم اشکالی ندارد — LLM برای هر کاربر محلی‌سازی می‌کند.\n"

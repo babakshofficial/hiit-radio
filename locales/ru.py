@@ -513,12 +513,27 @@ STRINGS = {
     "changelog_header": "✨ Что нового в HiiT Radio",
     "changelog_admin_prompt": (
         "После перезапуска найдены заметки для changelog.\n"
-        "Разослать локализованное «Что нового» всем пользователям?"
+        "При необходимости отредактируй, затем Отправь — для каждого языка будет карточка "
+        "для проверки, правки, перегенерации или отдельной отправки. Или Пропусти, чтобы архивировать без рассылки."
     ),
     "changelog_admin_preview": "Превью заметок:\n{preview}",
     "changelog_btn_send": "✅ Отправить changelog",
     "changelog_btn_edit": "✏️ Изменить заметки",
     "changelog_btn_skip": "⏭ Пропустить",
+    "changelog_btn_regenerate": "🔄 Перегенерировать",
+    "changelog_review_started": "Проверь каждый язык ниже. Отправь, пропусти, измени или перегенерируй по языку.",
+    "changelog_lang_card": "{lang_name} ({count} пользователей)\n\n{header}\n\n{body}",
+    "changelog_lang_sent": "✅ Отправлено: {sent} ок, {failed} ошибок.",
+    "changelog_lang_skipped": "⏭ Пропущено для {lang_name}.",
+    "changelog_lang_regenerating": "⏳ Перегенерация {lang_name}…",
+    "changelog_lang_edit_prompt": "Отправь текст changelog на {lang_name} следующим сообщением.",
+    "changelog_lang_edit_saved": "✅ Текст {lang_name} обновлён.",
+    "changelog_lang_edit_empty": "Пустое сообщение — отправь текст changelog на {lang_name}.",
+    "changelog_lang_llm_failed": "Не удалось сгенерировать текст для {lang_name}. Перегенерируй или отредактируй вручную.",
+    "changelog_all_done": (
+        "Все языки обработаны. Отправлено: {sent_langs}, пропущено: {skipped_langs}. "
+        "Сообщения пользователям: {sent} ок, {failed} ошибок."
+    ),
     "changelog_edit_prompt": (
         "Отправь обновлённые заметки changelog следующим сообщением.\n"
         "Английский подойдёт — LLM локализует для каждого пользователя.\n"

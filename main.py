@@ -508,6 +508,10 @@ async def consume_await_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     if admin_wizard.is_wizard(pending):
         await admin_wizard.on_text(update, context, pending)
         return True
+    lang_edit = None
+    if kind == "changelog_lang_edit":
+        data = pending.get("data") or {}
+        lang_edit = data.get("lang") if isinstance(data, dict) else None
     clear_await_input(context)
     text = (update.message.text or "").strip()
     context.args = text.split() if text else []
@@ -521,6 +525,8 @@ async def consume_await_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await support_command(update, context)
     elif kind == "changelog_edit":
         await changelog.handle_edit_text(update, context)
+    elif kind == "changelog_lang_edit":
+        await changelog.handle_lang_edit_text(update, context, lang=lang_edit)
     else:
         return False
     return True
@@ -1431,6 +1437,94 @@ async def _show_artist_page(message, artist_id, context, edit=False, user_id=Non
         await message.reply_text(text, reply_markup=markup)
 
 
+async def _show_artist_search_picker(message, query, artists, context, user_id=None):
+    """List matching artists for the user to pick a profile."""
+    lines = [msg.search_header(query)]
+    buttons = []
+    context.user_data["artist_search_cache"] = {}
+    for i, hit in enumerate(artists[:6], 1):
+        lines.append(msg.search_hit_line(i, hit.name, hit.subtitle, hit.kind, hit.source))
+        context.user_data["artist_search_cache"][str(i)] = hit.id
+        buttons.append([
+            InlineKeyboardButton(hit.name[:30], callback_data=f"artistpick:profile:{i}")
+        ])
+    buttons.append(_back_row())
+    await message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+
+
+def _norm_artist_query(text: str) -> str:
+    s = re.sub(r"\s+", " ", (text or "").strip().lower())
+    s = re.sub(r"^(the|a|an)\s+", "", s)
+    return s
+
+
+async def _match_artist_only_query(query: str):
+    """Return artist hits when ``query`` is a bare singer/band name, else None.
+
+    Used so typing just an artist name opens the artist page instead of
+    downloading a random track.
+    """
+    import difflib
+
+    q = (query or "").strip()
+    if len(q) < 2:
+        return None
+    if re.search(r"\s+by\s+", q, re.I) or " - " in q:
+        return None
+
+    hits = await catalog.search_all(q, limit=10)
+    artists = [h for h in hits if h.kind == "artist" and (h.name or "").strip()]
+    if not artists:
+        return None
+
+    qn = _norm_artist_query(q)
+    q_words = qn.split()
+    matched = []
+    for a in artists:
+        an = _norm_artist_query(a.name)
+        if not an:
+            continue
+        ratio = difflib.SequenceMatcher(None, qn, an).ratio()
+        if qn == an or ratio >= 0.88:
+            matched.append((ratio, a))
+            continue
+        if an.startswith(qn) and len(q_words) >= 1 and abs(len(an.split()) - len(q_words)) <= 1:
+            if ratio >= 0.75:
+                matched.append((ratio, a))
+                continue
+        a_words = set(an.split())
+        if q_words and set(q_words) <= a_words and len(q_words) >= max(1, len(a_words) - 1):
+            if ratio >= 0.72:
+                matched.append((ratio, a))
+
+    if not matched:
+        return None
+    matched.sort(key=lambda x: -x[0])
+    seen = set()
+    out = []
+    for _ratio, a in matched:
+        aid = str(a.id)
+        if aid in seen:
+            continue
+        seen.add(aid)
+        out.append(a)
+    return out or None
+
+
+async def _redirect_to_artist_page(message, context, query, user_id=None):
+    """If ``query`` is a bare artist name, show artist page/picker. True if handled."""
+    artists = await _match_artist_only_query(query)
+    if not artists:
+        return False
+    if len(artists) == 1:
+        await _show_artist_page(message, artists[0].id, context, user_id=user_id)
+    else:
+        await _show_artist_search_picker(
+            message, query, artists, context, user_id=user_id,
+        )
+    return True
+
+
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_access(update, context):
         return
@@ -1440,6 +1534,14 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     clear_await_input(context)
     status = await update.message.reply_text(msg.searching())
+    if await _redirect_to_artist_page(
+        update.message, context, query, user_id=update.effective_user.id,
+    ):
+        try:
+            await status.delete()
+        except Exception:
+            pass
+        return
     hits = await catalog.search_all(query, limit=10)
     await status.delete()
     if not hits:
@@ -1510,17 +1612,10 @@ async def artist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id=update.effective_user.id,
         )
         return
-    lines = [msg.search_header(query)]
-    buttons = []
-    context.user_data["artist_search_cache"] = {}
-    for i, hit in enumerate(artists[:6], 1):
-        lines.append(msg.search_hit_line(i, hit.name, hit.subtitle, hit.kind, hit.source))
-        context.user_data["artist_search_cache"][str(i)] = hit.id
-        buttons.append([
-            InlineKeyboardButton(hit.name[:30], callback_data=f"artistpick:profile:{i}")
-        ])
-    buttons.append(_back_row())
-    await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+    await _show_artist_search_picker(
+        update.message, query, artists, context,
+        user_id=update.effective_user.id,
+    )
 
 
 async def follow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2888,6 +2983,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg.not_music_query(), reply_markup=_back_button(),
         )
         return
+
+    # Bare singer/band name → artist page (not a track download).
+    if not looks_like_url and not is_collection:
+        status = await update.message.reply_text(msg.searching())
+        try:
+            redirected = await _redirect_to_artist_page(
+                update.message, context, text, user_id=user_id,
+            )
+        finally:
+            try:
+                await status.delete()
+            except Exception:
+                pass
+        if redirected:
+            return
 
     if await _deny_quota(update.message, context.bot, user):
         return

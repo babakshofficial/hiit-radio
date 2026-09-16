@@ -945,6 +945,56 @@ def changelog_forbidden():
     return t("changelog_forbidden")
 
 
+def changelog_btn_regenerate():
+    return t("changelog_btn_regenerate")
+
+
+def changelog_review_started():
+    return t("changelog_review_started")
+
+
+def changelog_lang_card(*, lang_name, count, header, body):
+    return t("changelog_lang_card", lang_name=lang_name, count=count, header=header, body=body)
+
+
+def changelog_lang_sent(sent, failed):
+    return t("changelog_lang_sent", sent=sent, failed=failed)
+
+
+def changelog_lang_skipped(*, lang_name):
+    return t("changelog_lang_skipped", lang_name=lang_name)
+
+
+def changelog_lang_regenerating(*, lang_name):
+    return t("changelog_lang_regenerating", lang_name=lang_name)
+
+
+def changelog_lang_edit_prompt(*, lang_name):
+    return t("changelog_lang_edit_prompt", lang_name=lang_name)
+
+
+def changelog_lang_edit_saved(*, lang_name):
+    return t("changelog_lang_edit_saved", lang_name=lang_name)
+
+
+def changelog_lang_edit_empty(*, lang_name):
+    return t("changelog_lang_edit_empty", lang_name=lang_name)
+
+
+def changelog_lang_llm_failed(*, lang_name):
+    return t("changelog_lang_llm_failed", lang_name=lang_name)
+
+
+def changelog_all_done(*, sent_langs, skipped_langs, sent, failed):
+    return t(
+        "changelog_all_done",
+        sent_langs=sent_langs,
+        skipped_langs=skipped_langs,
+        sent=sent,
+        failed=failed,
+    )
+
+
 def menu_label(key):
     return t(key)
 

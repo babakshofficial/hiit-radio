@@ -485,12 +485,27 @@ STRINGS = {
     "changelog_header": "✨ What’s new in HiiT Radio",
     "changelog_admin_prompt": (
         "Pending changelog notes were found after restart.\n"
-        "You can Edit the notes, then Send a localized “What’s new” to all users — or Skip."
+        "Edit the notes if needed, then Send — you’ll get one preview card per language "
+        "to review, edit, regenerate, or send separately. Or Skip to archive without sending."
     ),
     "changelog_admin_preview": "Notes preview:\n{preview}",
     "changelog_btn_send": "✅ Send changelog",
     "changelog_btn_edit": "✏️ Edit notes",
     "changelog_btn_skip": "⏭ Skip",
+    "changelog_btn_regenerate": "🔄 Regenerate",
+    "changelog_review_started": "Review each language below. Send, Skip, Edit, or Regenerate per language.",
+    "changelog_lang_card": "{lang_name} ({count} users)\n\n{header}\n\n{body}",
+    "changelog_lang_sent": "✅ Sent: {sent} ok, {failed} failed.",
+    "changelog_lang_skipped": "⏭ Skipped for {lang_name}.",
+    "changelog_lang_regenerating": "⏳ Regenerating {lang_name}…",
+    "changelog_lang_edit_prompt": "Send the {lang_name} changelog message in your next reply.",
+    "changelog_lang_edit_saved": "✅ {lang_name} text updated.",
+    "changelog_lang_edit_empty": "Empty message — send the {lang_name} changelog text.",
+    "changelog_lang_llm_failed": "Could not generate text for {lang_name}. Tap Regenerate or edit manually.",
+    "changelog_all_done": (
+        "All languages handled. Sent: {sent_langs}, skipped: {skipped_langs}. "
+        "User messages: {sent} ok, {failed} failed."
+    ),
     "changelog_edit_prompt": (
         "Send the updated changelog notes in your next message.\n"
         "English is fine — the LLM will localize for each user.\n"

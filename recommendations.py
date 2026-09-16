@@ -129,10 +129,6 @@ def recommendation_keyboard(
     if track_title:
         buttons.append([
             InlineKeyboardButton(
-                msg.t("btn_artwork"),
-                callback_data=f"reco:art:{token}",
-            ),
-            InlineKeyboardButton(
                 msg.t("btn_report_track"),
                 callback_data=f"trkrep:{token}",
             ),

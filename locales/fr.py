@@ -520,12 +520,27 @@ STRINGS = {
     "changelog_header": "✨ Nouveautés HiiT Radio",
     "changelog_admin_prompt": (
         "Des notes de changelog étaient en attente après le redémarrage.\n"
-        "Envoyer un message « Nouveautés » localisé à tous les utilisateurs ?"
+        "Modifie-les si besoin, puis Envoie — tu auras une carte par langue "
+        "à relire, modifier, régénérer ou envoyer séparément. Ou Ignore pour archiver sans envoyer."
     ),
     "changelog_admin_preview": "Aperçu des notes :\n{preview}",
     "changelog_btn_send": "✅ Envoyer le changelog",
     "changelog_btn_edit": "✏️ Modifier les notes",
     "changelog_btn_skip": "⏭ Ignorer",
+    "changelog_btn_regenerate": "🔄 Régénérer",
+    "changelog_review_started": "Relis chaque langue ci-dessous. Envoie, ignore, modifie ou régénère par langue.",
+    "changelog_lang_card": "{lang_name} ({count} utilisateurs)\n\n{header}\n\n{body}",
+    "changelog_lang_sent": "✅ Envoyé : {sent} ok, {failed} échecs.",
+    "changelog_lang_skipped": "⏭ Ignoré pour {lang_name}.",
+    "changelog_lang_regenerating": "⏳ Régénération de {lang_name}…",
+    "changelog_lang_edit_prompt": "Envoie le message changelog {lang_name} dans ta prochaine réponse.",
+    "changelog_lang_edit_saved": "✅ Texte {lang_name} mis à jour.",
+    "changelog_lang_edit_empty": "Message vide — envoie le texte changelog {lang_name}.",
+    "changelog_lang_llm_failed": "Impossible de générer le texte pour {lang_name}. Régénère ou modifie à la main.",
+    "changelog_all_done": (
+        "Toutes les langues traitées. Envoyées : {sent_langs}, ignorées : {skipped_langs}. "
+        "Messages utilisateurs : {sent} ok, {failed} échecs."
+    ),
     "changelog_edit_prompt": (
         "Envoie les notes de changelog mises à jour dans ton prochain message.\n"
         "L’anglais convient — le LLM localisera pour chaque utilisateur.\n"

@@ -1,14 +1,17 @@
 """30-second preview clips sent while the full track downloads.
 
 Uses the Apple/Deezer preview_url already attached to metadata.
-Sent as audio (not voice) to preserve quality. A preview is only posted
-when the real download is taking a while — cache hits and fast downloads
-cancel the timer before anything is sent.
+Converted to high-quality Opus and sent as a Telegram voice message,
+with the watermarked cover attached as a photo (voice API has no thumbnail).
+A preview is only posted when the real download is taking a while —
+cache hits and fast downloads cancel the timer before anything is sent.
 """
 
 import asyncio
 import logging
 import os
+import subprocess
+import tempfile
 from io import BytesIO
 
 import aiohttp
@@ -24,6 +27,8 @@ logger = logging.getLogger(__name__)
 PREVIEW_ENABLED = os.getenv("PREVIEW_ENABLED", "1").lower() not in ("0", "false", "no")
 PREVIEW_DELAY_SEC = float(os.getenv("PREVIEW_DELAY_SEC", "4"))
 PREVIEW_MAX_BYTES = 8 * 1024 * 1024
+# High-quality Opus for music-like previews (Telegram voice is OGG/Opus).
+PREVIEW_OPUS_BITRATE = os.getenv("PREVIEW_OPUS_BITRATE", "160k").strip() or "160k"
 
 
 async def _fetch(url):
@@ -41,21 +46,49 @@ async def _fetch(url):
             return data
 
 
-def _preview_filename(url, title, artist):
-    url_l = (url or "").lower()
-    if ".mp3" in url_l:
-        ext = "mp3"
-    elif ".m4a" in url_l or ".aac" in url_l:
-        ext = "m4a"
-    else:
-        ext = "m4a"
-    safe_title = (title or "preview").replace("/", "-")[:80]
-    safe_artist = (artist or "unknown").replace("/", "-")[:60]
-    return f"{safe_artist} - {safe_title}.{ext}"
+def _to_opus_ogg(audio_bytes: bytes) -> bytes | None:
+    """Transcode preview bytes to high-quality OGG Opus for sendVoice."""
+    if not audio_bytes:
+        return None
+    src_path = out_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as src:
+            src.write(audio_bytes)
+            src_path = src.name
+        out_fd, out_path = tempfile.mkstemp(suffix=".ogg")
+        os.close(out_fd)
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", src_path,
+            "-c:a", "libopus",
+            "-b:a", PREVIEW_OPUS_BITRATE,
+            "-vbr", "on",
+            "-application", "audio",
+            "-f", "ogg",
+            out_path,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, timeout=60)
+        if proc.returncode != 0 or not os.path.exists(out_path):
+            err = (proc.stderr or b"").decode("utf-8", errors="ignore")[:200]
+            logger.debug("ffmpeg opus failed: %s", err)
+            return None
+        with open(out_path, "rb") as f:
+            data = f.read()
+        return data or None
+    except Exception as e:
+        logger.debug("Opus convert failed: %s", e)
+        return None
+    finally:
+        for path in (src_path, out_path):
+            if path:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
 
 
 def _fetch_artwork_bytes(metadata, music_downloader):
-    """Download + watermark cover JPEG for the preview thumbnail, or None."""
+    """Download + watermark cover JPEG for the preview photo, or None."""
     if not music_downloader:
         return None
     urls = []
@@ -95,26 +128,16 @@ def _fetch_artwork_bytes(metadata, music_downloader):
     return None
 
 
-def _telegram_thumb_bio(jpeg_bytes, max_px=320):
-    """Shrink watermarked cover to a Telegram audio thumbnail InputFile."""
+def _photo_bio(jpeg_bytes):
     if not jpeg_bytes:
         return None
-    try:
-        img = Image.open(BytesIO(jpeg_bytes))
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-        img.thumbnail((max_px, max_px), Image.Resampling.LANCZOS)
-        out = BytesIO()
-        img.save(out, format="JPEG", quality=85)
-        out.seek(0)
-        out.name = "cover.jpg"
-        return out
-    except Exception:
-        return None
+    bio = BytesIO(jpeg_bytes)
+    bio.name = "cover.jpg"
+    return bio
 
 
 class PreviewSender:
-    """Sends a preview clip only when the real download is taking a while."""
+    """Sends a HQ voice preview only when the real download is taking a while."""
 
     def __init__(self, message, metadata, delay=None, music_downloader=None):
         self.message = message
@@ -122,7 +145,7 @@ class PreviewSender:
         self.delay = PREVIEW_DELAY_SEC if delay is None else delay
         self.music_downloader = music_downloader
         self._task = None
-        self._sent = None
+        self._sent = []  # photo and/or voice messages to delete on finish(delete=True)
         self._done = False
 
     def start(self):
@@ -158,31 +181,54 @@ class PreviewSender:
             if not data or self._done:
                 return
 
-            caption = msg.preview_caption(title, artist)
-            filename = _preview_filename(preview_url, title, artist)
-            bio = BytesIO(data)
-            bio.name = filename
+            opus = await asyncio.to_thread(_to_opus_ogg, data)
+            if not opus or self._done:
+                return
 
-            thumb = None
+            caption = msg.preview_caption(title, artist)
+            cover = None
             try:
                 cover = await asyncio.to_thread(
                     _fetch_artwork_bytes, self.metadata, self.music_downloader,
                 )
-                thumb = _telegram_thumb_bio(cover)
             except Exception as e:
                 logger.debug("Preview artwork skipped: %s", e)
 
             if self._done:
                 return
-            kwargs = {
-                "audio": bio,
-                "title": title or None,
-                "performer": artist or None,
-                "caption": caption,
-            }
-            if thumb is not None:
-                kwargs["thumbnail"] = thumb
-            self._sent = await self.message.reply_audio(**kwargs)
+
+            voice_bio = BytesIO(opus)
+            voice_bio.name = "preview.ogg"
+
+            # Voice notes can't carry a thumbnail — send cover as a photo first,
+            # then the voice message as a reply so they stay linked in the chat.
+            photo_msg = None
+            photo = _photo_bio(cover)
+            if photo is not None:
+                try:
+                    photo_msg = await self.message.reply_photo(
+                        photo=photo,
+                        caption=caption,
+                    )
+                    self._sent.append(photo_msg)
+                except Exception as e:
+                    logger.debug("Preview photo failed: %s", e)
+                    photo_msg = None
+
+            if self._done:
+                return
+
+            voice_kwargs = {"voice": voice_bio}
+            if photo_msg is None:
+                voice_kwargs["caption"] = caption
+            try:
+                if photo_msg is not None:
+                    voice_msg = await photo_msg.reply_voice(**voice_kwargs)
+                else:
+                    voice_msg = await self.message.reply_voice(**voice_kwargs)
+                self._sent.append(voice_msg)
+            except Exception as e:
+                logger.info("Preview voice failed: %s", e)
         except asyncio.CancelledError:
             return
         except Exception as e:
@@ -203,9 +249,10 @@ class PreviewSender:
                 pass
             except Exception:
                 pass
-        if delete and self._sent is not None:
-            try:
-                await self._sent.delete()
-            except Exception:
-                pass
-            self._sent = None
+        if delete and self._sent:
+            for m in self._sent:
+                try:
+                    await m.delete()
+                except Exception:
+                    pass
+            self._sent = []

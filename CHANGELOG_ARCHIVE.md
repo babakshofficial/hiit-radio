@@ -35,3 +35,15 @@ Notes cleared from `CHANGELOG_PENDING.md` after Send or Skip are appended below.
 
 ## 2026-09-16
 - Track covers now have slightly rounded corners on the album art inside the white border
+
+## 2026-09-16 05:46:16 UTC (skipped)
+
+## 2026-09-16
+- 30-second previews are now high-quality voice messages with the track cover shown above them
+
+## 2026-09-16 06:36:41 UTC (sent)
+
+## 2026-09-16
+- Removed the Artwork button under downloaded tracks (cover is already on the audio)
+- Typing only an artist or band name now opens their artist page
+- Changelog broadcasts: admin reviews one preview card per language before sending (Send, Skip, Edit, or Regenerate each)
