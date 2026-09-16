@@ -109,7 +109,7 @@ def main() -> int:
             "no_warnings": True,
             "skip_download": True,
             "ignore_no_formats_error": True,
-            "socket_timeout": 25,
+            "socket_timeout": 10,
             "remote_components": ["ejs:github"],
             "js_runtimes": _deno_js_runtimes(),
             "http_headers": opts.get("http_headers") or {},
@@ -118,14 +118,15 @@ def main() -> int:
             base["cookiesfrombrowser"] = opts["cookiesfrombrowser"]
         if opts.get("cookiefile"):
             base["cookiefile"] = opts["cookiefile"]
+        # One client set for speed; second only if first returned no formats
+        # (not on network/SSL — those fail immediately).
         client_sets = [
-            ["web", "android"],
-            ["android"],
+            ["android", "web"],
+            ["web"],
         ]
         last_err = None
         for clients in client_sets:
             attempt = dict(base)
-            attempt["socket_timeout"] = 15
             attempt["extractor_args"] = {"youtube": {"player_client": list(clients)}}
             try:
                 with d._with_ydl(attempt) as ydl:
@@ -142,11 +143,27 @@ def main() -> int:
                 )
             except Exception as exc:
                 last_err = exc
+                err = str(exc).lower()
                 print(
                     f"yt_worker probe retry clients={','.join(clients)} "
                     f"err={str(exc).splitlines()[-1][:120]}",
                     flush=True,
                 )
+                # SSL / proxy / transport — retrying clients wastes seconds.
+                if any(
+                    n in err
+                    for n in (
+                        "ssl",
+                        "wrong_version",
+                        "connection reset",
+                        "connection aborted",
+                        "connection refused",
+                        "timed out",
+                        "timeout",
+                        "proxy",
+                    )
+                ):
+                    raise
                 continue
         if last_err is not None:
             raise last_err

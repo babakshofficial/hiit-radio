@@ -3124,8 +3124,27 @@ def _cookie_file_status():
 
 
 def _probe_is_inconclusive(detail):
+    """True when failure is network/proxy/timeout — not proof cookies are bad."""
     d = (detail or "").lower()
-    return "timeout" in d or "timed out" in d
+    if "timeout" in d or "timed out" in d:
+        return True
+    needles = (
+        "ssl:",
+        "wrong_version_number",
+        "certificate",
+        "connection reset",
+        "connection aborted",
+        "connection refused",
+        "network is unreachable",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "proxyerror",
+        "tunnel connection failed",
+        "cookies not proven bad",
+        "youtube/proxy was slow",
+        "network/proxy",
+    )
+    return any(n in d for n in needles)
 
 
 def _youtube_auth_status():
@@ -3151,8 +3170,8 @@ def _youtube_auth_status():
     if _probe_is_inconclusive(detail):
         jar = "ok" if file_ok else (file_detail or "unverified")
         return False, (
-            f"health probe timed out ({detail}). "
-            f"Cookies not proven bad (jar={jar}). YouTube/proxy was slow."
+            f"health probe network/proxy issue ({detail[:180]}). "
+            f"Cookies not proven bad (jar={jar})."
         )
     if downloader.cookies_from_browser:
         if format_issue or proxy_issue:
@@ -3296,7 +3315,7 @@ async def _cache_sweep_fallback_loop(bot):
 
 
 async def _deferred_youtube_setup(bot):
-    """Refresh cookies then probe after bot is up — avoids boot-time races."""
+    """Refresh cookies then do one fast probe — never block the bot on Chrome."""
     from downloader import invalidate_youtube_auth_probe
 
     await asyncio.sleep(2)
@@ -3309,21 +3328,27 @@ async def _deferred_youtube_setup(bot):
             logger.warning("YouTube cookie refresh failed: %s", exc)
 
     invalidate_youtube_auth_probe()
+    # One probe only (get_credentials_status caches it for the health report).
     try:
         status_text, yt_ok = await asyncio.to_thread(get_credentials_status)
-        _healthy, auth_detail = await asyncio.to_thread(_youtube_auth_status)
     except Exception as exc:
         logger.warning("YouTube credential probe failed: %s", exc)
         status_text, yt_ok = f"probe error: {exc}", False
-        auth_detail = str(exc)
     for line in status_text.splitlines():
         logger.info(line)
+
+    # Reuse cached probe detail without a second live extract.
+    try:
+        _healthy, auth_detail = await asyncio.to_thread(_youtube_auth_status)
+    except Exception as exc:
+        auth_detail = str(exc)
+        _healthy = False
+
     if not yt_ok:
-        if _probe_is_inconclusive(auth_detail):
+        if _probe_is_inconclusive(auth_detail) or _probe_is_inconclusive(status_text):
             logger.info(
-                "YouTube startup probe inconclusive (%s). "
-                "Cookies not proven bad — downloads will retry on bot_check.",
-                auth_detail,
+                "YouTube startup probe inconclusive (network/proxy). "
+                "Cookies not proven bad — downloads will retry on bot_check."
             )
         else:
             logger.warning(

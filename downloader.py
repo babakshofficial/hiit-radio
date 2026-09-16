@@ -193,6 +193,27 @@ def _is_bot_check_error(exc):
     return "confirm you're not a bot" in err or "sign in to confirm" in err
 
 
+def _is_network_probe_error(exc_or_text):
+    """SSL/proxy/transport failures — cookies are irrelevant; fail fast."""
+    err = str(exc_or_text or "").lower()
+    needles = (
+        "ssl:",
+        "wrong_version_number",
+        "certificate",
+        "connection reset",
+        "connection aborted",
+        "connection refused",
+        "network is unreachable",
+        "name or service not known",
+        "temporary failure in name resolution",
+        "timed out",
+        "timeout after",
+        "proxyerror",
+        "tunnel connection failed",
+    )
+    return any(n in err for n in needles)
+
+
 def invalidate_youtube_auth_probe():
     """Clear cached live YouTube auth probe (e.g. after cookies.txt upload)."""
     _PROBE_CACHE["monotonic"] = 0.0
@@ -856,23 +877,25 @@ class MusicDownloader:
                 attempts.append("cookiefile")
         return attempts or ["browser"]
 
-    def _probe_auth_attempts(self):
-        """Health probe order — cookies.txt first when available (faster than Chrome DB)."""
-        attempts = []
+    def _probe_auth_attempts(self, *, fast=True):
+        """Health probe auth order.
+
+        ``fast=True`` (default): cookies.txt only when present — skips slow Chrome DB.
+        """
         if _cookies_look_authenticated(self.cookies_path):
-            attempts.append("cookiefile")
-        if self.cookies_from_browser and "browser" not in attempts:
-            attempts.append("browser")
-        return attempts or ["browser"]
+            return ["cookiefile"]
+        if not fast and self.cookies_from_browser:
+            return ["browser"]
+        if self.cookies_from_browser:
+            return ["browser"]
+        return ["cookiefile"] if os.path.exists(self.cookies_path) else ["browser"]
 
     def _probe_worker_timeout(self, auth):
-        """Subprocess probe timeout; shorter browser wait when cookies.txt can fall back."""
+        """Keep probes short — longer timeouts only make startup slower."""
         custom = os.getenv("YTDLP_PROBE_TIMEOUT", "").strip()
         if custom.isdigit():
-            return int(custom)
-        if auth == "browser" and _cookies_look_authenticated(self.cookies_path):
-            return 60
-        return 120
+            return max(8, min(int(custom), 45))
+        return 20 if auth == "cookiefile" else 25
 
     def _run_youtube_worker(
         self, url, *, probe=False, output_template="", quality=DEFAULT_QUALITY,
@@ -900,8 +923,12 @@ class MusicDownloader:
 
         def _run_once(run_env, *, auth_modes=None):
             last_err = ""
-            for auth in auth_modes or self._youtube_subprocess_attempts():
-                retry_delays = _BROWSER_RETRY_DELAYS if auth == "browser" else ()
+            modes = auth_modes or self._youtube_subprocess_attempts()
+            for auth in modes:
+                # Probes never sleep-retry — speed first.
+                retry_delays = () if probe else (
+                    _BROWSER_RETRY_DELAYS if auth == "browser" else ()
+                )
                 max_attempts = 1 + len(retry_delays)
                 for attempt in range(max_attempts):
                     cmd = [
@@ -933,6 +960,8 @@ class MusicDownloader:
                     except subprocess.TimeoutExpired:
                         last_err = f"timeout after {timeout}s (auth={auth})"
                         logger.warning("YouTube worker %s", last_err)
+                        if probe:
+                            return False, last_err
                         break
                     finally:
                         _YTDLP_LOCK.release()
@@ -949,6 +978,9 @@ class MusicDownloader:
                     last_err = err or last_err
                     if cancel_check and cancel_check():
                         return False, "cancelled"
+                    # Network/SSL: stop immediately — more auth modes won't help.
+                    if probe and _is_network_probe_error(last_err):
+                        return False, last_err
                     if (
                         attempt + 1 < max_attempts
                         and auth == "browser"
@@ -974,6 +1006,9 @@ class MusicDownloader:
         if ok:
             return True, detail
 
+        if probe and _is_network_probe_error(detail):
+            return False, detail
+
         # If still under proxychains and format listing failed, retry direct once.
         err_l = (detail or "").lower()
         format_fail = (
@@ -993,10 +1028,17 @@ class MusicDownloader:
             for key in list(direct_env):
                 if key.upper().startswith("PROXYCHAINS"):
                     direct_env.pop(key, None)
+            # Probe: one cookiefile/direct try only — don't re-walk all auth modes.
+            direct_modes = auth_modes
+            if probe:
+                if _cookies_look_authenticated(self.cookies_path):
+                    direct_modes = ["cookiefile"]
+                elif auth_modes:
+                    direct_modes = [auth_modes[0]]
             logger.info(
                 "YouTube worker format failure under proxychains — retrying without LD_PRELOAD"
             )
-            ok2, detail2 = _run_once(direct_env, auth_modes=auth_modes)
+            ok2, detail2 = _run_once(direct_env, auth_modes=direct_modes)
             if ok2:
                 return True, detail2 + " (direct, no proxychains)"
             return False, detail2 or detail
@@ -1042,7 +1084,7 @@ class MusicDownloader:
         raise RuntimeError(detail)
 
     def _probe_youtube_subprocess(self, thorough=False):
-        """Health-check via subprocess with live Chrome cookies (browser auth only)."""
+        """Fast health-check via subprocess (cookies.txt preferred)."""
         urls = []
         if _HEALTH_PROBE_URL:
             urls.append(_HEALTH_PROBE_URL)
@@ -1051,7 +1093,8 @@ class MusicDownloader:
                 if url not in urls:
                     urls.append(url)
         last_detail = "subprocess probe failed on all URLs"
-        probe_modes = self._probe_auth_attempts()
+        # Default: cookiefile only. Thorough / no jar → allow browser.
+        probe_modes = self._probe_auth_attempts(fast=not thorough)
         for url in urls:
             ok, detail = self._run_youtube_worker(
                 url, probe=True, auth_modes=probe_modes,
@@ -1060,6 +1103,8 @@ class MusicDownloader:
                 vid = url.rsplit("=", 1)[-1]
                 return True, f"live probe OK ({detail}; video={vid})"
             last_detail = detail
+            if _is_network_probe_error(detail):
+                break
         return False, last_detail
 
     def _build_search_opts(self):
