@@ -47,3 +47,8 @@ Notes cleared from `CHANGELOG_PENDING.md` after Send or Skip are appended below.
 - Removed the Artwork button under downloaded tracks (cover is already on the audio)
 - Typing only an artist or band name now opens their artist page
 - Changelog broadcasts: admin reviews one preview card per language before sending (Send, Skip, Edit, or Regenerate each)
+
+## 2026-09-16 06:52:16 UTC (skipped)
+
+## 2026-09-16
+- Downloads with a known artist no longer accept unrelated same-title matches from other artists

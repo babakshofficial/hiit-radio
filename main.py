@@ -2763,11 +2763,6 @@ async def _offer_nearby_tracks(message, context, metadata, query=None):
             results.append(r)
 
     _add(getattr(metadata, "nearby_hits", None) if metadata else None)
-    if len(results) < 4:
-        try:
-            _add(await downloader.search_nearby(seed_title, limit=8))
-        except Exception:
-            logger.exception("Nearby YT/SC search failed for %r", seed_title)
     if len(results) < 2:
         extra = []
         if search_query:
@@ -2932,7 +2927,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await _touch_user(update)
 
-    text = update.message.text.strip()
+    message = update.message
+    if not message:
+        return
+    if message.text is None:
+        if peek_await_input(context):
+            await consume_await_input(update, context)
+        return
+    text = message.text.strip()
     user = update.effective_user
     user_id = user.id
 
@@ -3309,16 +3311,25 @@ async def _deferred_youtube_setup(bot):
     invalidate_youtube_auth_probe()
     try:
         status_text, yt_ok = await asyncio.to_thread(get_credentials_status)
+        _healthy, auth_detail = await asyncio.to_thread(_youtube_auth_status)
     except Exception as exc:
         logger.warning("YouTube credential probe failed: %s", exc)
         status_text, yt_ok = f"probe error: {exc}", False
+        auth_detail = str(exc)
     for line in status_text.splitlines():
         logger.info(line)
     if not yt_ok:
-        logger.warning(
-            "YouTube live probe failed after deferred startup. "
-            "Downloads retry with backoff + cookie refresh on bot_check."
-        )
+        if _probe_is_inconclusive(auth_detail):
+            logger.info(
+                "YouTube startup probe inconclusive (%s). "
+                "Cookies not proven bad — downloads will retry on bot_check.",
+                auth_detail,
+            )
+        else:
+            logger.warning(
+                "YouTube live probe failed after deferred startup. "
+                "Downloads retry with backoff + cookie refresh on bot_check."
+            )
     try:
         await _check_and_report_cookie_health(bot)
     except Exception as exc:

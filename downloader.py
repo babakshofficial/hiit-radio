@@ -848,15 +848,35 @@ class MusicDownloader:
 
     def _youtube_subprocess_attempts(self):
         """Auth modes for subprocess YouTube operations (browser preferred)."""
+        attempts = []
         if self.cookies_from_browser:
-            return ["browser"]
+            attempts.append("browser")
         if _cookies_look_authenticated(self.cookies_path):
-            return ["cookiefile"]
-        return ["browser"]
+            if "cookiefile" not in attempts:
+                attempts.append("cookiefile")
+        return attempts or ["browser"]
+
+    def _probe_auth_attempts(self):
+        """Health probe order — cookies.txt first when available (faster than Chrome DB)."""
+        attempts = []
+        if _cookies_look_authenticated(self.cookies_path):
+            attempts.append("cookiefile")
+        if self.cookies_from_browser and "browser" not in attempts:
+            attempts.append("browser")
+        return attempts or ["browser"]
+
+    def _probe_worker_timeout(self, auth):
+        """Subprocess probe timeout; shorter browser wait when cookies.txt can fall back."""
+        custom = os.getenv("YTDLP_PROBE_TIMEOUT", "").strip()
+        if custom.isdigit():
+            return int(custom)
+        if auth == "browser" and _cookies_look_authenticated(self.cookies_path):
+            return 60
+        return 120
 
     def _run_youtube_worker(
         self, url, *, probe=False, output_template="", quality=DEFAULT_QUALITY,
-        cancel_check=None, user_id=None,
+        cancel_check=None, user_id=None, auth_modes=None,
     ):
         """Invoke yt_download_worker.py in an isolated subprocess."""
         _ensure_youtube_session_env()
@@ -878,9 +898,9 @@ class MusicDownloader:
                 if key.upper().startswith("PROXYCHAINS"):
                     env.pop(key, None)
 
-        def _run_once(run_env):
+        def _run_once(run_env, *, auth_modes=None):
             last_err = ""
-            for auth in self._youtube_subprocess_attempts():
+            for auth in auth_modes or self._youtube_subprocess_attempts():
                 retry_delays = _BROWSER_RETRY_DELAYS if auth == "browser" else ()
                 max_attempts = 1 + len(retry_delays)
                 for attempt in range(max_attempts):
@@ -896,7 +916,7 @@ class MusicDownloader:
                     ]
                     if probe:
                         cmd.append("--probe")
-                    timeout = 120 if probe else 600
+                    timeout = self._probe_worker_timeout(auth) if probe else 600
                     if cancel_check and cancel_check():
                         return False, "cancelled"
                     if not _lock_or_cancel(None if probe else cancel_check):
@@ -950,7 +970,7 @@ class MusicDownloader:
                     break
             return False, last_err or "YouTube worker failed"
 
-        ok, detail = _run_once(env)
+        ok, detail = _run_once(env, auth_modes=auth_modes)
         if ok:
             return True, detail
 
@@ -976,7 +996,7 @@ class MusicDownloader:
             logger.info(
                 "YouTube worker format failure under proxychains — retrying without LD_PRELOAD"
             )
-            ok2, detail2 = _run_once(direct_env)
+            ok2, detail2 = _run_once(direct_env, auth_modes=auth_modes)
             if ok2:
                 return True, detail2 + " (direct, no proxychains)"
             return False, detail2 or detail
@@ -1031,8 +1051,11 @@ class MusicDownloader:
                 if url not in urls:
                     urls.append(url)
         last_detail = "subprocess probe failed on all URLs"
+        probe_modes = self._probe_auth_attempts()
         for url in urls:
-            ok, detail = self._run_youtube_worker(url, probe=True)
+            ok, detail = self._run_youtube_worker(
+                url, probe=True, auth_modes=probe_modes,
+            )
             if ok:
                 vid = url.rsplit("=", 1)[-1]
                 return True, f"live probe OK ({detail}; video={vid})"
@@ -1229,9 +1252,9 @@ class MusicDownloader:
             presence = _artist_presence(metadata.artist or "", raw_title, yt_artist)
             artist_sim = max(artist_sim, presence)
 
-            # Catalog links (Apple/Spotify): refuse weak artist matches so DRM
-            # fallbacks cannot land on unrelated same-title uploads.
-            if had_catalog and presence < 55.0 and artist_sim < 55.0:
+            # When artist is known, refuse weak artist matches — stops same-title
+            # wrong uploads (e.g. SoundCloud "She's so Lovely" by another band).
+            if (metadata.artist or "").strip() and presence < 55.0 and artist_sim < 55.0:
                 return None
 
             combined = (title_sim * 0.7) + (artist_sim * 0.3)
