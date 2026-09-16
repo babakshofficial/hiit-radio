@@ -12,12 +12,16 @@ EnvironmentFile=-/home/babak/Desktop/Projects/hiit-radio-bot/.env
 Environment=PYTHONUNBUFFERED=1
 Environment=XDG_CURRENT_DESKTOP=ubuntu:GNOME
 Environment=LANG=en_US.UTF-8
-# DBUS + deno path/install are set in scripts/hiit-radio-stack.sh (Chrome cookies + yt-dlp JS)
-Environment=PATH=/home/babak/.deno/bin:/home/babak/Desktop/Projects/hiit-radio-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin
+# DBUS + deno/node paths are finalized in scripts/hiit-radio-stack.sh
+Environment=PATH=/home/babak/.deno/bin:/home/babak/.nvm/versions/node/v24.20.0/bin:/home/babak/Desktop/Projects/hiit-radio-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin
 
-# Bot + FastAPI :8000 + Next.js :3000
+# Root: apt packages (ffmpeg, python3, curl, …). "+" = full privileges.
+ExecStartPre=+/home/babak/Desktop/Projects/hiit-radio-bot/scripts/install-deps.sh --system
+# User: Deno, Node/nvm, venv+pip, web npm — then start bot/API/web.
 ExecStart=/home/babak/Desktop/Projects/hiit-radio-bot/scripts/hiit-radio-stack.sh
 
+# First boot may apt + pip + npm; later starts are fast/idempotent.
+TimeoutStartSec=900
 KillMode=control-group
 TimeoutStopSec=30
 Restart=on-failure

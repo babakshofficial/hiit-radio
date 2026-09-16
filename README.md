@@ -123,61 +123,37 @@ python main.py
 
 ### VPS / systemd deployment
 
-Your service unit must use the **virtualenv interpreter**, and **all** dependencies must be installed **into that venv** — not with system `pip` or `pip3`.
+On start, the service **bootstraps everything it needs**:
+
+| Phase | What |
+|-------|------|
+| `ExecStartPre=+…/install-deps.sh --system` (root) | `ffmpeg`, `python3`/`venv`/`pip`, `curl`, `git`, build tools, `psmisc`, … |
+| `hiit-radio-stack.sh` → `install-deps.sh --user` | Deno, Node (nvm if needed), `.venv` + `requirements.txt`, `web/` npm |
+
+One-shot install from the project root (rewrites unit paths for this machine/`$USER`, installs deps, enables + restarts):
 
 ```bash
-cd /home/babak/hiit-radio
+# Ensure .env exists first (gitignored)
+cp -n .env.example .env   # then edit BOT_TOKEN, etc.
 
-# Create venv if missing
-python3 -m venv .venv
-
-# Install into the SAME Python systemd runs
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -r requirements.txt
-
-# Verify (must print a path under .venv and no error)
-.venv/bin/python -c "from dotenv import load_dotenv; print('OK')"
+sudo ./scripts/install-systemd.sh
+sudo journalctl -u hiit-radio -f
 ```
 
-Example `/etc/systemd/system/hiit-radio.service` (bot + API + web — see [deploy/hiit-radio.service](deploy/hiit-radio.service)):
-
-```ini
-[Service]
-User=babak
-WorkingDirectory=/home/babak/Desktop/Projects/hiit-radio-bot
-EnvironmentFile=-/home/babak/Desktop/Projects/hiit-radio-bot/.env
-ExecStart=/home/babak/Desktop/Projects/hiit-radio-bot/scripts/hiit-radio-stack.sh
-Restart=on-failure
-RestartSec=10
-```
-
-Ensure `.env` exists on the VPS (it is gitignored — copy it manually):
+Or manually:
 
 ```bash
-ls -la /home/babak/hiit-radio/.env
-grep BOT_TOKEN /home/babak/hiit-radio/.env   # must show BOT_TOKEN=123456:ABC...
-```
-
-Then:
-
-```bash
-sudo cp /home/babak/Desktop/Projects/hiit-radio-bot/deploy/hiit-radio.service /etc/systemd/system/hiit-radio.service
+sudo ./scripts/install-deps.sh --system
+./scripts/install-deps.sh --user
+sudo cp deploy/hiit-radio.service /etc/systemd/system/hiit-radio.service
+# edit User=/WorkingDirectory=/paths if needed, then:
 sudo systemctl daemon-reload
-sudo systemctl enable hiit-radio.service
-sudo systemctl restart hiit-radio.service
-sudo journalctl -u hiit-radio.service -f
+sudo systemctl enable --now hiit-radio
 ```
 
-**Common mistake:** running `pip install python-dotenv` or `pip3 install -r requirements.txt` without activating the venv (or without using `.venv/bin/pip`). That installs packages for system Python while systemd runs `.venv/bin/python`, which causes `ModuleNotFoundError: No module named 'dotenv'`.
+Skip bootstrap in an emergency: `Environment=HIIT_SKIP_DEPS=1` on the unit.
 
-Production (example systemd unit):
-
-```bash
-sudo systemctl start hiit-radio.service
-sudo systemctl restart hiit-radio.service   # after .env or credential changes
-```
-
-Restart the bot whenever you update cookies or environment variables.
+Restart after `.env` or cookie changes: `sudo systemctl restart hiit-radio`.
 
 ## Commands
 

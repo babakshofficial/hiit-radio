@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# systemd helper: bot + API + web in one process group.
+# systemd helper: ensure deps, then run bot + API + web in one process group.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -35,33 +35,16 @@ export XAUTHORITY="${XAUTHORITY:-${HOME}/.Xauthority}"
 export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-ubuntu:GNOME}"
 export LANG="${LANG:-en_US.UTF-8}"
 
-# yt-dlp postprocessing needs ffmpeg/ffprobe (SoundCloud/YouTube extract+mux).
-if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
-  echo "ERROR: ffmpeg/ffprobe not found — install with: sudo apt-get install -y ffmpeg" >&2
-  exit 1
-fi
-
-# yt-dlp needs Deno for YouTube JS challenges — install once if missing.
-if ! command -v deno >/dev/null 2>&1 && [[ ! -x "${HOME}/.deno/bin/deno" ]]; then
-  echo "Deno not found — installing to ~/.deno ..."
-  if ! curl -fsSL https://deno.land/install.sh | sh; then
-    echo "ERROR: Deno install failed (needed for YouTube downloads)" >&2
-    exit 1
-  fi
-fi
-if [[ ! -x "${HOME}/.deno/bin/deno" ]] && ! command -v deno >/dev/null 2>&1; then
-  echo "ERROR: Deno binary not found after install" >&2
-  exit 1
-fi
+# Install / refresh Deno, Node, Python venv, pip, npm (idempotent).
+# System apt packages are handled by ExecStartPre=+…/install-deps.sh --system.
+"$ROOT/scripts/install-deps.sh" --user
 
 # Prefer nvm Node when present (Freestyle / headless VMs often lack /usr/bin/node).
 if [[ -z "${NODE_BIN:-}" ]]; then
   if command -v node >/dev/null 2>&1; then
     NODE_BIN="$(command -v node)"
-  elif [[ -x /usr/local/nvm/versions/node/v24.20.0/bin/node ]]; then
-    NODE_BIN=/usr/local/nvm/versions/node/v24.20.0/bin/node
   else
-    NODE_BIN="$(ls -1d /usr/local/nvm/versions/node/*/bin/node 2>/dev/null | sort -V | tail -1 || true)"
+    NODE_BIN="$(ls -1d "${HOME}/.nvm/versions/node"/v*/bin/node /usr/local/nvm/versions/node/*/bin/node 2>/dev/null | sort -V | tail -1 || true)"
   fi
 fi
 if [[ -n "${NODE_BIN:-}" ]]; then
@@ -90,17 +73,17 @@ pids+=("$!")
 
 NEXT_BIN="$ROOT/web/node_modules/next/dist/bin/next"
 if [[ ! -f "$NEXT_BIN" ]]; then
-  echo "ERROR: Next.js not installed — run: (cd web && npm install)" >&2
+  echo "ERROR: Next.js not installed after bootstrap" >&2
   exit 1
 fi
 if [[ -z "${NODE_BIN:-}" || ! -x "$NODE_BIN" ]]; then
-  echo "ERROR: node binary not found (install Node or set NODE_BIN)" >&2
+  echo "ERROR: node binary not found after bootstrap" >&2
   exit 1
 fi
 # Prefer production server when a build exists; otherwise webpack-dev (more
 # reliable than Turbopack on some VMs). Track the PID that owns :3000 — the
 # next CLI can spawn start-server and exit.
-if [[ -d "$ROOT/web/.next/BUILD_ID" ]] || [[ -f "$ROOT/web/.next/BUILD_ID" ]]; then
+if [[ -f "$ROOT/web/.next/BUILD_ID" ]]; then
   (cd "$ROOT/web" && exec "$NODE_BIN" "$NEXT_BIN" start --hostname 127.0.0.1 --port 3000) &
 else
   (cd "$ROOT/web" && exec "$NODE_BIN" "$NEXT_BIN" dev --hostname 127.0.0.1 --port 3000 --webpack) &
