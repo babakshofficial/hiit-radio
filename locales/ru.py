@@ -517,7 +517,16 @@ STRINGS = {
     ),
     "changelog_admin_preview": "Превью заметок:\n{preview}",
     "changelog_btn_send": "✅ Отправить changelog",
+    "changelog_btn_edit": "✏️ Изменить заметки",
     "changelog_btn_skip": "⏭ Пропустить",
+    "changelog_edit_prompt": (
+        "Отправь обновлённые заметки changelog следующим сообщением.\n"
+        "Английский подойдёт — LLM локализует для каждого пользователя.\n"
+        "Твоё сообщение полностью заменит ожидающие заметки."
+    ),
+    "changelog_edit_saved": "✅ Заметки обновлены. Отправь, измени снова или пропусти.",
+    "changelog_edit_empty": "Пустое сообщение — отправь текст заметок, чтобы заменить changelog.",
+    "changelog_edit_failed": "Не удалось сохранить заметки. Попробуй ещё раз.",
     "changelog_generating": "⏳ Готовлю локализованные changelog…",
     "changelog_done": "Рассылка changelog завершена: отправлено={sent}, ошибок={failed}",
     "changelog_skipped": "Changelog пропущен. Заметки архивированы.",

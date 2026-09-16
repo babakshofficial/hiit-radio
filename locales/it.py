@@ -523,7 +523,16 @@ STRINGS = {
     ),
     "changelog_admin_preview": "Anteprima note:\n{preview}",
     "changelog_btn_send": "✅ Invia changelog",
+    "changelog_btn_edit": "✏️ Modifica note",
     "changelog_btn_skip": "⏭ Salta",
+    "changelog_edit_prompt": (
+        "Invia le note di changelog aggiornate nel prossimo messaggio.\n"
+        "L’inglese va bene — l’LLM localizzerà per ogni utente.\n"
+        "Il tuo messaggio sostituisce completamente le note in attesa."
+    ),
+    "changelog_edit_saved": "✅ Note aggiornate. Invia, modifica di nuovo o salta.",
+    "changelog_edit_empty": "Messaggio vuoto — invia il testo delle note per sostituire il changelog.",
+    "changelog_edit_failed": "Impossibile salvare le note. Riprova.",
     "changelog_generating": "⏳ Generazione changelog localizzati…",
     "changelog_done": "Invio changelog terminato: inviati={sent}, falliti={failed}",
     "changelog_skipped": "Changelog saltato. Le note in attesa sono state archiviate.",

@@ -12,7 +12,7 @@ import difflib
 from mutagen.mp3 import MP3 as MutagenMP3
 from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC, USLT, SYLT, TXXX
 import requests
-from PIL import Image, ImageFilter, ImageChops
+from PIL import Image, ImageDraw, ImageFilter, ImageChops
 import io
 
 from metadata import score_query_coverage
@@ -1910,7 +1910,7 @@ class MusicDownloader:
             return False
 
     def file_has_watermark(self, file_path):
-        """True when APIC uses the current shrink + bottom-right logo layout."""
+        """True when APIC uses the unified cover + logo layout."""
         try:
             audio = MutagenMP3(file_path, ID3=ID3)
             if not audio.tags or not audio.tags.getall("APIC"):
@@ -1923,9 +1923,7 @@ class MusicDownloader:
                             style = str(frame.text[0]).lower()
                     except Exception:
                         style = str(frame).lower()
-                    # "shrink" = current single-margin layout. Older itunes/youtube
-                    # tags used 30% pad on *each* side (looked double-shrunk).
-                    return style == "shrink"
+                    return style == "rounded"
             return False
         except Exception:
             return False
@@ -1994,12 +1992,11 @@ class MusicDownloader:
         except Exception as e:
             logger.debug(f"sync_metadata_from_file skipped: {e}")
 
-    def rewatermark_from_file(self, file_path, default_style="shrink"):
-        """Re-embed APIC with a freshly-drawn logo stroke.
+    def rewatermark_from_file(self, file_path, default_style="rounded"):
+        """Re-embed APIC with a freshly-drawn logo stroke (25% bottom-right).
 
         IMPORTANT: we only repaint the logo region on the already-processed
-        artwork. This avoids re-cropping/re-pasting which would duplicate the
-        logo and make strokes look ridiculous.
+        artwork. This avoids re-cropping which would look wrong.
         """
         if not file_path or not os.path.exists(file_path):
             return False
@@ -2015,16 +2012,6 @@ class MusicDownloader:
             if not original_artwork:
                 return False
 
-            style = default_style
-            for frame in audio.tags.getall("TXXX"):
-                if getattr(frame, "desc", "") == "HIIT_WATERMARK_STYLE":
-                    try:
-                        if getattr(frame, "text", None):
-                            style = str(frame.text[0])
-                    except Exception:
-                        pass
-                    break
-
             if self._logo_base is None:
                 return False
             logo = self._make_dynamic_logo()
@@ -2036,16 +2023,9 @@ class MusicDownloader:
                 img = img.convert("RGBA")
 
             w, h = img.size
-            # Match logo sizing from _process_itunes_query_artwork (30% of canvas).
-            if style in {"spotify", "apple"}:
-                logo_w = int(w * 0.25)
-            else:
-                logo_w = int(w * 0.30)
-
+            logo_w = max(1, int(w * 0.25))
             base_w, base_h = self._logo_base.size
-            logo_h = int(logo_w * base_h / max(base_w, 1))
-            logo_w = max(1, logo_w)
-            logo_h = max(1, logo_h)
+            logo_h = max(1, int(logo_w * base_h / max(base_w, 1)))
 
             logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
             x = max(0, w - logo_w - 20)
@@ -2070,7 +2050,7 @@ class MusicDownloader:
             )
             audio.tags.delall("TXXX:HIIT_WATERMARK_STYLE")
             audio.tags.add(
-                TXXX(encoding=3, desc="HIIT_WATERMARK_STYLE", text=[style])
+                TXXX(encoding=3, desc="HIIT_WATERMARK_STYLE", text=["rounded"])
             )
             audio.save(v2_version=3, v1=1)
             return True
@@ -2173,7 +2153,7 @@ class MusicDownloader:
             logger.error(f"Metadata error: {e}", exc_info=True)
 
     def ensure_watermarked_cover(self, file_path, metadata):
-        """Embed watermarked APIC on an existing MP3 (once; never re-shrink)."""
+        """Embed watermarked APIC on an existing MP3 if missing/outdated."""
         if not file_path or not os.path.exists(file_path):
             return False
         if self.file_has_watermark(file_path):
@@ -2219,11 +2199,8 @@ class MusicDownloader:
             art = results[0].get("artworkUrl100") or ""
             if not art:
                 return None
-            return (
-                art.replace("100x100bb", "3000x3000bb")
-                .replace("100x100", "3000x3000")
-                .replace("600x600bb", "3000x3000bb")
-            )
+            from metadata import _normalize_apple_artwork_url
+            return _normalize_apple_artwork_url(art)
         except Exception as exc:
             logger.debug("iTunes artwork fallback failed: %s", exc)
             return None
@@ -2232,7 +2209,11 @@ class MusicDownloader:
         urls = []
         primary = getattr(metadata, "artwork_url", None)
         if primary:
-            urls.append(primary)
+            from metadata import _normalize_apple_artwork_url
+            normalized = _normalize_apple_artwork_url(primary)
+            urls.append(normalized)
+            if primary != normalized:
+                urls.append(primary)
         fallback = self._itunes_artwork_url(metadata.title, metadata.artist)
         if fallback and fallback not in urls:
             urls.append(fallback)
@@ -2251,15 +2232,26 @@ class MusicDownloader:
                         art_url[:80],
                     )
                     continue
-                style = "shrink"
-                processed = self._process_itunes_query_artwork(response.content)
+                # Skip wide social banners (cover already inset) — try next URL.
+                try:
+                    probe = Image.open(io.BytesIO(response.content))
+                    pw, ph = probe.size
+                    if pw > 0 and ph > 0 and (pw / ph > 1.25 or ph / pw > 1.25):
+                        logger.info(
+                            "Skipping non-square artwork %sx%s (%s)",
+                            pw, ph, art_url[:80],
+                        )
+                        continue
+                except Exception:
+                    pass
+                processed = self._process_cover_artwork(response.content)
                 if not processed:
                     logger.warning("Artwork processing returned None")
                     continue
                 audio.tags.delall("APIC")
                 audio.tags.delall("TXXX:HIIT_WATERMARK_STYLE")
                 audio.tags.add(
-                    TXXX(encoding=3, desc="HIIT_WATERMARK_STYLE", text=[style])
+                    TXXX(encoding=3, desc="HIIT_WATERMARK_STYLE", text=["rounded"])
                 )
                 audio.tags.add(APIC(
                     encoding=3,
@@ -2268,111 +2260,79 @@ class MusicDownloader:
                     desc="Cover",
                     data=processed,
                 ))
-                logger.info("Embedded %s artwork with HiiT Radio logo", style)
+                logger.info("Embedded cover artwork with HiiT Radio logo")
                 return True
             except Exception as exc:
                 logger.error("Artwork error for %s: %s", art_url[:80], exc)
         return False
 
-    def _process_apple_music_artwork(self, original_artwork_bytes):
-        """Apple Music & Spotify: center-crop to square, add logo (25% of size). NO white border."""
+    @staticmethod
+    def _round_corners(img, radius):
+        """Return RGBA image with soft rounded corners (transparent outside)."""
+        img = img.convert("RGBA")
+        w, h = img.size
+        radius = max(1, min(int(radius), w // 2, h // 2))
+        mask = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, w, h), radius=radius, fill=255)
+        out = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        out.paste(img, (0, 0), mask)
+        return out
+
+    def _process_cover_artwork(self, original_artwork_bytes):
+        """Unified cover pipeline for every source.
+
+        1. Center-crop to square (no distortion)
+        2. Slight rounded corners on the art
+        3. White border: pad = 30% of min dimension on each side
+        4. Resize bordered canvas to 600x600 (LANCZOS)
+        5. Paste hiit-radio.png at 25% width, bottom-right, 20px margin
+           (logo already has a thin white stroke via ``_make_dynamic_logo``)
+        6. JPEG quality 95
+        """
         try:
             img = Image.open(io.BytesIO(original_artwork_bytes))
-            if img.mode != 'RGB':
+            if img.mode != "RGB":
                 img = img.convert("RGB")
 
-            # 1. Center-crop to square
             w, h = img.size
             min_dim = min(w, h)
             left = (w - min_dim) // 2
             top = (h - min_dim) // 2
             img = img.crop((left, top, left + min_dim, top + min_dim))
 
-            # 2. Resize to 600x600
-            target_size = 600
-            img = img.resize((target_size, target_size), Image.Resampling.LANCZOS)
+            # Slight curve (~6% of art edge) before the white margin.
+            img = self._round_corners(img, radius=max(8, int(min_dim * 0.06)))
 
-            # 3. Paste logo (25% of 600 = 150px)
-            logo = self._make_dynamic_logo()
-            if not logo or logo.width <= 0 or logo.height <= 0:
-                logger.warning("hiit-radio.png NOT FOUND (dynamic logo unavailable)")
-                out = io.BytesIO()
-                img.save(out, format="JPEG", quality=95)
-                return out.getvalue()
-            logo_w = int(target_size * 0.25)
-            logo_h = int(logo_w * logo.height / logo.width)
-            logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
-
-            x = max(0, target_size - logo_w - 20)
-            y = max(0, target_size - logo_h - 20)
-
-            img.paste(logo, (x, y), logo)
-
-            out = io.BytesIO()
-            img.save(out, format="JPEG", quality=95)
-            logger.debug(f"Logo added at ({x},{y}) on {target_size}x{target_size}")
-            return out.getvalue()
-
-        except Exception as e:
-            logger.error(f"Apple/Spotify artwork failed: {e}", exc_info=True)
-            try:
-                img = Image.open(io.BytesIO(original_artwork_bytes))
-                if img.mode != "RGB":
-                    img = img.convert("RGB")
-                out = io.BytesIO()
-                img.save(out, format="JPEG", quality=95)
-                return out.getvalue()
-            except Exception:
-                return None
-
-    def _process_itunes_query_artwork(self, original_artwork_bytes):
-        """Square crop + single white margin (art ~77% of canvas) + logo."""
-        try:
-            img = Image.open(io.BytesIO(original_artwork_bytes))
-            if img.mode != 'RGB':
-                img = img.convert("RGB")
-
-            # 1. Center-crop to square
-            w, h = img.size
-            min_dim = min(w, h)
-            left = (w - min_dim) // 2
-            top = (h - min_dim) // 2
-            img = img.crop((left, top, left + min_dim, top + min_dim))
-
-            # 2. One white margin only — 15% of art size per side (~77% art).
-            # Older code used 30% per side (~62% art), which looked double-shrunk.
-            pad = int(min_dim * 0.15)
+            pad = int(min_dim * 0.3)
             new_size = min_dim + 2 * pad
             bordered = Image.new("RGB", (new_size, new_size), "white")
-            bordered.paste(img, (pad, pad))
+            bordered.paste(img, (pad, pad), img)
 
-            # 3. Resize to 600x600
             target_size = 600
             bordered = bordered.resize((target_size, target_size), Image.Resampling.LANCZOS)
 
-            # 4. Paste logo (30% of 600 = 180px)
             logo = self._make_dynamic_logo()
             if not logo or logo.width <= 0 or logo.height <= 0:
                 logger.warning("hiit-radio.png NOT FOUND (dynamic logo unavailable)")
                 out = io.BytesIO()
                 bordered.save(out, format="JPEG", quality=95)
                 return out.getvalue()
-            logo_w = int(target_size * 0.3)
+
+            logo_w = int(target_size * 0.25)
             logo_h = int(logo_w * logo.height / logo.width)
             logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
 
             x = max(0, target_size - logo_w - 20)
             y = max(0, target_size - logo_h - 20)
-
             bordered.paste(logo, (x, y), logo)
 
             out = io.BytesIO()
             bordered.save(out, format="JPEG", quality=95)
-            logger.debug("[shrink] Logo added with white border")
+            logger.debug("Logo added at (%s,%s) on %sx%s", x, y, target_size, target_size)
             return out.getvalue()
 
         except Exception as e:
-            logger.error(f"iTunes artwork failed: {e}", exc_info=True)
+            logger.error(f"Cover artwork failed: {e}", exc_info=True)
             try:
                 img = Image.open(io.BytesIO(original_artwork_bytes))
                 if img.mode != "RGB":
@@ -2382,6 +2342,13 @@ class MusicDownloader:
                 return out.getvalue()
             except Exception:
                 return None
+
+    # Back-compat aliases used by older call sites / artwork button fallback.
+    def _process_apple_music_artwork(self, original_artwork_bytes):
+        return self._process_cover_artwork(original_artwork_bytes)
+
+    def _process_itunes_query_artwork(self, original_artwork_bytes):
+        return self._process_cover_artwork(original_artwork_bytes)
 
     async def cleanup(self, file_path):
         try:

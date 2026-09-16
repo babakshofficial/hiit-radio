@@ -485,11 +485,20 @@ STRINGS = {
     "changelog_header": "✨ What’s new in HiiT Radio",
     "changelog_admin_prompt": (
         "Pending changelog notes were found after restart.\n"
-        "Broadcast a localized “What’s new” message to all users?"
+        "You can Edit the notes, then Send a localized “What’s new” to all users — or Skip."
     ),
     "changelog_admin_preview": "Notes preview:\n{preview}",
     "changelog_btn_send": "✅ Send changelog",
+    "changelog_btn_edit": "✏️ Edit notes",
     "changelog_btn_skip": "⏭ Skip",
+    "changelog_edit_prompt": (
+        "Send the updated changelog notes in your next message.\n"
+        "English is fine — the LLM will localize for each user.\n"
+        "Your message replaces the pending notes entirely."
+    ),
+    "changelog_edit_saved": "✅ Pending notes updated. Review and Send, Edit again, or Skip.",
+    "changelog_edit_empty": "Empty message — send the notes text to replace the pending changelog.",
+    "changelog_edit_failed": "Could not save the pending notes. Try again.",
     "changelog_generating": "⏳ Generating localized changelogs…",
     "changelog_done": "Changelog broadcast finished: sent={sent}, failed={failed}",
     "changelog_skipped": "Changelog skipped. Pending notes were archived.",

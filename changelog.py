@@ -85,6 +85,19 @@ def _pending_header() -> str:
     )
 
 
+def write_pending(notes: str) -> bool:
+    """Replace pending notes body (keeps the standard HTML header)."""
+    body = (notes or "").strip()
+    if not body:
+        return False
+    try:
+        PENDING_PATH.write_text(_pending_header() + "\n" + body + "\n", encoding="utf-8")
+        return True
+    except OSError as e:
+        logger.error("Could not write pending changelog: %s", e)
+        return False
+
+
 def archive_and_clear(notes: str | None = None, *, reason: str = "cleared") -> None:
     body = notes if notes is not None else read_pending()
     # Prefer archiving the stripped notes we actually considered; if empty, nothing to do.
@@ -132,10 +145,25 @@ def _keyboard(*, include_send: bool):
         rows.append([
             InlineKeyboardButton(msg.changelog_btn_send(), callback_data="changelog:send"),
         ])
+        rows.append([
+            InlineKeyboardButton(msg.changelog_btn_edit(), callback_data="changelog:edit"),
+        ])
     rows.append([
         InlineKeyboardButton(msg.changelog_btn_skip(), callback_data="changelog:skip"),
     ])
     return InlineKeyboardMarkup(rows)
+
+
+def _prompt_text(notes: str, *, llm_ok: bool) -> str:
+    if not llm_ok:
+        return (
+            f"{msg.changelog_llm_unavailable()}\n\n"
+            f"{msg.changelog_admin_preview(_preview(notes))}"
+        )
+    return (
+        f"{msg.changelog_admin_prompt()}\n\n"
+        f"{msg.changelog_admin_preview(_preview(notes))}"
+    )
 
 
 async def prompt_admin(bot) -> None:
@@ -148,18 +176,9 @@ async def prompt_admin(bot) -> None:
 
     token = _admin_lang_token()
     try:
-        if not is_configured():
-            text = (
-                f"{msg.changelog_llm_unavailable()}\n\n"
-                f"{msg.changelog_admin_preview(_preview(notes))}"
-            )
-            kb = _keyboard(include_send=False)
-        else:
-            text = (
-                f"{msg.changelog_admin_prompt()}\n\n"
-                f"{msg.changelog_admin_preview(_preview(notes))}"
-            )
-            kb = _keyboard(include_send=True)
+        llm_ok = is_configured()
+        text = _prompt_text(notes, llm_ok=llm_ok)
+        kb = _keyboard(include_send=llm_ok)
     finally:
         msg.reset_lang(token)
 
@@ -167,6 +186,22 @@ async def prompt_admin(bot) -> None:
         await bot.send_message(chat_id=int(_admin_id), text=text, reply_markup=kb)
     except Exception as e:
         logger.error("Could not DM admin changelog prompt: %s", e)
+
+
+async def _reprompt_admin(bot, chat_id: int) -> None:
+    notes = read_pending()
+    token = _admin_lang_token()
+    try:
+        if not notes:
+            text = msg.changelog_empty()
+            kb = None
+        else:
+            llm_ok = is_configured()
+            text = _prompt_text(notes, llm_ok=llm_ok)
+            kb = _keyboard(include_send=llm_ok)
+    finally:
+        msg.reset_lang(token)
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
 
 
 def _user_lang(user_id) -> str:
@@ -248,8 +283,29 @@ async def broadcast(bot, *, admin_user=None):
         _busy = False
 
 
+async def handle_edit_text(update, context) -> bool:
+    """Handle admin's replacement notes after ``changelog:edit``. Returns True if handled."""
+    user = update.effective_user
+    if not user or str(user.id) != str(_admin_id):
+        return False
+    text = (update.message.text or "").strip() if update.message else ""
+    token = _admin_lang_token()
+    try:
+        if not text:
+            await update.message.reply_text(msg.changelog_edit_empty())
+            return True
+        if not write_pending(text):
+            await update.message.reply_text(msg.changelog_edit_failed())
+            return True
+        await update.message.reply_text(msg.changelog_edit_saved())
+    finally:
+        msg.reset_lang(token)
+    await _reprompt_admin(context.bot, user.id)
+    return True
+
+
 async def handle_callback(update, context) -> bool:
-    """Handle ``changelog:send`` / ``changelog:skip``. Returns True if handled."""
+    """Handle ``changelog:send`` / ``changelog:edit`` / ``changelog:skip``."""
     query = update.callback_query
     data = (query.data or "") if query else ""
     if not data.startswith("changelog:"):
@@ -279,6 +335,23 @@ async def handle_callback(update, context) -> bool:
                 await query.edit_message_text(text)
             except Exception:
                 await context.bot.send_message(chat_id=user.id, text=text)
+            return True
+
+        if action == "edit":
+            # Ask admin for replacement notes; next text message is captured.
+            context.user_data["await_input"] = {
+                "kind": "changelog_edit",
+                "ts": time.time(),
+            }
+            try:
+                await query.answer()
+            except Exception:
+                pass
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await context.bot.send_message(chat_id=user.id, text=msg.changelog_edit_prompt())
             return True
 
         if action != "send":

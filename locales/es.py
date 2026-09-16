@@ -519,7 +519,16 @@ STRINGS = {
     ),
     "changelog_admin_preview": "Vista previa de las notas:\n{preview}",
     "changelog_btn_send": "✅ Enviar changelog",
+    "changelog_btn_edit": "✏️ Editar notas",
     "changelog_btn_skip": "⏭ Omitir",
+    "changelog_edit_prompt": (
+        "Envía las notas de changelog actualizadas en tu próximo mensaje.\n"
+        "El inglés está bien — el LLM localizará para cada usuario.\n"
+        "Tu mensaje reemplaza por completo las notas pendientes."
+    ),
+    "changelog_edit_saved": "✅ Notas actualizadas. Envía, edita de nuevo u omite.",
+    "changelog_edit_empty": "Mensaje vacío — envía el texto de las notas para reemplazar el changelog.",
+    "changelog_edit_failed": "No se pudieron guardar las notas. Inténtalo de nuevo.",
     "changelog_generating": "⏳ Generando changelogs localizados…",
     "changelog_done": "Difusión del changelog terminada: enviados={sent}, fallidos={failed}",
     "changelog_skipped": "Changelog omitido. Las notas pendientes se archivaron.",

@@ -25,6 +25,38 @@ _TITLE_HOOKS = frozenset({
 })
 
 
+def _normalize_apple_artwork_url(url):
+    """Rewrite Apple/mzstatic art to square album cover (not social banners).
+
+    og:image often points at ``1200x630wp`` banners where the cover is already
+    inset on white. Using that as input then applying our shrink watermark
+    double-shrinks the art. Prefer ``3000x3000bb`` instead.
+    """
+    if not url:
+        return url
+    u = str(url).strip()
+    if "mzstatic.com" not in u.lower():
+        # Still upgrade common small bb sizes from iTunes API.
+        return (
+            u.replace("100x100bb", "3000x3000bb")
+            .replace("100x100", "3000x3000")
+            .replace("200x200bb", "3000x3000bb")
+            .replace("200x200", "3000x3000")
+            .replace("600x600bb", "3000x3000bb")
+        )
+    base = u.split("?", 1)[0]
+    rewritten = re.sub(
+        r"/(\d+)x(\d+)[a-zA-Z0-9._-]*$",
+        "/3000x3000bb.jpg",
+        base,
+    )
+    return rewritten if rewritten != base else (
+        base.replace("100x100bb", "3000x3000bb")
+        .replace("200x200bb", "3000x3000bb")
+        .replace("600x600bb", "3000x3000bb")
+    )
+
+
 def score_query_coverage(query, title, artist):
     """Symmetric coverage of query tokens in title+artist (0-100).
 
@@ -600,10 +632,9 @@ class AppleMusicMetadata:
                     
                     if og_image:
                         image_url = og_image['content']
-                        if '200x200bb' in image_url:
-                            image_url = image_url.replace('200x200bb', '3000x3000bb')
-                        elif '200x200' in image_url:
-                            image_url = image_url.replace('200x200', '3000x3000')
+                        # Apple og:image is often a wide 1200x630wp banner with the
+                        # cover already inset — rewrite to square album art.
+                        image_url = _normalize_apple_artwork_url(image_url)
                         self.artwork_url = image_url
 
                     if og_audio:
@@ -705,10 +736,7 @@ class AppleMusicMetadata:
             meta.duration = float(ms) / 1000.0
         artwork = track.get("artworkUrl100", "")
         if artwork:
-            high_res = artwork.replace("100x100bb", "3000x3000bb")
-            high_res = high_res.replace("100x100", "3000x3000")
-            high_res = high_res.replace("600x600bb", "3000x3000bb")
-            meta.artwork_url = high_res
+            meta.artwork_url = _normalize_apple_artwork_url(artwork)
         meta.type = "search"
         meta.id = str(track.get("trackId", abs(hash(query))))
         return meta
@@ -1274,7 +1302,7 @@ class TrackMetadata:
                         meta.duration = float(ms) / 1000.0
                     artwork = item.get('artworkUrl100', '')
                     if artwork:
-                        meta.artwork_url = artwork.replace('100x100bb', '3000x3000bb')
+                        meta.artwork_url = _normalize_apple_artwork_url(artwork)
                     tracks.append(meta)
                 return source.title or source.album, tracks
             if source.type == 'playlist':

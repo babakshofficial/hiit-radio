@@ -889,8 +889,28 @@ def changelog_btn_send():
     return t("changelog_btn_send")
 
 
+def changelog_btn_edit():
+    return t("changelog_btn_edit")
+
+
 def changelog_btn_skip():
     return t("changelog_btn_skip")
+
+
+def changelog_edit_prompt():
+    return t("changelog_edit_prompt")
+
+
+def changelog_edit_saved():
+    return t("changelog_edit_saved")
+
+
+def changelog_edit_empty():
+    return t("changelog_edit_empty")
+
+
+def changelog_edit_failed():
+    return t("changelog_edit_failed")
 
 
 def changelog_generating():

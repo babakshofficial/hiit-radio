@@ -271,7 +271,7 @@ async def _build_watermarked_artwork(title, artist):
         )
         if response.status_code != 200 or not response.content:
             return None
-        return downloader._process_itunes_query_artwork(response.content)
+        return downloader._process_cover_artwork(response.content)
     except Exception as e:
         logger.debug("Artwork fallback failed: %s", e)
         return None
@@ -519,6 +519,8 @@ async def consume_await_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await follow_command(update, context)
     elif kind == "support":
         await support_command(update, context)
+    elif kind == "changelog_edit":
+        await changelog.handle_edit_text(update, context)
     else:
         return False
     return True
