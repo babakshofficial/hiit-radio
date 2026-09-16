@@ -1,4 +1,5 @@
 import asyncio
+import fcntl
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ from telegram import (
     MessageOriginChannel,
     MessageOriginChat,
 )
+from telegram.error import Conflict
 from telegram.ext import (
     ApplicationBuilder,
     ApplicationHandlerStop,
@@ -107,7 +109,45 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
+# httpx logs full Telegram URLs (including bot token) at INFO — keep that out of journals.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
+
+_INSTANCE_LOCK_FH = None
+
+
+def _acquire_singleton_lock() -> None:
+    """Fail fast if another main.py is already polling this checkout."""
+    global _INSTANCE_LOCK_FH
+    lock_path = _BASE_DIR / ".hiit-radio-bot.lock"
+    fh = open(lock_path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        logger.error(
+            "Another hiit-radio bot instance is already running (lock %s). "
+            "Stop the other process — Telegram allows only one getUpdates poller per token.",
+            lock_path,
+        )
+        sys.exit(1)
+    fh.seek(0)
+    fh.truncate()
+    fh.write(f"pid={os.getpid()}\n")
+    fh.flush()
+    _INSTANCE_LOCK_FH = fh
+
+
+async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    err = context.error
+    if isinstance(err, Conflict):
+        logger.error(
+            "Telegram Conflict: another getUpdates poller is using this bot token. "
+            "Keep only one instance running (laptop systemd vs Freestyle VM)."
+        )
+        return
+    logger.exception("Unhandled bot error: %s", err)
 
 downloader = MusicDownloader()
 user_manager = UserManager()
@@ -4127,6 +4167,8 @@ def main():
         )
         sys.exit(1)
 
+    _acquire_singleton_lock()
+
     application = (
         ApplicationBuilder()
         .token(BOT_TOKEN)
@@ -4140,6 +4182,7 @@ def main():
         .post_shutdown(_on_shutdown)
     )
     application = application.build()
+    application.add_error_handler(_error_handler)
 
     # PTB runs at most one handler per group. Catch-all TypeHandlers must not share
     # a group with /stop, or cancel_command never runs.
