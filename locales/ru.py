@@ -459,6 +459,7 @@ STRINGS = {
     "admin_export": "📤 Экспорт",
     "admin_viplog": "🧪 VIP-лог",
     "admin_broadcast": "📣 Рассылка",
+    "admin_changelog": "✨ Changelog",
     "admin_channelid": "🆔 ID канала",
     "admin_grant": "➕ Выдать",
     "admin_topup": "💰 Пополнить",
@@ -555,6 +556,18 @@ STRINGS = {
     ),
     "changelog_busy": "Рассылка changelog уже идёт.",
     "changelog_forbidden": "Только для админа.",
+    "changelog_btn_manual_new": "✍️ Новый changelog",
+    "changelog_manual_intro": (
+        "Нет заметок в CHANGELOG_PENDING.md.\n"
+        "Нажми Новый changelog или добавь заметки в файл repo и перезапусти бота."
+    ),
+    "changelog_manual_prompt": (
+        "Отправь заметки changelog следующим сообщением.\n"
+        "Английский подойдёт — LLM локализует для каждого языка.\n"
+        "Перед отправкой проверишь карточку для каждого языка."
+    ),
+    "changelog_manual_empty": "Пустое сообщение — отправь текст changelog.",
+    "changelog_pending_admin_header": "Changelog в очереди (CHANGELOG_PENDING.md):",
 
     # --- language selection ---
     "lang_choose": "🌐 Выбери язык бота:",

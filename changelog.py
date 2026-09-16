@@ -96,14 +96,38 @@ def write_pending(notes: str) -> bool:
         return False
 
 
-def archive_and_clear(notes: str | None = None, *, reason: str = "cleared") -> None:
+def append_pending(bullet: str) -> bool:
+    """Append one user-facing bullet to the pending changelog (creates dated section)."""
+    line = (bullet or "").strip().lstrip("-•").strip()
+    if not line:
+        return False
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    existing = read_pending()
+    section = f"## {today}"
+    if existing:
+        if section in existing:
+            body = f"{existing.rstrip()}\n- {line}"
+        else:
+            body = f"{existing.rstrip()}\n\n{section}\n- {line}"
+    else:
+        body = f"{section}\n- {line}"
+    return write_pending(body)
+
+
+def archive_and_clear(
+    notes: str | None = None,
+    *,
+    reason: str = "cleared",
+    clear_pending: bool = True,
+) -> None:
     body = notes if notes is not None else read_pending()
     if not body:
-        try:
-            if PENDING_PATH.exists():
-                PENDING_PATH.write_text(_pending_header(), encoding="utf-8")
-        except OSError as e:
-            logger.warning("Could not reset empty pending changelog: %s", e)
+        if clear_pending:
+            try:
+                if PENDING_PATH.exists():
+                    PENDING_PATH.write_text(_pending_header(), encoding="utf-8")
+            except OSError as e:
+                logger.warning("Could not reset empty pending changelog: %s", e)
         return
     stamp = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
     block = f"\n## {stamp} ({reason})\n\n{body.strip()}\n"
@@ -112,6 +136,8 @@ def archive_and_clear(notes: str | None = None, *, reason: str = "cleared") -> N
             f.write(block)
     except OSError as e:
         logger.error("Could not append changelog archive: %s", e)
+        return
+    if not clear_pending:
         return
     try:
         PENDING_PATH.write_text(_pending_header(), encoding="utf-8")
@@ -415,7 +441,11 @@ async def _maybe_finish_review(bot, context, review: dict, admin_user=None) -> b
         elif st == "skipped":
             skipped_langs += 1
 
-    archive_and_clear(notes, reason="sent")
+    archive_and_clear(
+        notes,
+        reason="manual" if review.get("manual") else "sent",
+        clear_pending=not review.get("manual"),
+    )
     _clear_review(context)
 
     chat_id = admin_user.id if admin_user else int(_admin_id)
@@ -452,10 +482,18 @@ async def _post_lang_cards(bot, chat_id: int, review: dict) -> None:
             logger.error("Could not post changelog card for %s: %s", lang, e)
 
 
-async def _start_review(bot, context, user, query) -> str | None:
-    """Generate per-language previews. Returns error message key or None on success."""
+async def _start_review(
+    bot,
+    context,
+    user,
+    query=None,
+    *,
+    notes: str | None = None,
+    manual: bool = False,
+) -> str | None:
+    """Generate per-language previews. Returns error key or None on success."""
     global _busy
-    notes = read_pending()
+    notes = (notes or read_pending()).strip()
     if not notes:
         return "empty"
     if not is_configured():
@@ -482,6 +520,7 @@ async def _start_review(bot, context, user, query) -> str | None:
             "status": {lang: "pending" for lang in active},
             "send_stats": {},
             "card_msg_ids": {},
+            "manual": manual,
         }
         _set_review(context, review)
 
@@ -490,9 +529,12 @@ async def _start_review(bot, context, user, query) -> str | None:
             status_text = msg.changelog_review_started()
         finally:
             msg.reset_lang(token)
-        try:
-            await query.edit_message_text(status_text)
-        except Exception:
+        if query is not None:
+            try:
+                await query.edit_message_text(status_text)
+            except Exception:
+                await bot.send_message(chat_id=user.id, text=status_text)
+        else:
             await bot.send_message(chat_id=user.id, text=status_text)
 
         await _post_lang_cards(bot, user.id, review)
@@ -500,6 +542,114 @@ async def _start_review(bot, context, user, query) -> str | None:
         return None
     finally:
         _busy = False
+
+
+async def admin_changelog_menu(bot, chat_id: int, context) -> None:
+    """Admin panel entry: show pending notes or start a manual changelog."""
+    _clear_review(context)
+    notes = read_pending()
+    token = _admin_lang_token()
+    try:
+        rows = [
+            [
+                InlineKeyboardButton(
+                    msg.changelog_btn_manual_new(),
+                    callback_data="changelog:manual",
+                ),
+            ],
+        ]
+        if notes:
+            llm_ok = is_configured()
+            text = (
+                f"{msg.changelog_pending_admin_header()}\n\n"
+                f"{_prompt_text(notes, llm_ok=llm_ok)}"
+            )
+            if llm_ok:
+                rows.insert(0, [
+                    InlineKeyboardButton(
+                        msg.changelog_btn_send(),
+                        callback_data="changelog:send",
+                    ),
+                ])
+                rows.insert(1, [
+                    InlineKeyboardButton(
+                        msg.changelog_btn_edit(),
+                        callback_data="changelog:edit",
+                    ),
+                    InlineKeyboardButton(
+                        msg.changelog_btn_skip(),
+                        callback_data="changelog:skip",
+                    ),
+                ])
+            else:
+                rows.insert(0, [
+                    InlineKeyboardButton(
+                        msg.changelog_btn_skip(),
+                        callback_data="changelog:skip",
+                    ),
+                ])
+            kb = InlineKeyboardMarkup(rows)
+        else:
+            text = msg.changelog_manual_intro()
+            kb = InlineKeyboardMarkup(rows)
+        await bot.send_message(chat_id=chat_id, text=text, reply_markup=kb)
+    finally:
+        msg.reset_lang(token)
+
+
+async def start_manual_prompt(bot, chat_id: int, context) -> None:
+    """Ask admin for changelog notes (manual broadcast, no pending file required)."""
+    _clear_review(context)
+    context.user_data["await_input"] = {
+        "kind": "changelog_manual",
+        "ts": time.time(),
+    }
+    token = _admin_lang_token()
+    try:
+        await bot.send_message(chat_id=chat_id, text=msg.changelog_manual_prompt())
+    finally:
+        msg.reset_lang(token)
+
+
+async def handle_manual_text(update, context) -> bool:
+    """Start per-language review from admin-typed notes (not from pending file)."""
+    user = update.effective_user
+    if not user or str(user.id) != str(_admin_id):
+        return False
+    text = (update.message.text or "").strip() if update.message else ""
+    token = _admin_lang_token()
+    try:
+        if not text:
+            await update.message.reply_text(msg.changelog_manual_empty())
+            context.user_data["await_input"] = {
+                "kind": "changelog_manual",
+                "ts": time.time(),
+            }
+            return True
+        if not is_configured():
+            await update.message.reply_text(msg.changelog_llm_unavailable())
+            return True
+        if _busy:
+            await update.message.reply_text(msg.changelog_busy())
+            return True
+        await update.message.reply_text(msg.changelog_generating())
+    finally:
+        msg.reset_lang(token)
+
+    err = await _start_review(
+        context.bot, context, user, query=None, notes=text, manual=True,
+    )
+    token = _admin_lang_token()
+    try:
+        if err == "busy":
+            await update.message.reply_text(msg.changelog_busy())
+        elif err == "empty":
+            await update.message.reply_text(msg.changelog_manual_empty())
+        elif err == "llm_unavailable":
+            await update.message.reply_text(msg.changelog_llm_unavailable())
+    finally:
+        msg.reset_lang(token)
+    return True
 
 
 async def handle_lang_edit_text(update, context, *, lang: str | None = None) -> bool:
@@ -754,6 +904,14 @@ async def handle_callback(update, context) -> bool:
             except Exception:
                 pass
             await context.bot.send_message(chat_id=user.id, text=msg.changelog_edit_prompt())
+            return True
+
+        if action == "manual":
+            try:
+                await query.answer()
+            except Exception:
+                pass
+            await start_manual_prompt(context.bot, user.id, context)
             return True
 
         if action != "send":

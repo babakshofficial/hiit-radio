@@ -310,8 +310,8 @@ def _token_title_similarity(expected, actual):
 _NOISE_PATTERNS = (
     r'\blive\b', r'\bcover\b', r'\bkaraoke\b', r'\bsped\s*up\b', r'\bslowed\b',
     r'\bnightcore\b', r'#shorts\b', r'\breaction\b', r'\binstrumental\b',
-    r'\bremake\b', r'\bmashup\b', r'\b8d\s*audio\b',
-    r'\bremix(?:es|ed)?\b', r'\bbootleg\b', r'\brework\b', r'\bvip\b',
+    r'\bremake\b', r'\bmashup\b', r'\b8d\s*audio\b', r'\b432\s*hertz\b',
+    r'\bremix(?:es|ed)?\b', r'\bflip\b', r'\bbootleg\b', r'\brework\b', r'\bvip\b',
     r'\bextended(?:\s+mix)?\b', r'\bclub\s*mix\b', r'\bradio\s*edit\b',
 )
 
@@ -399,35 +399,45 @@ def _title_tokens_present(expected_title, haystack, min_ratio=0.7):
     return (hits / len(tokens)) >= min_ratio
 
 
+def _uploader_artist_match(expected_artist, uploader):
+    """Sequence similarity between uploader/channel name and expected artist."""
+    if not (expected_artist or "").strip():
+        return 100.0
+    up = (uploader or "").lower()
+    if not up:
+        return 0.0
+    scores = [
+        difflib.SequenceMatcher(None, up, expected_artist.lower()).ratio() * 100,
+    ]
+    primary = _primary_artist(expected_artist)
+    if primary:
+        scores.append(difflib.SequenceMatcher(None, up, primary.lower()).ratio() * 100)
+    return max(scores)
+
+
 def _artist_presence(expected_artist, raw_title, uploader):
     """How clearly the credited artist appears in title/uploader (0-100)."""
     if not (expected_artist or "").strip():
         return 100.0
+    uploader_match = _uploader_artist_match(expected_artist, uploader)
     primary = _primary_artist(expected_artist)
-    hay = f"{raw_title or ''} {uploader or ''}".lower()
-    scores = [
-        difflib.SequenceMatcher(
-            None, (uploader or "").lower(), expected_artist.lower()
-        ).ratio() * 100,
-    ]
-    if primary:
-        scores.append(
-            difflib.SequenceMatcher(
-                None, (uploader or "").lower(), primary.lower()
-            ).ratio() * 100
-        )
-        if primary.lower() in hay:
-            scores.append(90.0)
-    # Shared artist tokens (zerb, khalid / chainsmokers, oaks)
+    title_hay = (raw_title or "").lower()
+    title_scores = [uploader_match]
+    if primary and primary.lower() in title_hay:
+        title_scores.append(75.0)
     art_tokens = [
         w for w in re.findall(r"[a-z0-9]+", expected_artist.lower())
         if len(w) >= 3 and w not in {"the", "and", "feat", "featuring"}
     ]
     if art_tokens:
-        hits = sum(1 for t in art_tokens if t in hay)
-        scores.append(100.0 * hits / len(art_tokens))
-    scores.append(score_query_coverage(expected_artist, raw_title, uploader))
-    return max(scores) if scores else 0.0
+        hits = sum(1 for t in art_tokens if t in title_hay)
+        title_scores.append(100.0 * hits / len(art_tokens))
+    title_scores.append(score_query_coverage(expected_artist, raw_title, uploader))
+    title_best = max(title_scores) if title_scores else 0.0
+    # Title credits alone must not outweigh a mismatched uploader (remix accounts).
+    if uploader_match >= 55:
+        return max(uploader_match, title_best)
+    return max(uploader_match, min(title_best, 55.0))
 
 
 def _candidate_url(video, source_label="YouTube"):
@@ -721,6 +731,16 @@ class MusicDownloader:
             return ydl_opts
 
         if browser and not live_browser:
+            # Search/hydrate in-process: use exported cookies.txt (never touch Chrome DB).
+            cookies_ok = (
+                os.path.exists(self.cookies_path)
+                and _cookies_look_authenticated(self.cookies_path)
+            )
+            if cookies_ok:
+                ydl_opts["cookiefile"] = self.cookies_path
+                logger.info(
+                    f"Using exported YouTube cookies from {self.cookies_path}"
+                )
             return ydl_opts
 
         cookies_ok = (
@@ -868,13 +888,12 @@ class MusicDownloader:
         return self._apply_auth(ydl_opts, live_browser=live_browser)
 
     def _youtube_subprocess_attempts(self):
-        """Auth modes for subprocess YouTube operations (browser preferred)."""
+        """Auth modes for subprocess YouTube downloads (cookies.txt first when valid)."""
         attempts = []
-        if self.cookies_from_browser:
-            attempts.append("browser")
         if _cookies_look_authenticated(self.cookies_path):
-            if "cookiefile" not in attempts:
-                attempts.append("cookiefile")
+            attempts.append("cookiefile")
+        if self.cookies_from_browser and "browser" not in attempts:
+            attempts.append("browser")
         return attempts or ["browser"]
 
     def _probe_auth_attempts(self, *, fast=True):
@@ -981,24 +1000,31 @@ class MusicDownloader:
                     # Network/SSL: stop immediately — more auth modes won't help.
                     if probe and _is_network_probe_error(last_err):
                         return False, last_err
-                    if (
-                        attempt + 1 < max_attempts
-                        and auth == "browser"
-                        and _is_bot_check_error(last_err)
-                    ):
-                        delay = retry_delays[attempt]
-                        logger.info(
-                            "YouTube browser auth bot_check — retry %d/%d after %ds",
-                            attempt + 2,
-                            max_attempts,
-                            delay,
-                        )
-                        deadline = time.monotonic() + delay
-                        while time.monotonic() < deadline:
-                            if cancel_check and cancel_check():
-                                return False, "cancelled"
-                            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
-                        continue
+                    if auth == "browser" and _is_bot_check_error(last_err):
+                        if _cookies_look_authenticated(self.cookies_path):
+                            logger.info(
+                                "YouTube browser bot_check — switching to cookies.txt"
+                            )
+                            break
+                        if (
+                            attempt + 1 < max_attempts
+                            and not probe
+                        ):
+                            delay = retry_delays[attempt]
+                            logger.info(
+                                "YouTube browser auth bot_check — retry %d/%d after %ds",
+                                attempt + 2,
+                                max_attempts,
+                                delay,
+                            )
+                            deadline = time.monotonic() + delay
+                            while time.monotonic() < deadline:
+                                if cancel_check and cancel_check():
+                                    return False, "cancelled"
+                                time.sleep(
+                                    min(0.2, max(0.0, deadline - time.monotonic()))
+                                )
+                            continue
                     break
             return False, last_err or "YouTube worker failed"
 
@@ -1009,7 +1035,7 @@ class MusicDownloader:
         if probe and _is_network_probe_error(detail):
             return False, detail
 
-        # If still under proxychains and format listing failed, retry direct once.
+        # If still under proxychains and format/bot_check failed, retry direct once.
         err_l = (detail or "").lower()
         format_fail = (
             "format is not available" in err_l
@@ -1017,7 +1043,7 @@ class MusicDownloader:
             or "probe_no_formats" in err_l
         )
         if (
-            format_fail
+            (format_fail or _is_bot_check_error(detail))
             and not force_direct
             and env.get("LD_PRELOAD")
             and os.getenv("YTDLP_INHERIT_PROXYCHAINS", "").strip().lower()
@@ -1036,7 +1062,7 @@ class MusicDownloader:
                 elif auth_modes:
                     direct_modes = [auth_modes[0]]
             logger.info(
-                "YouTube worker format failure under proxychains — retrying without LD_PRELOAD"
+                "YouTube worker failure under proxychains — retrying without LD_PRELOAD"
             )
             ok2, detail2 = _run_once(direct_env, auth_modes=direct_modes)
             if ok2:
@@ -1281,6 +1307,10 @@ class MusicDownloader:
             if expected_title and not _title_tokens_present(expected_title, raw_title):
                 return None
 
+            expected_for_noise = metadata.title or original_query or ""
+            if not version_required and _has_noise(raw_title, expected_for_noise):
+                return None
+
             seq_title_sim = title_similarity(yt_title, expected_title)
             token_sim = max(
                 _token_title_similarity(expected_title, yt_title),
@@ -1290,16 +1320,32 @@ class MusicDownloader:
             # "Artist - OtherSong" score 100% when the query lists the artist.
             title_sim = max(seq_title_sim, token_sim)
 
-            artist_sim = title_similarity(yt_artist, metadata.artist or "")
             primary = _primary_artist(metadata.artist or "")
-            if primary:
-                artist_sim = max(artist_sim, title_similarity(yt_artist, primary))
+            uploader_match = _uploader_artist_match(metadata.artist or "", yt_artist)
             presence = _artist_presence(metadata.artist or "", raw_title, yt_artist)
-            artist_sim = max(artist_sim, presence)
+            uploader_raw = (video.get('uploader', '') or video.get('channel', '') or '').lower()
+            is_topic = uploader_raw.endswith('topic') or ' - topic' in uploader_raw
+            is_vevo = 'vevo' in uploader_raw
+            if is_topic or is_vevo:
+                artist_sim = max(uploader_match, presence, 85.0)
+            elif uploader_match >= 55:
+                artist_sim = max(uploader_match, presence)
+            else:
+                artist_sim = max(uploader_match, min(presence, 50.0))
 
             # When artist is known, refuse weak artist matches — stops same-title
             # wrong uploads (e.g. SoundCloud "She's so Lovely" by another band).
             if (metadata.artist or "").strip() and presence < 55.0 and artist_sim < 55.0:
+                return None
+            # Catalog links: reject remix accounts that only credit artist in the title.
+            if (
+                had_catalog
+                and not version_required
+                and not is_topic
+                and not is_vevo
+                and uploader_match < 45
+                and presence >= 70
+            ):
                 return None
 
             combined = (title_sim * 0.7) + (artist_sim * 0.3)
@@ -1315,9 +1361,6 @@ class MusicDownloader:
 
             combined = (combined * 0.75) + (coverage * 0.25)
 
-            uploader_raw = (video.get('uploader', '') or video.get('channel', '') or '').lower()
-            is_topic = uploader_raw.endswith('topic') or ' - topic' in uploader_raw
-            is_vevo = 'vevo' in uploader_raw
             if is_topic or is_vevo:
                 combined = min(100.0, combined + 8.0)
 
@@ -1337,9 +1380,6 @@ class MusicDownloader:
                         if had_catalog and ratio > 0.45:
                             return None
                         combined -= 12.0
-
-            if _has_noise(raw_title, metadata.title or original_query or ""):
-                combined -= 25.0
 
             return (
                 combined, title_sim, artist_sim, token_sim, yt_title, yt_artist,
@@ -1689,18 +1729,27 @@ class MusicDownloader:
 
         yt_items = [c for c in download_queue if _source_label_for(c[1]) == "YouTube"]
         other_items = [c for c in download_queue if _source_label_for(c[1]) != "YouTube"]
-        # Probe URL can bot-check while real track downloads still work — never drop
-        # YouTube candidates solely on probe failure. Prefer SoundCloud first when the
-        # cached probe is bad; keep YouTube as fallback (e.g. SoundCloud DRM).
+
+        def _clean(cand):
+            raw = (cand[1].get("title") or "")
+            exp = metadata.title or original_query or ""
+            return version_required or not _has_noise(raw, exp)
+
+        yt_clean = [c for c in yt_items if _clean(c)]
+        sc_clean = [c for c in other_items if _clean(c)]
+
+        # Prefer official YouTube over SoundCloud flips/remixes; when probe is bad
+        # still try YouTube downloads before fan edits.
         if yt_usable:
-            download_queue = yt_items[:3] + other_items[:3]
+            download_queue = (yt_clean or yt_items)[:3] + (sc_clean or other_items)[:3]
         else:
             logger.warning(
-                "YouTube probe unhealthy — trying other sources first, "
-                "YouTube kept as fallback (%d candidates)",
-                len(yt_items),
+                "YouTube probe unhealthy — trying YouTube downloads before SoundCloud "
+                "(%d yt / %d sc clean candidates)",
+                len(yt_clean or yt_items),
+                len(sc_clean or other_items),
             )
-            download_queue = other_items[:3] + yt_items[:4]
+            download_queue = (yt_clean or yt_items)[:4] + (sc_clean or other_items)[:2]
             if not download_queue:
                 return None, "bot_check", failure_trail
 

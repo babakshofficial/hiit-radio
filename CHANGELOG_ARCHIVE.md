@@ -52,3 +52,13 @@ Notes cleared from `CHANGELOG_PENDING.md` after Send or Skip are appended below.
 
 ## 2026-09-16
 - Downloads with a known artist no longer accept unrelated same-title matches from other artists
+
+## 2026-09-16 07:17:39 UTC (skipped)
+
+## 2026-09-16
+- Admin panel: new Changelog button to send a manual “What’s new” anytime (per-language review before broadcast)
+
+## 2026-09-16 07:29:36 UTC (skipped)
+
+## 2026-09-16
+- Apple/Spotify links no longer download remixes or flips when the catalog track is the original

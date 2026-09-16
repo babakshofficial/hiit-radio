@@ -431,6 +431,7 @@ STRINGS = {
     "admin_export": "📤 خروجی",
     "admin_viplog": "🧪 لاگ VIP",
     "admin_broadcast": "📣 پیام همگانی",
+    "admin_changelog": "✨ تغییر‌لاگ",
     "admin_channelid": "🆔 شناسه کانال",
     "admin_grant": "➕ گرنت",
     "admin_topup": "💰 شارژ سهمیه",
@@ -527,6 +528,18 @@ STRINGS = {
     ),
     "changelog_busy": "همین الان یک ارسال تغییر‌لاگ در حال اجراست.",
     "changelog_forbidden": "فقط ادمین می‌تواند از این استفاده کند.",
+    "changelog_btn_manual_new": "✍️ تغییر‌لاگ جدید",
+    "changelog_manual_intro": (
+        "یادداشتی در CHANGELOG_PENDING.md نیست.\n"
+        "«تغییر‌لاگ جدید» را بزن، یا در فایل repo یادداشت بگذار و ری‌استارت کن."
+    ),
+    "changelog_manual_prompt": (
+        "یادداشت‌های تغییر‌لاگ را در پیام بعدی بفرست.\n"
+        "انگلیسی هم اشکالی ندارد — LLM برای هر زبان محلی‌سازی می‌کند.\n"
+        "قبل از ارسال، برای هر زبان یک کارت بررسی می‌گیری."
+    ),
+    "changelog_manual_empty": "پیام خالی بود — متن تغییر‌لاگ را بفرست.",
+    "changelog_pending_admin_header": "تغییر‌لاگ در صف (از CHANGELOG_PENDING.md):",
 
     # --- language selection ---
     "lang_choose": "🌐 زبان ربات را انتخاب کن:",

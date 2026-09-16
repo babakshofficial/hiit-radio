@@ -431,6 +431,7 @@ STRINGS = {
     "admin_export": "📤 Export",
     "admin_viplog": "🧪 VIP log",
     "admin_broadcast": "📣 Broadcast",
+    "admin_changelog": "✨ Changelog",
     "admin_channelid": "🆔 Channel ID",
     "admin_grant": "➕ Grant",
     "admin_topup": "💰 Top-up",
@@ -527,6 +528,18 @@ STRINGS = {
     ),
     "changelog_busy": "A changelog broadcast is already running.",
     "changelog_forbidden": "Only the admin can use this.",
+    "changelog_btn_manual_new": "✍️ Write new changelog",
+    "changelog_manual_intro": (
+        "No pending notes in CHANGELOG_PENDING.md.\n"
+        "Tap Write new changelog, or append notes in the repo file and restart."
+    ),
+    "changelog_manual_prompt": (
+        "Send the changelog notes in your next message.\n"
+        "English is fine — the LLM will localize per user language.\n"
+        "You’ll review one card per language before anything is sent."
+    ),
+    "changelog_manual_empty": "Empty message — send the changelog notes text.",
+    "changelog_pending_admin_header": "Pending changelog (from CHANGELOG_PENDING.md):",
 
     # --- language selection ---
     "lang_choose": "🌐 Choose the bot language:",

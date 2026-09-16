@@ -995,6 +995,26 @@ def changelog_all_done(*, sent_langs, skipped_langs, sent, failed):
     )
 
 
+def changelog_btn_manual_new():
+    return t("changelog_btn_manual_new")
+
+
+def changelog_manual_intro():
+    return t("changelog_manual_intro")
+
+
+def changelog_manual_prompt():
+    return t("changelog_manual_prompt")
+
+
+def changelog_manual_empty():
+    return t("changelog_manual_empty")
+
+
+def changelog_pending_admin_header():
+    return t("changelog_pending_admin_header")
+
+
 def menu_label(key):
     return t(key)
 

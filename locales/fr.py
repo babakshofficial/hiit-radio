@@ -466,6 +466,7 @@ STRINGS = {
     "admin_export": "📤 Export",
     "admin_viplog": "🧪 Journal VIP",
     "admin_broadcast": "📣 Diffusion",
+    "admin_changelog": "✨ Changelog",
     "admin_channelid": "🆔 ID canal",
     "admin_grant": "➕ Accorder",
     "admin_topup": "💰 Recharge",
@@ -562,6 +563,18 @@ STRINGS = {
     ),
     "changelog_busy": "Une diffusion de changelog est déjà en cours.",
     "changelog_forbidden": "Réservé à l’admin.",
+    "changelog_btn_manual_new": "✍️ Nouveau changelog",
+    "changelog_manual_intro": (
+        "Aucune note en attente dans CHANGELOG_PENDING.md.\n"
+        "Appuie sur Nouveau changelog, ou ajoute des notes dans le fichier repo et redémarre."
+    ),
+    "changelog_manual_prompt": (
+        "Envoie les notes de changelog dans ton prochain message.\n"
+        "L’anglais convient — le LLM localisera pour chaque langue.\n"
+        "Tu reliras une carte par langue avant l’envoi."
+    ),
+    "changelog_manual_empty": "Message vide — envoie le texte du changelog.",
+    "changelog_pending_admin_header": "Changelog en attente (CHANGELOG_PENDING.md) :",
 
     # --- language selection ---
     "lang_choose": "🌐 Choisis la langue du bot :",

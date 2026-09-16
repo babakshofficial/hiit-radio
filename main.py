@@ -527,6 +527,8 @@ async def consume_await_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await changelog.handle_edit_text(update, context)
     elif kind == "changelog_lang_edit":
         await changelog.handle_lang_edit_text(update, context, lang=lang_edit)
+    elif kind == "changelog_manual":
+        await changelog.handle_manual_text(update, context)
     else:
         return False
     return True
@@ -666,6 +668,9 @@ def _admin_menu_keyboard():
         ],
         [
             InlineKeyboardButton(msg.t("admin_broadcast"), callback_data="admin:broadcast"),
+            InlineKeyboardButton(msg.t("admin_changelog"), callback_data="admin:changelog"),
+        ],
+        [
             InlineKeyboardButton(msg.t("admin_channelid"), callback_data="admin:channelid"),
         ],
         [
@@ -1845,6 +1850,9 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         return
     if action == "broadcast":
         await admin_wizard.start_broadcast(target, context)
+        return
+    if action == "changelog":
+        await changelog.admin_changelog_menu(bot, chat_id, context)
         return
     if action == "grant":
         await admin_wizard.start_grant(target, context)
