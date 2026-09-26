@@ -20,3 +20,4 @@ hiit_radio.db
 web/node_modules/
 web/.next/
 web/.env.local
+CHANGELOG_PENDING.md
