@@ -62,3 +62,8 @@ Notes cleared from `CHANGELOG_PENDING.md` after Send or Skip are appended below.
 
 ## 2026-09-16
 - Apple/Spotify links no longer download remixes or flips when the catalog track is the original
+
+## 2026-09-26 07:24:23 UTC (sent)
+
+## 2026-09-26
+- While a track or playlist is downloading, the progress message shows a **Stop** button (same as `/stop`).
