@@ -417,6 +417,8 @@ STRINGS = {
     "menu_premium": "💠 Premium",
     "menu_aboutme": "🤖 About the bot",
     "menu_cancel": "⛔ Cancel current job",
+    "btn_stop": "⏹ Stop",
+    "btn_stop_ack": "Stopping…",
     "menu_back": "🔙 Back to menu",
     "menu_lang": "🌐 Language",
     "menu_admin": "🛠 Admin",

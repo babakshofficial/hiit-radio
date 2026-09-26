@@ -3,7 +3,7 @@
 import logging
 import time
 
-from messages import progress_done, progress_fail, progress_update, t
+from messages import progress_done, progress_fail, progress_update, stop_job_keyboard, t
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +17,14 @@ class ProgressReporter:
         bot=None,
         user=None,
         progress_mode="tracks",
+        show_stop=False,
     ):
         self.status_message = status_message
         self.total = max(total, 1)
         self.label = label or t("progress_label_download")
         self.bot = bot
         self.user = user
+        self.show_stop = show_stop
         self._last_edit = 0.0
         self._min_interval = 1.5
         self._t0 = None
@@ -30,6 +32,15 @@ class ProgressReporter:
         self._update_count = 0
         self._last_current = -1
         self._last_detail = None
+
+    def _reply_markup(self, reply_markup, *, finished=False):
+        if reply_markup is not None:
+            return reply_markup
+        if finished:
+            return None
+        if self.show_stop:
+            return stop_job_keyboard()
+        return None
 
     async def _vip_status(self, status_text):
         if not self.bot:
@@ -97,7 +108,7 @@ class ProgressReporter:
             status_text += f" — {detail}"
         await self._vip_status(status_text)
         try:
-            await self.status_message.edit_text(text)
+            await self.status_message.edit_text(text, reply_markup=self._reply_markup(None))
         except Exception as e:
             logger.debug(f"Progress edit skipped: {e}")
 
@@ -105,7 +116,9 @@ class ProgressReporter:
         text = progress_done(self.label, summary)
         await self._vip_status(summary or "تمام شد")
         try:
-            await self.status_message.edit_text(text, reply_markup=reply_markup)
+            await self.status_message.edit_text(
+                text, reply_markup=self._reply_markup(reply_markup, finished=True),
+            )
         except Exception:
             pass
 
@@ -113,6 +126,8 @@ class ProgressReporter:
         text = progress_fail(self.label, reason)
         await self._vip_status(reason or "ناموفق")
         try:
-            await self.status_message.edit_text(text, reply_markup=reply_markup)
+            await self.status_message.edit_text(
+                text, reply_markup=self._reply_markup(reply_markup, finished=True),
+            )
         except Exception:
             pass

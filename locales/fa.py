@@ -417,6 +417,8 @@ STRINGS = {
     "menu_premium": "💠 پریمیوم",
     "menu_aboutme": "🤖 درباره ربات",
     "menu_cancel": "⛔ لغو کار جاری",
+    "btn_stop": "⏹ توقف",
+    "btn_stop_ack": "در حال توقف…",
     "menu_back": "🔙 بازگشت به منو",
     "menu_lang": "🌐 زبان",
     "menu_admin": "🛠 مدیریت",

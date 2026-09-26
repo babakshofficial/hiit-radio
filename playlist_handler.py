@@ -19,6 +19,7 @@ from messages import (
     playlist_zip_caption,
     playlist_zip_sending,
     quota_exceeded,
+    stop_job_keyboard,
     unknown_artist,
     t,
 )
@@ -134,12 +135,14 @@ async def _process_playlist_body(
     failed_tracks = []
     status = await message.reply_text(
         playlist_start(collection_name, total, original=original),
+        reply_markup=stop_job_keyboard(),
     )
     job["status_message"] = status
     await admin_logger.log_playlist_start(bot, user, collection_name, total)
 
     reporter = ProgressReporter(
         status, total, collection_name or t("playlist_default_name"), bot=bot, user=user,
+        show_stop=True,
     )
     sent = 0
     failed = 0

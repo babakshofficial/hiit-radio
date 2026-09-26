@@ -1906,10 +1906,23 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     if not await ensure_access(update, context):
+        await query.answer()
         return
     data = query.data or ""
+
+    if data == "job:stop":
+        uid = update.effective_user.id if update.effective_user else jobs.user_id_of(context)
+        if uid is not None:
+            jobs.request_abort(uid)
+        cancelled = jobs.cancel_all(context, user_id=uid)
+        if cancelled:
+            await query.answer(msg.t("btn_stop_ack"))
+        else:
+            await query.answer(msg.cancel_no_job(), show_alert=True)
+        return
+
+    await query.answer()
 
     if data.startswith("awiz:"):
         if not _is_admin(update.effective_user.id):
@@ -2106,6 +2119,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         elif action == "cancel":
             uid = update.effective_user.id if update.effective_user else jobs.user_id_of(context)
+            if uid is not None:
+                jobs.request_abort(uid)
             cancelled = jobs.cancel_all(context, user_id=uid)
             if cancelled:
                 text = msg.cancel_ok(len(cancelled))
@@ -2863,7 +2878,9 @@ async def _download_and_send(message, user, metadata, context):
 async def _download_and_send_job(message, user, metadata, context, job):
     user_id = user.id
     resolve_lang(user)
-    status = await message.reply_text(msg.downloading())
+    status = await message.reply_text(
+        msg.downloading(), reply_markup=msg.stop_job_keyboard(),
+    )
     job["status_message"] = status
     reporter = ProgressReporter(
         status,
@@ -2872,6 +2889,7 @@ async def _download_and_send_job(message, user, metadata, context, job):
         bot=context.bot,
         user=user,
         progress_mode="percent",
+        show_stop=True,
     )
     await reporter.update(10, f"{metadata.title} — {_unknown_artist(metadata.artist)}")
 
@@ -3065,7 +3083,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _handle_track_job(update, context, text, user, job):
     user_id = user.id
     resolve_lang(user)
-    status_message = await update.message.reply_text(msg.searching())
+    status_message = await update.message.reply_text(
+        msg.searching(), reply_markup=msg.stop_job_keyboard(),
+    )
     job["status_message"] = status_message
     metadata = await TrackMetadata.create(text, _ydl_opts_factory)
 
@@ -3087,6 +3107,7 @@ async def _handle_track_job(update, context, text, user, job):
         bot=context.bot,
         user=user,
         progress_mode="percent",
+        show_stop=True,
     )
     await reporter.update(10, f"{metadata.title} — {_unknown_artist(metadata.artist)}")
 

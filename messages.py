@@ -212,6 +212,14 @@ def work_cancelled():
     return t("work_cancelled")
 
 
+def stop_job_keyboard():
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(t("btn_stop"), callback_data="job:stop")],
+    ])
+
+
 def rate_limit(minutes):
     return t("rate_limit", minutes=minutes)
 

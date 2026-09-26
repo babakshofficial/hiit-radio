@@ -445,6 +445,8 @@ STRINGS = {
     "menu_premium": "💠 Премиум",
     "menu_aboutme": "🤖 О боте",
     "menu_cancel": "⛔ Отменить текущую задачу",
+    "btn_stop": "⏹ Стоп",
+    "btn_stop_ack": "Останавливаем…",
     "menu_back": "🔙 Назад в меню",
     "menu_lang": "🌐 Язык",
     "menu_admin": "🛠 Админ",

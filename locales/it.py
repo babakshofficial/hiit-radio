@@ -451,6 +451,8 @@ STRINGS = {
     "menu_premium": "💠 Premium",
     "menu_aboutme": "🤖 Info sul bot",
     "menu_cancel": "⛔ Annulla operazione in corso",
+    "btn_stop": "⏹ Ferma",
+    "btn_stop_ack": "Arresto in corso…",
     "menu_back": "🔙 Torna al menu",
     "menu_lang": "🌐 Lingua",
     "menu_admin": "🛠 Admin",
