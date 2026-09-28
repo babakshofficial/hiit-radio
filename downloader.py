@@ -527,6 +527,14 @@ def _video_thumbnail_url(video):
     return None
 
 
+# Subtle rounded corners on album art before the white border (see _process_cover_artwork).
+COVER_ART_CORNER_RADIUS_RATIO = 0.02
+COVER_ART_CORNER_RADIUS_MIN_PX = 4
+# Logo placement: margin from bottom-right of the 600×600 cover (px).
+COVER_LOGO_MARGIN_RIGHT = 30
+COVER_LOGO_MARGIN_BOTTOM = 30
+
+
 class MusicDownloader:
     def __init__(self, download_dir="downloads"):
         self.download_dir = download_dir
@@ -2145,8 +2153,8 @@ class MusicDownloader:
             logo_h = max(1, int(logo_w * base_h / max(base_w, 1)))
 
             logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
-            x = max(0, w - logo_w - 20)
-            y = max(0, h - logo_h - 20)
+            x = max(0, w - logo_w - COVER_LOGO_MARGIN_RIGHT)
+            y = max(0, h - logo_h - COVER_LOGO_MARGIN_BOTTOM)
             img.paste(logo, (x, y), logo)
 
             out = io.BytesIO()
@@ -2384,6 +2392,13 @@ class MusicDownloader:
         return False
 
     @staticmethod
+    def _cover_corner_radius(min_dim):
+        return max(
+            COVER_ART_CORNER_RADIUS_MIN_PX,
+            int(min_dim * COVER_ART_CORNER_RADIUS_RATIO),
+        )
+
+    @staticmethod
     def _round_corners(img, radius):
         """Return RGBA image with soft rounded corners (transparent outside)."""
         img = img.convert("RGBA")
@@ -2399,10 +2414,10 @@ class MusicDownloader:
         """Unified cover pipeline for every source.
 
         1. Center-crop to square (no distortion)
-        2. Slight rounded corners on the art
+        2. Subtle rounded corners on the art
         3. White border: pad = 30% of min dimension on each side
         4. Resize bordered canvas to 600x600 (LANCZOS)
-        5. Paste hiit-radio.png at 25% width, bottom-right, 20px margin
+        5. Paste hiit-radio.png at 25% width, bottom-right (30px from edges)
            (logo already has a thin white stroke via ``_make_dynamic_logo``)
         6. JPEG quality 95
         """
@@ -2417,8 +2432,9 @@ class MusicDownloader:
             top = (h - min_dim) // 2
             img = img.crop((left, top, left + min_dim, top + min_dim))
 
-            # Slight curve (~6% of art edge) before the white margin.
-            img = self._round_corners(img, radius=max(8, int(min_dim * 0.06)))
+            img = self._round_corners(
+                img, radius=self._cover_corner_radius(min_dim),
+            )
 
             pad = int(min_dim * 0.3)
             new_size = min_dim + 2 * pad
@@ -2439,8 +2455,8 @@ class MusicDownloader:
             logo_h = int(logo_w * logo.height / logo.width)
             logo = logo.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
 
-            x = max(0, target_size - logo_w - 20)
-            y = max(0, target_size - logo_h - 20)
+            x = max(0, target_size - logo_w - COVER_LOGO_MARGIN_RIGHT)
+            y = max(0, target_size - logo_h - COVER_LOGO_MARGIN_BOTTOM)
             bordered.paste(logo, (x, y), logo)
 
             out = io.BytesIO()
