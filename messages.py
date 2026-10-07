@@ -90,6 +90,8 @@ def platform_fa(platform):
         return t("platform_deezer")
     if "cache" in p:
         return t("platform_cache")
+    if "community" in p:
+        return t("platform_community")
     return platform
 
 

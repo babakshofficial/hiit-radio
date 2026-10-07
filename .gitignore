@@ -13,6 +13,7 @@ cookies.txt
 .hiit-radio-bot.lock
 config.json
 cache/
+user_music/
 *.db
 hiit_radio.db
 *.bak.*

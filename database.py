@@ -268,6 +268,34 @@ CREATE TABLE IF NOT EXISTS support_messages (
 
 CREATE INDEX IF NOT EXISTS idx_support_messages_thread
     ON support_messages(thread_id, created_at);
+
+CREATE TABLE IF NOT EXISTS user_music_submissions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    title TEXT NOT NULL,
+    artist TEXT NOT NULL,
+    genre TEXT,
+    audio_path TEXT NOT NULL,
+    artwork_path TEXT,
+    telegram_audio_file_id TEXT,
+    admin_id TEXT,
+    reviewed_at REAL,
+    reject_reason TEXT,
+    quota_bonus_granted INTEGER DEFAULT 0,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_music_submissions_user
+    ON user_music_submissions(user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_user_music_submissions_status
+    ON user_music_submissions(status, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_user_music_submissions_approved
+    ON user_music_submissions(status, title, artist);
 """
 
 EXPORT_EVENT_LIMIT = 10000
@@ -1620,4 +1648,141 @@ class Database:
                    VALUES (?, ?, ?, ?, ?)""",
                 (deezer_artist_id, deezer_album_id, title, release_date, now),
             )
+
+    # --- User music submissions ---
+
+    def create_user_music_submission(
+        self,
+        user_id,
+        title,
+        artist,
+        genre,
+        audio_path,
+        artwork_path=None,
+        telegram_audio_file_id=None,
+    ):
+        user_id = str(user_id)
+        now = time.time()
+        with self._conn() as conn:
+            cur = conn.execute(
+                """INSERT INTO user_music_submissions
+                   (user_id, status, title, artist, genre, audio_path, artwork_path,
+                    telegram_audio_file_id, quota_bonus_granted, created_at, updated_at)
+                   VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, 0, ?, ?)""",
+                (
+                    user_id,
+                    (title or "").strip(),
+                    (artist or "").strip(),
+                    (genre or "").strip() or None,
+                    audio_path,
+                    artwork_path,
+                    telegram_audio_file_id,
+                    now,
+                    now,
+                ),
+            )
+            return cur.lastrowid
+
+    def get_user_music_submission(self, submission_id):
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM user_music_submissions WHERE id=?",
+                (int(submission_id),),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_approved_user_music_submission(self, submission_id):
+        with self._conn() as conn:
+            row = conn.execute(
+                """SELECT * FROM user_music_submissions
+                   WHERE id=? AND status='approved'""",
+                (int(submission_id),),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_user_music_submission(self, submission_id, **fields):
+        allowed = {
+            "status", "title", "artist", "genre", "audio_path", "artwork_path",
+            "telegram_audio_file_id", "admin_id", "reviewed_at", "reject_reason",
+            "quota_bonus_granted", "updated_at",
+        }
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return False
+        updates["updated_at"] = time.time()
+        cols = ", ".join(f"{k}=?" for k in updates)
+        with self._conn() as conn:
+            cur = conn.execute(
+                f"UPDATE user_music_submissions SET {cols} WHERE id=?",
+                (*updates.values(), int(submission_id)),
+            )
+            return cur.rowcount > 0
+
+    def count_user_pending_music_submissions(self, user_id):
+        user_id = str(user_id)
+        with self._conn() as conn:
+            return conn.execute(
+                """SELECT COUNT(*) AS c FROM user_music_submissions
+                   WHERE user_id=? AND status='pending'""",
+                (user_id,),
+            ).fetchone()["c"]
+
+    def count_user_pending_music_submissions_since(self, user_id, since_ts):
+        user_id = str(user_id)
+        with self._conn() as conn:
+            return conn.execute(
+                """SELECT COUNT(*) AS c FROM user_music_submissions
+                   WHERE user_id=? AND status='pending' AND created_at >= ?""",
+                (user_id, float(since_ts)),
+            ).fetchone()["c"]
+
+    def list_user_music_submissions(self, user_id, page=0, per_page=10):
+        user_id = str(user_id)
+        return self._paginate(
+            "SELECT COUNT(*) FROM user_music_submissions WHERE user_id=?",
+            (user_id,),
+            """SELECT id, status, title, artist, genre, created_at, reviewed_at
+               FROM user_music_submissions WHERE user_id=?
+               ORDER BY created_at DESC""",
+            (user_id,),
+            page,
+            per_page,
+        )
+
+    def list_pending_user_music_submissions(self, page=0, per_page=10):
+        return self._paginate(
+            "SELECT COUNT(*) FROM user_music_submissions WHERE status='pending'",
+            (),
+            """SELECT s.id, s.user_id, s.title, s.artist, s.genre, s.created_at,
+                      u.username, u.first_name
+               FROM user_music_submissions s
+               LEFT JOIN users u ON u.user_id = s.user_id
+               WHERE s.status='pending'
+               ORDER BY s.created_at ASC""",
+            (),
+            page,
+            per_page,
+        )
+
+    def search_approved_user_music(self, query, limit=5):
+        q = (query or "").strip()
+        if len(q) < 2:
+            return []
+        try:
+            limit = min(max(int(limit), 1), 20)
+        except (TypeError, ValueError):
+            limit = 5
+        pattern = f"%{q}%"
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT id, title, artist, genre, artwork_path
+                   FROM user_music_submissions
+                   WHERE status='approved'
+                     AND (title LIKE ? OR artist LIKE ?
+                          OR (title || ' ' || artist) LIKE ?)
+                   ORDER BY reviewed_at DESC
+                   LIMIT ?""",
+                (pattern, pattern, pattern, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
 

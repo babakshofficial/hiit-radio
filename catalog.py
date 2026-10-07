@@ -329,7 +329,7 @@ async def resolve_url(url: str, ydl_opts_factory: Callable[[], dict]) -> tuple[O
     return None, []
 
 
-async def search_all(query: str, limit: int = 12) -> list[CatalogHit]:
+async def search_all(query: str, limit: int = 12, db=None) -> list[CatalogHit]:
     query = (query or "").strip()
     if len(query) < 2:
         return []
@@ -362,6 +362,23 @@ async def search_all(query: str, limit: int = 12) -> list[CatalogHit]:
         seen.add(key)
         merged.append(hit)
 
+    community_hits: list[CatalogHit] = []
+    if db is not None:
+        try:
+            for row in db.search_approved_user_music(query, limit=3):
+                community_hits.append(CatalogHit(
+                    kind="track",
+                    id=str(row["id"]),
+                    name=row["title"] or "",
+                    subtitle=row["artist"] or "",
+                    url=f"community:{row['id']}",
+                    source="community",
+                    cover_url=None,
+                ))
+        except Exception as exc:
+            logger.warning("Community search failed: %s", exc)
+
+    merged.extend(community_hits)
     merged.sort(key=lambda h: _relevance(h, query), reverse=True)
     return merged[:limit]
 
@@ -378,6 +395,8 @@ def hit_to_track_metadata(hit: CatalogHit) -> TrackMetadata:
     meta.artwork_url = hit.cover_url
     if hit.source in ("youtube", "soundcloud"):
         meta.source_url = hit.url
+    if hit.source == "community":
+        meta.community_submission_id = int(hit.id) if str(hit.id).isdigit() else None
     return meta
 
 
