@@ -1091,6 +1091,33 @@ class Database:
             per_page,
         )
 
+    def list_submitted_error_reports(self, since=None, limit=20, kind=None):
+        """Submitted reports, newest first. ``since`` is a unix timestamp."""
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 20
+        limit = min(max(limit, 1), 100)
+        clauses = ["submitted_at IS NOT NULL"]
+        params = []
+        if since is not None:
+            clauses.append("submitted_at >= ?")
+            params.append(float(since))
+        kind = (kind or "").strip()
+        if kind:
+            clauses.append("error_kind = ?")
+            params.append(kind)
+        params.append(limit)
+        sql = f"""SELECT id, user_id, username, first_name, error_kind, error_code,
+                         user_message, context_json, created_at, submitted_at
+                  FROM user_error_reports
+                  WHERE {' AND '.join(clauses)}
+                  ORDER BY submitted_at DESC
+                  LIMIT ?"""
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
     # --- Support threads ---
 
     def open_support_thread(self, report_id, user_id):

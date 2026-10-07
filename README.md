@@ -192,6 +192,10 @@ Send a track link, album/playlist URL, or plain song name as a normal message to
 | `/topup <user_id> [amount]` | Manually add today's download bonus |
 | `/broadcast <message>` | Send a message to all known users (confirmation step) |
 
+### External support agent
+
+Submitted error reports still notify the Telegram admin (VIP log, `ADMIN_ID` DM, and `/reports`). If `REPORT_WEBHOOK_URL` is set, the bot also POSTs a JSON `user_error_report` event to that URL without blocking the user. An external agent can list those reports with `GET /admin/agent/reports` and reply with `POST /admin/agent/reports/{report_id}/reply` and body `{"message": "..."}`. Both routes require the `X-Agent-Secret` header to match `AGENT_REPORT_SECRET` (503 when the secret is unset, 401 when it does not match). Replies reuse the in-bot support thread and are wrapped in the reporting user's language.
+
 ## Download flow
 
 ```text

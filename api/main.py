@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -76,6 +77,23 @@ class AdminTopupBody(BaseModel):
 
 class AdminBroadcastBody(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
+
+
+class AgentReplyBody(BaseModel):
+    message: str = Field(min_length=1, max_length=3500)
+
+
+def require_agent_secret(
+    x_agent_secret: Optional[str] = Header(default=None),
+):
+    """Shared-secret auth for the external support-agent report API."""
+    expected = os.getenv("AGENT_REPORT_SECRET", "").strip()
+    if not expected:
+        raise HTTPException(503, "Agent report API is not configured")
+    provided = x_agent_secret or ""
+    if not hmac.compare_digest(provided, expected):
+        raise HTTPException(401, "Invalid agent secret")
+    return True
 
 
 def _touch(user: dict):
@@ -508,3 +526,54 @@ async def admin_export(_admin=Depends(require_admin)):
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=users.csv"},
     )
+
+
+# --- External support agent (shared secret, not Telegram admin JWT) ---
+
+
+@app.get("/admin/agent/reports")
+async def agent_list_reports(
+    since: Optional[float] = None,
+    limit: int = Query(default=20, ge=1, le=100),
+    kind: Optional[str] = None,
+    _auth=Depends(require_agent_secret),
+):
+    """Submitted error reports, newest first, for an external support agent."""
+    import error_report
+
+    db = get_db()
+    rows = db.list_submitted_error_reports(since=since, limit=limit, kind=kind)
+    return {"items": [error_report.report_event_payload(db, row) for row in rows]}
+
+
+@app.post("/admin/agent/reports/{report_id}/reply")
+async def agent_reply_report(
+    report_id: int,
+    body: AgentReplyBody,
+    _auth=Depends(require_agent_secret),
+):
+    """Reply to the user who submitted this report, via the support thread."""
+    import support_chat
+
+    text = body.message.strip()
+    if not text or len(text) > 3500:
+        raise HTTPException(422, "message is required")
+
+    status, info = await support_chat.reply_to_report(
+        get_bot(), get_db(), report_id, text,
+    )
+    if status == "ok":
+        return {
+            "ok": True,
+            "thread_id": info["thread_id"],
+            "user_id": info["user_id"],
+        }
+    if status == "not_found":
+        raise HTTPException(404, "report_not_found")
+    if status == "blocked":
+        raise HTTPException(403, "forbidden")
+    if status == "no_bot":
+        raise HTTPException(503, "Bot not configured")
+    if status == "empty":
+        raise HTTPException(422, "message is required")
+    raise HTTPException(502, "send_failed")
