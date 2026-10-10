@@ -1,10 +1,13 @@
 """User-initiated error reports — one-click button on failure messages."""
 
+import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 
+import aiohttp
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 import messages as msg
@@ -14,6 +17,8 @@ logger = logging.getLogger(__name__)
 REPORT_RATE_LIMIT = 10
 REPORT_RATE_WINDOW_SEC = 24 * 3600
 ADMIN_SUMMARY_MAX = 3500
+_WEBHOOK_TIMEOUT_SEC = 8
+_background_tasks = set()
 
 
 def build_keyboard(report_id, *, include_retry=True):
@@ -254,11 +259,80 @@ def trail_snippet(ctx, limit=120):
     return trail[: limit - 1] + "…"
 
 
+def _bot_username():
+    """Bot username from env, without @. Empty when unset."""
+    for key in ("BOT_USERNAME", "BOT_INLINE"):
+        raw = os.getenv(key, "").strip().lstrip("@")
+        if raw:
+            return raw
+    return None
+
+
+def report_language(db, user_id):
+    """users.language for this user, or Persian when unset/unknown."""
+    lang = None
+    try:
+        if db is not None and user_id is not None:
+            lang = db.get_language(user_id)
+    except Exception:
+        logger.debug("language lookup failed for %s", user_id, exc_info=True)
+    return msg.normalize_lang(lang) or "fa"
+
+
+def report_event_payload(db, row):
+    """JSON body shared by the submit webhook and the agent list endpoint."""
+    payload = {
+        "event": "user_error_report",
+        "report_id": row.get("id"),
+        "user_id": row.get("user_id"),
+        "username": row.get("username"),
+        "first_name": row.get("first_name"),
+        "error_kind": row.get("error_kind"),
+        "error_code": row.get("error_code"),
+        "user_message": row.get("user_message"),
+        "context": parse_context(row),
+        "created_at": row.get("created_at"),
+        "submitted_at": row.get("submitted_at"),
+        "language": report_language(db, row.get("user_id")),
+    }
+    bot_username = _bot_username()
+    if bot_username:
+        payload["bot_username"] = bot_username
+    return payload
+
+
+async def _post_report_webhook(url, payload):
+    timeout = aiohttp.ClientTimeout(total=_WEBHOOK_TIMEOUT_SEC)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, json=payload) as resp:
+                if resp.status >= 400:
+                    logger.warning("Report webhook returned HTTP %s", resp.status)
+    except Exception as exc:
+        logger.warning("Report webhook failed: %s", exc)
+
+
+def schedule_report_webhook(db, row):
+    """POST the report event if REPORT_WEBHOOK_URL is set. Never raises."""
+    url = os.getenv("REPORT_WEBHOOK_URL", "").strip()
+    if not url or not row:
+        return
+    try:
+        payload = report_event_payload(db, row)
+        task = asyncio.get_running_loop().create_task(_post_report_webhook(url, payload))
+    except Exception as exc:
+        logger.warning("Report webhook schedule failed: %s", exc)
+        return
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
 async def submit_and_notify(bot, db, report_id, user):
     since = time.time() - REPORT_RATE_WINDOW_SEC
     if db.count_user_submitted_reports_since(user.id, since) >= REPORT_RATE_LIMIT:
         return "rate_limited", None
 
+    prior = db.get_error_report(report_id)
     row = db.submit_error_report(report_id, user.id)
     if not row:
         existing = db.get_error_report(report_id)
@@ -270,4 +344,6 @@ async def submit_and_notify(bot, db, report_id, user):
 
     import admin_logger
     await admin_logger.log_user_report(bot, user, row)
+    if not (prior and prior.get("submitted_at")):
+        schedule_report_webhook(db, row)
     return "ok", row

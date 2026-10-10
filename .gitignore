@@ -13,6 +13,7 @@ cookies.txt
 .hiit-radio-bot.lock
 config.json
 cache/
+user_music/
 *.db
 hiit_radio.db
 *.bak.*
@@ -21,3 +22,4 @@ web/node_modules/
 web/.next/
 web/.env.local
 CHANGELOG_PENDING.md
+CHANGELOG_ARCHIVE.md

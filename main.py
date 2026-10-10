@@ -90,6 +90,8 @@ import error_report
 import support_chat
 import admin_wizard
 import changelog
+import user_submissions
+import bot_commands
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
@@ -548,6 +550,9 @@ async def consume_await_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     if admin_wizard.is_wizard(pending):
         await admin_wizard.on_text(update, context, pending)
         return True
+    if user_submissions.is_wizard(pending):
+        await user_submissions.on_text(update, context, pending)
+        return True
     lang_edit = None
     if kind == "changelog_lang_edit":
         data = pending.get("data") or {}
@@ -634,6 +639,10 @@ def _start_menu_keyboard(user_id=None):
             InlineKeyboardButton(msg.t("menu_support"), callback_data="menu:support"),
         ],
         [
+            InlineKeyboardButton(msg.t("menu_submit_music"), callback_data="menu:submit_music"),
+            InlineKeyboardButton(msg.t("menu_my_submissions"), callback_data="menu:my_submissions"),
+        ],
+        [
             InlineKeyboardButton(msg.t("menu_aboutme"), callback_data="menu:aboutme"),
             InlineKeyboardButton(msg.t("menu_lang"), callback_data="menu:lang"),
         ],
@@ -716,6 +725,9 @@ def _admin_menu_keyboard():
         [
             InlineKeyboardButton(msg.t("admin_grant"), callback_data="admin:grant"),
             InlineKeyboardButton(msg.t("admin_topup"), callback_data="admin:topup"),
+        ],
+        [
+            InlineKeyboardButton(msg.t("admin_user_music"), callback_data="admin:usub"),
         ],
         _back_row(),
     ])
@@ -809,6 +821,9 @@ async def lang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_manager.set_language(user.id, code)
     msg.set_lang(code)
+    await bot_commands.refresh_user_commands(
+        context.bot, user.id, code, admin_id=ADMIN_ID,
+    )
     await query.answer(msg.lang_set(code))
     try:
         await query.message.edit_text(
@@ -1373,6 +1388,9 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _source_label(metadata):
+    url = (getattr(metadata, "url", None) or "").strip().lower()
+    if url.startswith("community:") or getattr(metadata, "community_submission_id", None):
+        return "community"
     if getattr(metadata, "source_url", None):
         url = metadata.source_url.lower()
         if "soundcloud" in url:
@@ -1517,7 +1535,7 @@ async def _match_artist_only_query(query: str):
     if re.search(r"\s+by\s+", q, re.I) or " - " in q:
         return None
 
-    hits = await catalog.search_all(q, limit=10)
+    hits = await catalog.search_all(q, limit=10, db=user_manager.database)
     artists = [h for h in hits if h.kind == "artist" and (h.name or "").strip()]
     if not artists:
         return None
@@ -1587,7 +1605,9 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         return
-    hits = await catalog.search_all(query, limit=10)
+    hits = await catalog.search_all(
+        query, limit=10, db=user_manager.database,
+    )
     await status.delete()
     if not hits:
         await update.message.reply_text(
@@ -1643,7 +1663,7 @@ async def artist_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     clear_await_input(context)
     status = await update.message.reply_text(msg.searching())
-    hits = await catalog.search_all(query, limit=8)
+    hits = await catalog.search_all(query, limit=8, db=user_manager.database)
     artists = [h for h in hits if h.kind == "artist"]
     await status.delete()
     if not artists:
@@ -1673,7 +1693,7 @@ async def follow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_await_input(context)
     message = update.effective_message
     status = await message.reply_text(msg.searching())
-    hits = await catalog.search_all(query, limit=8)
+    hits = await catalog.search_all(query, limit=8, db=user_manager.database)
     artists = [h for h in hits if h.kind == "artist"]
     await status.delete()
     if not artists:
@@ -1792,7 +1812,9 @@ async def inline_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await ensure_access(update, context):
         return
 
-    hits = await catalog.search_all(query, limit=8)
+    hits = await catalog.search_all(
+        query, limit=8, db=user_manager.database,
+    )
     inline_results = []
     for i, hit in enumerate(hits):
         if hit.kind != "track":
@@ -1900,6 +1922,9 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     if action == "topup":
         await admin_wizard.start_topup(target, context)
         return
+    if action == "usub":
+        await user_submissions.start_admin_queue(target, context)
+        return
     if action == "channelid":
         await admin_wizard.start_channelid(target, context)
 
@@ -1928,6 +1953,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _is_admin(update.effective_user.id):
             return
         await admin_wizard.on_callback(update, context)
+        return
+
+    if data.startswith("usub:"):
+        await user_submissions.on_callback(update, context)
         return
 
     if data.startswith("changelog:"):
@@ -1982,6 +2011,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id, msg.t("prompt_support"), reply_markup=_back_button(),
             )
+        elif action == "submit_music":
+            target = _ChatReply(context.bot, chat_id)
+            await user_submissions.start_submit(target, context)
+        elif action == "my_submissions":
+            target = _ChatReply(context.bot, chat_id)
+            await user_submissions.start_my_submissions(target, context)
         elif action == "quality":
             current = user_manager.get_audio_quality(user.id)
             buttons = [
@@ -2598,6 +2633,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if hit.kind == "track":
             if hit.source == "apple" and hit.url:
                 meta = await TrackMetadata.create(hit.url, ydl_opts_factory=_ydl_opts_factory)
+            elif hit.source == "community":
+                meta = catalog.hit_to_track_metadata(hit)
             else:
                 meta = catalog.hit_to_track_metadata(hit)
             await _download_and_send(query.message, update.effective_user, meta, context)
@@ -2997,7 +3034,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not message:
         return
     if message.text is None:
-        if peek_await_input(context):
+        pending = peek_await_input(context)
+        if user_submissions.is_wizard(pending):
+            if await user_submissions.on_audio_message(update, context):
+                return
+            if await user_submissions.on_photo_message(update, context):
+                return
+        if pending:
             await consume_await_input(update, context)
         return
     text = message.text.strip()
@@ -3005,6 +3048,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id
 
     if admin_wizard.is_wizard(peek_await_input(context)):
+        await consume_await_input(update, context)
+        return
+
+    if user_submissions.is_wizard(peek_await_input(context)):
         await consume_await_input(update, context)
         return
 
@@ -3087,7 +3134,9 @@ async def _handle_track_job(update, context, text, user, job):
         msg.searching(), reply_markup=msg.stop_job_keyboard(),
     )
     job["status_message"] = status_message
-    metadata = await TrackMetadata.create(text, _ydl_opts_factory)
+    metadata = catalog.resolve_community_metadata(user_manager.database, text)
+    if metadata is None:
+        metadata = await TrackMetadata.create(text, _ydl_opts_factory)
 
     if not metadata.title:
         _end_job(context, job)
@@ -3451,6 +3500,10 @@ async def _on_startup(application):
         await configure_webapp_menu(application.bot)
     except Exception:
         logger.exception("Mini App menu setup skipped")
+    try:
+        await bot_commands.configure_menu(application.bot, ADMIN_ID)
+    except Exception:
+        logger.exception("Bot commands menu setup skipped")
     if application.job_queue:
         application.job_queue.run_repeating(_cache_sweep_job, interval=3600, first=60)
         application.job_queue.run_repeating(_cookie_health_job, interval=3600, first=120)
@@ -3974,6 +4027,22 @@ async def support_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(text[:200], show_alert=True)
 
 
+async def submit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    await _touch_user(update)
+    resolve_lang(update.effective_user)
+    await user_submissions.start_submit(update.effective_message, context)
+
+
+async def uploads_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    await _touch_user(update)
+    resolve_lang(update.effective_user)
+    await user_submissions.start_my_submissions(update.effective_message, context)
+
+
 async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user:
@@ -4036,6 +4105,29 @@ async def supportend_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.bot, user_manager.database, user.id,
     )
     await update.message.reply_text(text, reply_markup=_back_button(admin=True))
+
+
+async def user_submission_media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    await _touch_user(update)
+    if await user_submissions.on_audio_message(update, context):
+        return
+    pending = peek_await_input(context)
+    if not pending and update.message and (update.message.audio or update.message.document):
+        ok, _reason = user_submissions.submission_quota_ok(
+            user_manager.database, update.effective_user.id,
+        )
+        if ok:
+            await user_submissions.start_submit(update.message, context)
+            await user_submissions.on_audio_message(update, context)
+
+
+async def user_submission_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    await _touch_user(update)
+    await user_submissions.on_photo_message(update, context)
 
 
 async def admin_wizard_nontext_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4232,6 +4324,12 @@ def main():
         ),
         admin_id=ADMIN_ID,
     )
+    user_submissions.init(
+        user_manager=user_manager,
+        downloader=downloader,
+        orchestrator=orchestrator,
+        admin_id=ADMIN_ID,
+    )
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
@@ -4275,6 +4373,8 @@ def main():
     application.add_handler(CommandHandler("topup", topup_command))
     application.add_handler(CommandHandler("aboutme", aboutme_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("submit", submit_command))
+    application.add_handler(CommandHandler("uploads", uploads_command))
     application.add_handler(CommandHandler("support", support_command))
     application.add_handler(CommandHandler("supportend", supportend_command))
     application.add_handler(CallbackQueryHandler(error_report_callback, pattern=r"^err:\d+$"))
@@ -4313,6 +4413,26 @@ def main():
                 admin_wizard_nontext_handler,
             ),
         )
+    application.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE
+            & ~filters.COMMAND
+            & (filters.AUDIO | filters.Document.AUDIO | filters.Document.MP3),
+            user_submission_media_handler,
+            block=False,
+        ),
+        group=1,
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE
+            & ~filters.COMMAND
+            & (filters.PHOTO | filters.Document.IMAGE),
+            user_submission_photo_handler,
+            block=False,
+        ),
+        group=1,
+    )
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message, block=False),
     )

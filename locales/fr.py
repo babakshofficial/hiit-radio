@@ -11,6 +11,7 @@ STRINGS = {
     "platform_soundcloud": "SoundCloud",
     "platform_deezer": "Deezer",
     "platform_cache": "Cache",
+    "platform_community": "Communauté",
 
     # --- download buttons ---
     "btn_redownload": "🔄 Télécharger à nouveau : {label}",
@@ -27,6 +28,39 @@ STRINGS = {
         "ou écris le nom d'une chanson — je m'occupe du reste.\n\n"
         "Commence avec les boutons ci-dessous 👇"
     ),
+    "cmd_start": "Ouvrir le menu principal",
+    "cmd_search": "Rechercher un titre",
+    "cmd_artist": "Parcourir un artiste",
+    "cmd_follow": "Suivre un artiste",
+    "cmd_following": "Artistes suivis",
+    "cmd_history": "Historique des téléchargements",
+    "cmd_liked": "Favoris",
+    "cmd_top": "Titres populaires",
+    "cmd_discover": "Recommandations pour toi",
+    "cmd_quality": "Qualité audio",
+    "cmd_premium": "Statut Premium",
+    "cmd_invite": "Inviter un ami",
+    "cmd_submit": "Envoyer ton morceau",
+    "cmd_uploads": "Tes envois",
+    "cmd_support": "Support",
+    "cmd_lang": "Changer de langue",
+    "cmd_help": "Guide du bot",
+    "cmd_aboutme": "À propos de HiiT Radio",
+    "cmd_stop": "Annuler le téléchargement",
+    "cmd_admin": "Panneau admin",
+    "cmd_stats": "Statistiques",
+    "cmd_report": "Tableau de bord",
+    "cmd_reports": "Signalements utilisateurs",
+    "cmd_users": "Liste des utilisateurs",
+    "cmd_user": "Fiche utilisateur",
+    "cmd_export": "Exporter la base",
+    "cmd_cookies": "État des cookies YouTube",
+    "cmd_creds": "État des identifiants",
+    "cmd_broadcast": "Message à tous",
+    "cmd_grant": "Accorder Premium",
+    "cmd_topup": "Recharger le quota",
+    "cmd_supportend": "Fin de session support",
+
     "help_text": (
         "Comment ça marche ?\n\n"
         "1. Envoie un lien de titre, d'album ou de playlist\n"
@@ -472,6 +506,9 @@ STRINGS = {
     "admin_channelid": "🆔 ID canal",
     "admin_grant": "➕ Accorder",
     "admin_topup": "💰 Recharge",
+    "admin_user_music": "🎵 Musique utilisateurs",
+    "menu_submit_music": "📤 Envoyer un titre",
+    "menu_my_submissions": "📋 Mes envois",
     "admin_broadcast_usage": "Usage : /broadcast <message>",
     "admin_grant_usage": "Usage : /grant <user_id> <premium|unlimited> <days>",
     "admin_topup_usage": "Usage : /topup <user_id> [amount]",
@@ -577,6 +614,86 @@ STRINGS = {
     ),
     "changelog_manual_empty": "Message vide — envoie le texte du changelog.",
     "changelog_pending_admin_header": "Changelog en attente (CHANGELOG_PENDING.md) :",
+
+    # --- user music submissions ---
+    "usub_prompt_audio": "Send an audio file or MP3 document for your track.",
+    "usub_prompt_title": "Track title?",
+    "usub_prompt_artist": "Artist name?",
+    "usub_prompt_genre": "Pick a genre:",
+    "usub_prompt_genre_other": "Type the genre:",
+    "usub_prompt_artwork": "Send cover art (photo or image file).",
+    "usub_submitted": "✅ Submitted for review: {title} — {artist}",
+    "usub_quota_max_pending": "You already have 3 tracks waiting for review. Withdraw one or wait for admin.",
+    "usub_quota_daily": "You can submit up to 3 tracks per day. Try again tomorrow.",
+    "usub_bad_audio": "Couldn’t use that file. Send MP3 or another audio format.",
+    "usub_audio_too_large": "File is too large (max {max_mb} MB).",
+    "usub_bad_artwork": "Send a photo or image for the cover.",
+    "usub_title_invalid": "Title must be 1–200 characters.",
+    "usub_artist_invalid": "Artist must be 1–200 characters.",
+    "usub_genre_invalid": "Genre must be 1–80 characters.",
+    "usub_session_expired": "Upload session expired — start again from the menu.",
+    "usub_not_found": "Submission not found.",
+    "usub_withdrawn": "Withdrawn — it won’t be reviewed.",
+    "usub_no_artwork": "No artwork on file.",
+    "usub_my_header": "📋 Your submitted tracks",
+    "usub_my_empty": "Nothing here yet.",
+    "usub_my_line": "• {title} — {artist} ({status})",
+    "usub_detail": (
+        "🎵 {title}\n"
+        "👤 {artist}\n"
+        "🎼 {genre}\n"
+        "📌 {status}"
+    ),
+    "usub_btn_submit": "📤 Submit another",
+    "usub_btn_my_list": "📋 My uploads",
+    "usub_btn_withdraw": "🗑 Withdraw",
+    "usub_status_pending": "Pending review",
+    "usub_status_approved": "Approved",
+    "usub_status_rejected": "Rejected",
+    "usub_status_withdrawn": "Withdrawn",
+    "usub_genre_pop": "Pop",
+    "usub_genre_rock": "Rock",
+    "usub_genre_hiphop": "Hip-Hop",
+    "usub_genre_electronic": "Electronic",
+    "usub_genre_classical": "Classical",
+    "usub_genre_jazz": "Jazz",
+    "usub_genre_folk": "Folk",
+    "usub_genre_metal": "Metal",
+    "usub_genre_rnb": "R&B",
+    "usub_genre_other": "Other",
+    "usub_admin_new": (
+        "🎵 New community submission #{id}\n"
+        "{title} — {artist}\n"
+        "From {user_id} {username}"
+    ),
+    "usub_admin_review": "Review",
+    "usub_admin_queue_header": "Pending user music ({count})",
+    "usub_admin_queue_empty": "Queue is empty.",
+    "usub_admin_queue_line": "#{id} {title} — {artist} ({user})",
+    "usub_admin_detail": (
+        "Submission #{id}\n"
+        "{title} — {artist}\n"
+        "Genre: {genre}\n"
+        "Status: {status}\n"
+        "User: {user_id} ({username})"
+    ),
+    "usub_admin_listen": "▶️ Listen",
+    "usub_admin_artwork": "🖼 Cover",
+    "usub_admin_approve": "✅ Approve",
+    "usub_admin_reject": "❌ Reject",
+    "usub_admin_back_queue": "📋 Queue",
+    "usub_admin_approved_ok": "Approved #{id} — live in search.",
+    "usub_admin_reject_prompt": "Pick a reason or send a short message:",
+    "usub_admin_rejected_ok": "Rejected #{id}.",
+    "usub_reject_low_quality": "Low quality",
+    "usub_reject_rights": "Rights / copyright",
+    "usub_reject_metadata": "Wrong metadata",
+    "usub_approved_user": "✅ Your track “{title}” was approved — everyone can search and download it.",
+    "usub_approved_user_bonus": (
+        "✅ Your track “{title}” was approved.\n"
+        "+{bonus} extra downloads for today ({used}/{limit})."
+    ),
+    "usub_rejected_user": "Your submission “{title}” was not approved.\nReason: {reason}",
 
     # --- language selection ---
     "lang_choose": "🌐 Choisis la langue du bot :",
