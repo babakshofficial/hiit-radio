@@ -28,6 +28,40 @@ STRINGS = {
         "or type a song name — I'll take care of the rest.\n\n"
         "Start with the buttons below 👇"
     ),
+    # --- slash command menu (Telegram Menu button) ---
+    "cmd_start": "Open the main menu",
+    "cmd_search": "Search for a track",
+    "cmd_artist": "Browse an artist",
+    "cmd_follow": "Follow an artist",
+    "cmd_following": "Artists you follow",
+    "cmd_history": "Download history",
+    "cmd_liked": "Your favorites",
+    "cmd_top": "Most popular tracks",
+    "cmd_discover": "Personal recommendations",
+    "cmd_quality": "Audio quality",
+    "cmd_premium": "Premium status",
+    "cmd_invite": "Invite a friend",
+    "cmd_submit": "Submit your own track",
+    "cmd_uploads": "Your submitted tracks",
+    "cmd_support": "Contact support",
+    "cmd_lang": "Change language",
+    "cmd_help": "How to use the bot",
+    "cmd_aboutme": "About HiiT Radio",
+    "cmd_stop": "Cancel current download",
+    "cmd_admin": "Admin panel",
+    "cmd_stats": "Bot statistics",
+    "cmd_report": "Usage dashboard",
+    "cmd_reports": "User failure reports",
+    "cmd_users": "List users",
+    "cmd_user": "User details",
+    "cmd_export": "Export database",
+    "cmd_cookies": "YouTube cookies status",
+    "cmd_creds": "Credentials status",
+    "cmd_broadcast": "Message all users",
+    "cmd_grant": "Grant premium days",
+    "cmd_topup": "Add download quota",
+    "cmd_supportend": "End support session",
+
     "help_text": (
         "How do I use this?\n\n"
         "1. Send a track, album or playlist link\n"

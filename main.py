@@ -91,6 +91,7 @@ import support_chat
 import admin_wizard
 import changelog
 import user_submissions
+import bot_commands
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
@@ -820,6 +821,9 @@ async def lang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_manager.set_language(user.id, code)
     msg.set_lang(code)
+    await bot_commands.refresh_user_commands(
+        context.bot, user.id, code, admin_id=ADMIN_ID,
+    )
     await query.answer(msg.lang_set(code))
     try:
         await query.message.edit_text(
@@ -3496,6 +3500,10 @@ async def _on_startup(application):
         await configure_webapp_menu(application.bot)
     except Exception:
         logger.exception("Mini App menu setup skipped")
+    try:
+        await bot_commands.configure_menu(application.bot, ADMIN_ID)
+    except Exception:
+        logger.exception("Bot commands menu setup skipped")
     if application.job_queue:
         application.job_queue.run_repeating(_cache_sweep_job, interval=3600, first=60)
         application.job_queue.run_repeating(_cookie_health_job, interval=3600, first=120)
@@ -4019,6 +4027,22 @@ async def support_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(text[:200], show_alert=True)
 
 
+async def submit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    await _touch_user(update)
+    resolve_lang(update.effective_user)
+    await user_submissions.start_submit(update.effective_message, context)
+
+
+async def uploads_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    await _touch_user(update)
+    resolve_lang(update.effective_user)
+    await user_submissions.start_my_submissions(update.effective_message, context)
+
+
 async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user:
@@ -4349,6 +4373,8 @@ def main():
     application.add_handler(CommandHandler("topup", topup_command))
     application.add_handler(CommandHandler("aboutme", aboutme_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("submit", submit_command))
+    application.add_handler(CommandHandler("uploads", uploads_command))
     application.add_handler(CommandHandler("support", support_command))
     application.add_handler(CommandHandler("supportend", supportend_command))
     application.add_handler(CallbackQueryHandler(error_report_callback, pattern=r"^err:\d+$"))

@@ -28,6 +28,40 @@ STRINGS = {
         "یا اسم آهنگ رو بنویسی — بقیه‌اش با من.\n\n"
         "از دکمه‌های زیر شروع کن 👇"
     ),
+    # --- slash command menu (Telegram Menu button) ---
+    "cmd_start": "باز کردن منوی اصلی",
+    "cmd_search": "جستجوی آهنگ",
+    "cmd_artist": "مرور هنرمند",
+    "cmd_follow": "دنبال کردن هنرمند",
+    "cmd_following": "هنرمندان دنبال‌شده",
+    "cmd_history": "تاریخچه دانلود",
+    "cmd_liked": "علاقه‌مندی‌ها",
+    "cmd_top": "محبوب‌ترین‌ها",
+    "cmd_discover": "پیشنهاد شخصی",
+    "cmd_quality": "کیفیت صدا",
+    "cmd_premium": "وضعیت پریمیوم",
+    "cmd_invite": "دعوت دوست",
+    "cmd_submit": "ارسال آهنگ خودت",
+    "cmd_uploads": "آهنگ‌های ارسالی تو",
+    "cmd_support": "پشتیبانی",
+    "cmd_lang": "تغییر زبان",
+    "cmd_help": "راهنمای ربات",
+    "cmd_aboutme": "درباره HiiT Radio",
+    "cmd_stop": "لغو دانلود جاری",
+    "cmd_admin": "پنل مدیریت",
+    "cmd_stats": "آمار ربات",
+    "cmd_report": "داشبورد",
+    "cmd_reports": "گزارش‌های کاربران",
+    "cmd_users": "لیست کاربران",
+    "cmd_user": "جزئیات کاربر",
+    "cmd_export": "خروجی پایگاه داده",
+    "cmd_cookies": "وضعیت کوکی یوتیوب",
+    "cmd_creds": "وضعیت اعتبارنامه‌ها",
+    "cmd_broadcast": "پیام همگانی",
+    "cmd_grant": "گرنت پریمیوم",
+    "cmd_topup": "شارژ سهمیه دانلود",
+    "cmd_supportend": "پایان گفتگوی پشتیبانی",
+
     "help_text": (
         "چطور استفاده کنم؟\n\n"
         "۱. لینک آهنگ، آلبوم یا پلی‌لیست بفرست\n"
