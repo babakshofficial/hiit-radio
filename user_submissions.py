@@ -11,8 +11,9 @@ import tempfile
 import time
 from pathlib import Path
 
-from mutagen.id3 import APIC, ID3, TCON, TIT2, TPE1
+from mutagen.id3 import APIC, ID3, TCON, TIT2, TPE1, TXXX
 from mutagen.mp3 import MP3
+from PIL import Image
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 import entitlements
@@ -143,6 +144,10 @@ def embed_submission_tags(audio_path, title, artist, genre=None, artwork_jpeg=No
             audio.tags.add(TCON(encoding=3, text=genre))
         if artwork_jpeg:
             audio.tags.delall("APIC")
+            audio.tags.delall("TXXX:HIIT_WATERMARK_STYLE")
+            audio.tags.add(
+                TXXX(encoding=3, desc="HIIT_WATERMARK_STYLE", text=["rounded"]),
+            )
             audio.tags.add(
                 APIC(
                     encoding=3,
@@ -152,11 +157,79 @@ def embed_submission_tags(audio_path, title, artist, genre=None, artwork_jpeg=No
                     data=artwork_jpeg,
                 )
             )
-        audio.save()
+        audio.save(v2_version=3)
         return True
     except Exception as e:
         logger.error("embed_submission_tags failed: %s", e)
         return False
+
+
+def ensure_submission_cover_embedded(row):
+    """Re-embed APIC from cover.jpg when missing (older submissions)."""
+    audio_path = row.get("audio_path")
+    art_path = row.get("artwork_path")
+    if not audio_path or not os.path.isfile(audio_path):
+        return
+    if not art_path or not os.path.isfile(art_path):
+        return
+    dl = _downloader()
+    if dl and dl.file_has_cover(audio_path):
+        return
+    with open(art_path, "rb") as f:
+        art = f.read()
+    embed_submission_tags(
+        audio_path,
+        row.get("title") or "",
+        row.get("artist") or "",
+        row.get("genre"),
+        art,
+    )
+
+
+def _resize_thumbnail_jpeg(jpeg_bytes, max_px=320):
+    try:
+        img = Image.open(io.BytesIO(jpeg_bytes))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        img.thumbnail((max_px, max_px), Image.Resampling.LANCZOS)
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=85)
+        return out.getvalue()
+    except Exception:
+        return None
+
+
+def submission_thumbnail_bytes(row):
+    """Thumbnail for Telegram sendAudio (embedded APIC or cover.jpg)."""
+    dl = _downloader()
+    audio_path = row.get("audio_path") or ""
+    if dl and audio_path and os.path.isfile(audio_path):
+        thumb = dl.telegram_thumbnail_jpeg(audio_path)
+        if thumb:
+            return thumb
+    art_path = row.get("artwork_path")
+    if art_path and os.path.isfile(art_path):
+        with open(art_path, "rb") as f:
+            return _resize_thumbnail_jpeg(f.read())
+    return None
+
+
+async def _reply_submission_audio(message, row):
+    ensure_submission_cover_embedded(row)
+    audio_path = row.get("audio_path")
+    if not audio_path or not os.path.isfile(audio_path):
+        return
+    kwargs = {
+        "title": row.get("title"),
+        "performer": row.get("artist"),
+    }
+    thumb = submission_thumbnail_bytes(row)
+    if thumb:
+        bio = io.BytesIO(thumb)
+        bio.name = "cover.jpg"
+        kwargs["thumbnail"] = bio
+    with open(audio_path, "rb") as f:
+        await message.reply_audio(audio=f, **kwargs)
 
 
 def _to_mp3(raw_path, dest_path):
@@ -289,12 +362,7 @@ async def show_submission_detail(message, context, submission_id, user_id):
     await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
     if row.get("audio_path") and os.path.isfile(row["audio_path"]):
         try:
-            with open(row["audio_path"], "rb") as f:
-                await message.reply_audio(
-                    audio=f,
-                    title=row["title"],
-                    performer=row["artist"],
-                )
+            await _reply_submission_audio(message, row)
         except Exception as e:
             logger.debug("preview audio failed: %s", e)
 
@@ -639,12 +707,7 @@ async def admin_listen(message, context, submission_id):
     if not row or not row.get("audio_path") or not os.path.isfile(row["audio_path"]):
         await message.reply_text(msg.t("usub_not_found"))
         return
-    with open(row["audio_path"], "rb") as f:
-        await message.reply_audio(
-            audio=f,
-            title=row["title"],
-            performer=row["artist"],
-        )
+    await _reply_submission_audio(message, row)
 
 
 async def admin_artwork(message, context, submission_id):

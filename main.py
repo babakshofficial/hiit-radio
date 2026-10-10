@@ -3130,7 +3130,9 @@ async def _handle_track_job(update, context, text, user, job):
         msg.searching(), reply_markup=msg.stop_job_keyboard(),
     )
     job["status_message"] = status_message
-    metadata = await TrackMetadata.create(text, _ydl_opts_factory)
+    metadata = catalog.resolve_community_metadata(user_manager.database, text)
+    if metadata is None:
+        metadata = await TrackMetadata.create(text, _ydl_opts_factory)
 
     if not metadata.title:
         _end_job(context, job)

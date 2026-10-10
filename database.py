@@ -1764,25 +1764,47 @@ class Database:
             per_page,
         )
 
-    def search_approved_user_music(self, query, limit=5):
-        q = (query or "").strip()
+    def search_approved_user_music(self, query, limit=5, min_score=0.45):
+        import re
+
+        q = (query or "").strip().lower()
         if len(q) < 2:
             return []
         try:
             limit = min(max(int(limit), 1), 20)
         except (TypeError, ValueError):
             limit = 5
-        pattern = f"%{q}%"
+        tokens = [
+            t for t in re.findall(r"[\w\u0600-\u06ff]+", q, flags=re.UNICODE)
+            if len(t) >= 2
+        ]
+        if not tokens:
+            tokens = [q]
         with self._conn() as conn:
             rows = conn.execute(
-                """SELECT id, title, artist, genre, artwork_path
+                """SELECT id, title, artist, genre, artwork_path, reviewed_at
                    FROM user_music_submissions
-                   WHERE status='approved'
-                     AND (title LIKE ? OR artist LIKE ?
-                          OR (title || ' ' || artist) LIKE ?)
-                   ORDER BY reviewed_at DESC
-                   LIMIT ?""",
-                (pattern, pattern, pattern, limit),
+                   WHERE status='approved'""",
             ).fetchall()
-        return [dict(r) for r in rows]
+        scored = []
+        for row in rows:
+            r = dict(row)
+            hay = f"{r.get('title') or ''} {r.get('artist') or ''}".lower()
+            if not hay.strip():
+                continue
+            hits = sum(1 for t in tokens if t in hay)
+            if hits == 0 and q not in hay:
+                continue
+            score = hits / max(len(tokens), 1)
+            if q in hay:
+                score += 0.25
+            compact_q = re.sub(r"\s+", "", q)
+            compact_hay = re.sub(r"\s+", "", hay)
+            if compact_q and compact_q in compact_hay:
+                score += 0.15
+            if score < min_score:
+                continue
+            scored.append((score, float(r.get("reviewed_at") or 0), r))
+        scored.sort(key=lambda item: (-item[0], -item[1]))
+        return [r for _s, _t, r in scored[:limit]]
 

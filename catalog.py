@@ -28,7 +28,13 @@ _YOUTUBE_RE = re.compile(
 )
 _SOUNDCLOUD_RE = re.compile(r"(?:www\.|m\.|on\.)?soundcloud\.com/")
 
-_SOURCE_WEIGHT = {"deezer": 1.0, "apple": 0.97, "soundcloud": 0.9, "youtube": 0.87}
+_SOURCE_WEIGHT = {
+    "deezer": 1.0,
+    "apple": 0.97,
+    "soundcloud": 0.9,
+    "youtube": 0.87,
+    "community": 1.08,
+}
 
 
 class CatalogError(Exception):
@@ -381,6 +387,24 @@ async def search_all(query: str, limit: int = 12, db=None) -> list[CatalogHit]:
     merged.extend(community_hits)
     merged.sort(key=lambda h: _relevance(h, query), reverse=True)
     return merged[:limit]
+
+
+def resolve_community_metadata(db, query, min_score=0.55):
+    """Best approved user upload for a free-text query, or None."""
+    if db is None:
+        return None
+    rows = db.search_approved_user_music(query, limit=1, min_score=min_score)
+    if not rows:
+        return None
+    row = rows[0]
+    meta = TrackMetadata()
+    meta.title = row.get("title")
+    meta.artist = row.get("artist")
+    meta.url = f"community:{row['id']}"
+    meta.community_submission_id = int(row["id"])
+    meta.type = "track"
+    meta.search_query = (query or "").strip()
+    return meta
 
 
 def hit_to_track_metadata(hit: CatalogHit) -> TrackMetadata:
