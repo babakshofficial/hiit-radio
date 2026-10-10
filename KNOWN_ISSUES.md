@@ -2,9 +2,36 @@
 
 Open problems backed by evidence: submitted user error reports (`user_error_reports` in `hiit_radio.db`), `journalctl --user -u hiit-radio` logs, or code reading. Nothing goes on this list without evidence.
 
-Last reviewed: 2026-10-10 (reports #1–#69).
+Last reviewed: 2026-10-10 (all 69 rows; 18 submitted).
 
-Status values: `open`, `fix in draft PR #N` (not merged/deployed), `config` (not a code bug), `blocked: <reason>`.
+Status values: `open`, `fix in draft PR #N` (not merged/deployed), `config` (not a code bug), `monitor` (historical; not seen recently, not re-verified — **not** for automatic fixing), `blocked: <reason>`.
+
+Language = the reporting user's current `users.language` setting.
+
+## All submitted reports (full history from `user_error_reports`)
+
+Every row with `submitted_at` set, grouped by root cause. Unsubmitted rows (62, 66, 68, 69 and older drafts) are only cited as extra evidence inside issues.
+
+| Report | Date (Tehran) | Lang | error_kind / code | Track / query | Root-cause group | Status |
+|---|---|---|---|---|---|---|
+| #1 | 2026-08-22 | fa | download / drm | Stop Beating on My Heart — Tigercub (Apple) | KI-8 | monitor |
+| #2 | 2026-08-22 | fa | download / drm | Stop Beating on My Heart — Tigercub (Apple) | KI-8 | monitor |
+| #6 | 2026-08-22 | fa | download / bot_check | Stop Beating on My Heart — Tigercub (Apple) | KI-8 | monitor |
+| #19 | 2026-08-25 | fa | metadata / not_found | Apple `lifeforce/1762787830` | KI-10 | monitor |
+| #20 | 2026-08-25 | fa | download / unknown | Heart's Enigma — AL3 (Apple) | KI-5 | open |
+| #22 | 2026-08-25 | fa | mismatch / wrong_track | ghost (feat. HUMAN) [Alex Wann Remix] — Aaron Hibell | KI-9 | monitor |
+| #23 | 2026-08-25 | fa | mismatch / wrong_track | Summertime DJ Jazzy Jeff and The Fresh Prince (free text) | KI-9 | monitor |
+| #26 | 2026-09-03 | fa | mismatch / wrong_track | Loser — Tame Impala (Apple) | KI-9 | monitor |
+| #40 | 2026-09-06 | fa | mismatch / wrong_track | HOW STRONG IS YOUR LOVE RH0NIQ (free text) | KI-9 | monitor |
+| #44 | 2026-09-06 | fa | discover / llm_error | /discover | KI-7 | config (401) + open (key in logs) |
+| #52 | 2026-09-16 | fa | mismatch / wrong_track | Neverender — Justice & Tame Impala (Apple) | KI-9 | monitor |
+| #53 | 2026-09-16 | fa | mismatch / wrong_track | Neverender — Justice & Tame Impala (Apple) | KI-9 | monitor |
+| #56 | 2026-09-16 | fa | mismatch / wrong_track | Neverender — Justice & Tame Impala (Apple) | KI-9 (cache) | monitor |
+| #58 | 2026-09-16 | fa | mismatch / wrong_track | Neverender — Justice & Tame Impala (Apple) | KI-9 (cache) | monitor |
+| #63 | 2026-10-07 | fa | download / no_match | Tik taak na dige na kensiw remix | KI-1, KI-2 | fix in draft PR #2 / open |
+| #64 | 2026-10-07 | en | download / no_match | Tik taak na dige na kensiw remix | KI-1, KI-2 | fix in draft PR #2 / open |
+| #65 | 2026-10-08 | fa | download / no_match | Mahshid — Yonatan Riklis (free text) | KI-4 | open |
+| #67 | 2026-10-10 | en | mismatch / wrong_track | The Center of the Universe — Delorians (Apple) | KI-3 | open |
 
 ---
 
@@ -47,11 +74,11 @@ Status values: `open`, `fix in draft PR #N` (not merged/deployed), `config` (not
 - **Suggested fix:** return a distinct code (e.g. `not_available`) when there are no raw search results or no eligible candidates for a catalog-identified track (iTunes/Deezer hit exists). Add a localized message like "This track isn't available on our sources yet; if you have a YouTube/SoundCloud link, send it directly."
 - **Verify:** request `Mahshid Yonatan Riklis` and check that the new message appears in both en and fa. Check that a real mismatch case still says "try a different name".
 
-### KI-5 — Network failure / cookie-probe timeout reported as `unknown` and shown as "No full version found"
+### KI-5 — Network / format / probe failures reported as `unknown` and shown as "No full version found"
 - **Status:** open.
-- **Source reports:** #66 (Grim Velocity — Threnqelia, never submitted, `cookies_ok: false`, `timeout after 20s (auth=cookiefile)`). Same pattern in #59, #60 (Neverender, `unknown`, 20 s timeout) and #57 (`send_failed`, 20 s timeout).
+- **Source reports:** #20 (submitted, 2026-08-25, Heart's Enigma — AL3: `Best YouTube match 88.0%` then `Requested format is not available` for two candidates → `unknown`); #66 (Grim Velocity — Threnqelia, never submitted, `cookies_ok: false`, `timeout after 20s (auth=cookiefile)`). Same pattern in #59, #60 (Neverender, `unknown`, 20 s timeout) and #57 (`send_failed`, 20 s timeout).
 - **Symptoms:** log 2026-10-10 11:08: `Download of YouTube match failed (unknown) … [Errno 101] Network is unreachable`, then `yt_worker probe no formats` → `YouTube worker failure under proxychains — retrying without LD_PRELOAD` → `YouTube worker timeout after 20s (auth=cookiefile)` twice. Error code `unknown`; user sees "No full version found…".
-- **Root cause:** `_classify_error()` inside `download_song()` doesn't recognise network errors ("network is unreachable", proxy/SSL errors). `_is_network_probe_error()` already lists them but isn't used there, so they fall through to `unknown`, and `download_fail_message("unknown")` reuses `download_not_found`. The 20 s worker timeout is likely the proxy/network path, not the cookies.
+- **Root cause:** `_classify_error()` inside `download_song()` doesn't recognise network errors or `Requested format is not available` (#20) ("network is unreachable", proxy/SSL errors). `_is_network_probe_error()` already lists them but isn't used there, so they fall through to `unknown`, and `download_fail_message("unknown")` reuses `download_not_found`. The 20 s worker timeout is likely the proxy/network path, not the cookies.
 - **Files:** `downloader.py` (`_classify_error` in `download_song`, `_is_network_probe_error`, yt_worker timeout around `last_err = f"timeout after {timeout}s (auth={auth})"`); `messages.py` (`download_fail_message`); `main.py` (report context `cookies_ok` / `cookies_detail`).
 - **Suggested fix:** in `_classify_error`, return `"network"` (or `"timeout"`) when `_is_network_probe_error(err)` is true. Map it to a "connection problem, please try again in a minute" message, and don't count it as cookie failure in reports.
 - **Verify:** simulate by pointing the proxy at a dead port (local only) or unit-test `_classify_error` with the logged error string. Expect code `network`/`timeout` and the matching message, not `unknown`.
@@ -65,18 +92,48 @@ Status values: `open`, `fix in draft PR #N` (not merged/deployed), `config` (not
 
 ---
 
-## Older reports — not re-verified
+### KI-7 — /discover LLM call failed with HTTP 401, and the error log prints the full LLM URL (contains a credential)
+- **Status:** 401 = config (provider auth), not re-verified since 2026-09-06. URL logging = open (security hygiene).
+- **Source reports:** #44 (submitted, 2026-09-06, fa, discover / llm_error); unsubmitted #43, #46.
+- **Symptoms:** log 2026-09-06 21:55: `llm_service - ERROR - LLM API 401 model='GPT-OSS-20B' url=https://arvancloudai.ir/gateway/models/GPT-OSS-20B/<long token>…`. The gateway URL path carries a secret-looking token, and it is written to the journal in plain text.
+- **Root cause:** the 401 is a rejected or expired LLM credential (config). The leak comes from `llm_service.py` error logs that format the full `url` (lines ~253, ~365, ~457: `LLM API … url=…`).
+- **Files:** `llm_service.py` (error logging in the chat / similar / third LLM call paths).
+- **Suggested fix:** log only the host plus model (e.g. `urllib.parse.urlsplit(url).netloc`) or redact path segments longer than ~20 chars. Rotate the LLM key if journal logs were ever shared. Check `.env` LLM settings by hand; agents must not print them.
+- **Verify:** force a 401 (bad key in a local test env) and confirm the log line has no token. Run `/discover` and check that it answers.
 
-These were reported before the current matcher/cookie work. Their current status is unknown; re-test before treating them as open bugs.
+### KI-8 — YouTube bot-check plus SoundCloud DRM left catalog tracks undownloadable (Aug)
+- **Status:** monitor. Since the cookie work on 2026-08-23 (`d87c40a` live-probe cookie health, `7dde582`) and 2026-09-16 (`df816c3`, `33c772c`), recent reports show `live probe OK`. Not re-verified for this track.
+- **Source reports:** #1, #2 (download / drm), #6 (download / bot_check), all 2026-08-22, fa. Unsubmitted #3–#5, #7–#17, #25 for the same track.
+- **Symptoms:** `Sign in to confirm you're not a bot` on every YouTube candidate, then the SoundCloud fallback `1069996387: This video is DRM protected`. Since `drm` was the last error, the user saw DRM.
+- **Root cause:** expired or unusable YouTube cookies (bot check), and the only SoundCloud upload is DRM-protected.
+- **Files:** `downloader.py` (cookie probe / `youtube_auth_ok`, SoundCloud fallback ordering), `cred_status.py`, `check_creds.sh`.
+- **Suggested fix:** none needed now; reopen if bot_check reports return. When YouTube is bot-blocked and SoundCloud is DRM-only, report `bot_check` (the real cause) rather than `drm`.
+- **Verify:** request the Tigercub Apple link with good cookies; it should download from YouTube.
 
-| Reports | Kind | Track | Note |
-|---|---|---|---|
-| #1–#17, #25 | download `drm` / `bot_check` / `unknown` | Stop Beating on My Heart — Tigercub (Apple) | Aug–Sep, cookies/bot-check era |
-| #24–#37 | download `unknown` / `drm` | various Apple links | `[proxychains]` errors in `cookies_detail` |
-| #38–#42, #45, #47–#51 | download `no_match` / `unknown` | how strong is your love? — Mila Blond, Heart's Enigma — AL3, Basslines Under Control — Qloom, She's so Lovely — The Butchies, The World Slows Down — November Kid | cookie probe timeouts 30 s / 120 s |
-| #22, #23, #26, #40, #52, #53, #56, #58 | mismatch `wrong_track` | ghost [Alex Wann Remix], Summertime, Loser, HOW STRONG IS YOUR LOVE, Neverender | the remix/artist gates in `downloader.py` were added after some of these |
-| #19 | metadata `not_found` | Apple `lifeforce/1762787830` | |
-| #43, #44, #46 | discover `llm_error` | — | no context stored |
+### KI-9 — Wrong track: SoundCloud remix/flip/fan uploads accepted, then hidden behind catalog tags and cached (Aug–Sep)
+- **Status:** monitor. Later gates likely cover it: `_required_version_tokens` (its docstring cites the #22 case), `_NOISE_PATTERNS` with `flip`/`remix`, "Prefer official YouTube over SoundCloud flips/remixes" in `download_song`, and cache invalidation on mismatch reports (log 2026-10-10 12:30 `Cache invalidated track` right after #67). Not re-verified per track. KI-3 is the open, still-reproducing member of this family.
+- **Source reports:** #22, #23 (2026-08-25), #26 (2026-09-03), #40 (2026-09-06), #52, #53, #56, #58 (2026-09-16). All fa, mismatch / wrong_track.
+- **Symptoms (logs):**
+  - #22: `Best SoundCloud match 68.2% — 'Aaron Hibell feat. Alex Wann - Set Me Free (Dealex Remix)'` downloaded for *ghost [Alex Wann Remix]*, even though YouTube had `Early accept at 100.0%`.
+  - #23: SoundCloud fan upload `summertime-high-quality` (86.8%) chosen over YouTube 100%.
+  - #26: SoundCloud `'Loser     - Tame Impala .mp3'` (82.5%) chosen over YouTube 100%.
+  - #40: SoundCloud `How strong is your love (feat. Luis Daniel)` (DRM) then `RH0NIQ` upload.
+  - #52/#53: SoundCloud `Neverender (Mersiv Flip)` at 100% chosen.
+  - #56/#58: `Cache hit: Neverender — Justice & Tame Impala`, so the wrong flip was served from cache after the report.
+  - Every one logged `Keeping catalog tags …`, so file tags looked correct.
+- **Root cause:** SoundCloud candidates were tried before or instead of a 100% YouTube match. Remix/flip and fan uploads weren't gated, and wrong audio stayed in cache after a mismatch report.
+- **Files:** `downloader.py` (`download_song` source ordering/download queue, `_has_noise`, `_required_version_tokens`), `cache_manager.py` (`invalidate_track`), `main.py` (mismatch report handler).
+- **Suggested fix:** if any of these reappears, prefer the higher-scoring YouTube candidate over SoundCloud for catalog links, and reject SoundCloud uploads whose uploader doesn't match the artist (same idea as KI-3).
+- **Verify:** re-request each listed Apple link / query after invalidating its cache. The audio should be the original track (check the duration against iTunes `trackTimeMillis`).
+
+### KI-10 — Apple metadata fetch failed: `music.apple.com` unreachable (Aug)
+- **Status:** monitor (environmental / network).
+- **Source reports:** #19 (2026-08-25, fa, metadata / not_found).
+- **Symptoms:** log 2026-08-25 08:24: `Error fetching meta: Cannot connect to host music.apple.com:443 … [Network is unreachable]` → `Apple Music metadata extraction failed` → user told "not found".
+- **Root cause:** network/proxy outage on the host, reported to the user as `not_found`.
+- **Files:** `metadata.py` (`AppleMusicMetadata.fetch`, `TrackMetadata.create`), `main.py` (metadata error report).
+- **Suggested fix:** classify connection errors as `network` and tell the user to retry, as in KI-5.
+- **Verify:** unit-test the classification with the logged error string.
 
 ---
 
