@@ -102,16 +102,83 @@ def looks_like_music_query(text):
     return True
 
 
+# Trailing words that describe a *version* of a song, never its artist
+# ("Song Artist remix", "Song slowed reverb", "Song (live)").
+_VERSION_DESCRIPTOR_WORDS = (
+    r"remix(?:es|ed)?|live|cover|acoustic|instrumental|karaoke|nightcore|"
+    r"slowed|reverb|reverbed|sped\s*up|speed\s*up|extended(?:\s+mix)?|"
+    r"club\s*mix|radio\s*edit|edit|version|remaster(?:ed)?|lo-?fi|8d(?:\s*audio)?|"
+    r"bass\s*boosted|mashup|bootleg|rework|vip"
+)
+_TRAILING_DESCRIPTOR_RE = re.compile(
+    r"(?:\s+|^)(?:"
+    r"[\(\[]\s*[^\)\]]*\b(?:" + _VERSION_DESCRIPTOR_WORDS + r")\b[^\)\]]*[\)\]]"
+    r"|(?:" + _VERSION_DESCRIPTOR_WORDS + r")"
+    r")\s*$",
+    re.I,
+)
+_DESCRIPTOR_JOINERS_RE = re.compile(r"(?:\s+|^)(?:[+&,/-]|and|with|n)\s*$", re.I)
+
+
+def split_version_descriptor(query):
+    """Split trailing version words off a free-text query.
+
+    Returns ``(core, descriptor)``; descriptor is ``""`` when none was found or
+    when stripping would leave nothing (a song literally called "Live").
+
+    ``"Tik taak na dige na kensiw remix"`` -> ``("Tik taak na dige na kensiw", "remix")``
+    ``"Song Artist slowed + reverb"`` -> ``("Song Artist", "slowed + reverb")``
+    """
+    q = (query or "").strip()
+    core = q
+    while True:
+        m = _TRAILING_DESCRIPTOR_RE.search(core)
+        if not m:
+            break
+        candidate = core[:m.start()].rstrip()
+        j = _DESCRIPTOR_JOINERS_RE.search(candidate)
+        if j and j.start() > 0:
+            candidate = candidate[:j.start()].rstrip()
+        candidate = candidate.rstrip(" -–,")
+        if not candidate:
+            break
+        core = candidate
+    if core == q:
+        return q, ""
+    descriptor = q[len(core):].strip(" -–,")
+    return core, descriptor
+
+
+def _with_descriptor(title, descriptor):
+    """Re-attach a version descriptor to a title as a bracket group."""
+    if not descriptor:
+        return title
+    d = descriptor.strip()
+    if not (d.startswith("(") or d.startswith("[")):
+        d = f"({d})"
+    return f"{title} {d}".strip() if title else d
+
+
 def guess_title_artist(query):
     """Split free-text into (title, artist) without trusting a single orientation.
 
     Patterns:
     - "Oscar and the Wolf Breathe" → title=Breathe, artist=Oscar and the Wolf
     - "dont wanna be here naits" → title=dont wanna be here, artist=naits
+    - "Song Artist remix" → title="Song (remix)", artist=Artist — version words
+      (remix, live, cover, slowed, sped up, extended, …) are never the artist.
     """
     q = (query or "").strip()
     if not q:
         return "", ""
+    core, descriptor = split_version_descriptor(q)
+    if descriptor:
+        title, artist = _guess_title_artist_core(core)
+        return _with_descriptor(title, descriptor), artist
+    return _guess_title_artist_core(q)
+
+
+def _guess_title_artist_core(q):
     if re.search(r'\s+by\s+', q, re.I):
         parts = re.split(r'\s+by\s+', q, maxsplit=1, flags=re.I)
         if len(parts) == 2:
@@ -1229,11 +1296,16 @@ class TrackMetadata:
 
         # Smart title/artist guess, then retry iTunes with both orientations.
         title, artist = guess_title_artist(query)
-        for variant in (
+        core_query, descriptor = split_version_descriptor(query)
+        core_title, core_artist = guess_title_artist(core_query)
+        for variant in dict.fromkeys((
             f"{title} {artist}".strip(),
             f"{artist} {title}".strip(),
             query,
-        ):
+            # Version words ("remix", "slowed") often sink iTunes; try without.
+            f"{core_title} {core_artist}".strip(),
+            core_query,
+        )):
             if not variant:
                 continue
             source = await AppleMusicMetadata.search_by_query(variant)
@@ -1242,6 +1314,11 @@ class TrackMetadata:
                 if score_query_coverage(query, source.title, source.artist) >= 55:
                     meta._copy_from(source, url=None)
                     meta.search_query = query
+                    # Matched the base song; keep the requested version
+                    # ("remix", "live", …) so the downloader looks for it.
+                    if descriptor and not split_version_descriptor(meta.title or "")[1]:
+                        meta.title = _with_descriptor(meta.title, descriptor)
+                        meta.id = f"{meta.id or ''}-{abs(hash(descriptor.lower()))}"
                     return meta
 
         meta.title = title or query
