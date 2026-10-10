@@ -4389,7 +4389,7 @@ def main():
         MessageHandler(
             filters.ChatType.PRIVATE
             & ~filters.COMMAND
-            & (filters.AUDIO | filters.Document.MIME("audio/")),
+            & (filters.AUDIO | filters.Document.AUDIO | filters.Document.MP3),
             user_submission_media_handler,
             block=False,
         ),
@@ -4399,7 +4399,7 @@ def main():
         MessageHandler(
             filters.ChatType.PRIVATE
             & ~filters.COMMAND
-            & (filters.PHOTO | filters.Document.MIME("image/")),
+            & (filters.PHOTO | filters.Document.IMAGE),
             user_submission_photo_handler,
             block=False,
         ),
