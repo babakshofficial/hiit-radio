@@ -670,4 +670,141 @@ STRINGS = {
     "lang_name_es": "Español",
     "lang_name_ru": "Русский",
     "lang_name_it": "Italiano",
+
+    # --- admin ops ---
+    "creds_header": "وضعیت اعتبارنامه‌ها:",
+    "creds_yt_section": "▶ یوتیوب (دانلود صدا — همه لینک‌ها)",
+    "creds_yt_browser": "  ✓ مرورگر: YTDLP_COOKIES_FROM_BROWSER={browser}",
+    "creds_yt_live_ok": "  ✓ تست زنده: {detail}",
+    "creds_yt_live_fail": "  ✗ تست زنده: {detail}",
+    "creds_yt_browser_hint": "    → در Chrome وارد youtube.com شو؛ secretstorage نصب باشد",
+    "creds_yt_cookies_path": "  ✓ cookies.txt: {path}",
+    "creds_yt_expired_hint": "    → کوکی منقضی شده — از PC export کن یا /cookies بفرست",
+    "creds_yt_cookies_incomplete": "  ✗ cookies.txt هست ولی نشست یوتیوب کامل نیست",
+    "creds_yt_cookies_incomplete_hint": (
+        "    → در مرورگر وارد youtube.com شو و کوکی را دوباره export کن\n"
+        "    → یا YTDLP_COOKIES_FROM_BROWSER=chrome و YTDLP_AUTO_REFRESH_COOKIES=1"
+    ),
+    "creds_yt_cookies_missing": "  ✗ cookies.txt پیدا نشد: {path}",
+    "creds_yt_cookies_missing_hint": "    → فایل را از PC کپی کن یا در مرورگر export کن",
+    "creds_spotify_section": "▶ اسپاتیفای API (فقط متادیتا — دانلود از یوتیوب)",
+    "creds_spotify_ok": "  ✓ SPOTIFY_CLIENT_ID / SECRET در .env هستند",
+    "creds_spotify_embed_note": "  (در صورت خطای ۴۰۳، از embed برای ترک/آلبوم/پلی‌لیست استفاده می‌شود)",
+    "creds_spotify_missing": "  ✗ CLIENT_ID/SECRET ناقص — برای لینک اسپاتیفای از embed استفاده می‌شود",
+    "creds_result_ok": "نتیجه: یوتیوب آمادهٔ دانلود است.",
+    "creds_result_fail": "نتیجه: یوتیوب هنوز آماده نیست — cookies.txt را تنظیم کن.",
+    "admin_stats_users": "کاربران: {count}",
+    "admin_stats_downloads": "دانلودها: {count}",
+    "admin_stats_cache_rate": "نرخ برخورد کش: {pct} ({cached}/{total})",
+    "admin_stats_top_artists": "پربازدیدترین هنرمندان:",
+    "admin_stats_top_songs": "پربازدیدترین آهنگ‌ها:",
+    "admin_stats_platforms": "پلتفرم‌ها:",
+    "admin_stats_skipped_changelog": "تغییرلاگ‌های ردشده (DB): {count}",
+    "admin_stats_error_reports": "گزارش‌های کاربر (ثبت‌شده): {count}",
+    "admin_stats_footer": "گزارش کامل: /report  ·  گزارش کاربران: /reports",
+    "admin_channelid_in_channel": "شناسه چت: `{chat_id}`\n\nدر .env:\nVIP_LOG_CHANNEL_ID={chat_id}",
+    "admin_channelid_chat_id": "شناسه چت: `{chat_id}`",
+    "admin_channelid_type": "نوع: {chat_type}",
+    "admin_channelid_title": "عنوان: {title}",
+    "admin_channelid_username": "یوزرنیم: @{username}",
+    "admin_channelid_env_hint": "\nدر .env قرار بده:\nVIP_LOG_CHANNEL_ID={chat_id}",
+    "admin_vip_startup_broken": (
+        "⚠️ لاگ VIP کار نمی‌کند.\n"
+        "ربات را ادمین کانال خصوصی کن، VIP_LOG_CHANNEL_ID را در .env بگذار، "
+        "و /viplogtest را بزن."
+    ),
+    "admin_vip_env_missing": "VIP_LOG_CHANNEL_ID در .env تنظیم نشده",
+    "admin_vip_not_admin": "ربات ادمین کانال نیست",
+    "admin_vip_no_post": "ربات اجازه ارسال پیام در کانال را ندارد",
+    "admin_vip_not_member": "ربات عضو چت نیست (وضعیت: {status})",
+    "admin_vip_test_title": "تست لاگ VIP",
+    "admin_vip_test_channel": "کانال: {title}",
+    "admin_vip_test_id": "شناسه: {chat_id}",
+    "admin_vip_send_failed": "ارسال پیام ناموفق بود — لاگ سرور را بررسی کن",
+    "admin_vip_test_ok": "پیام تست به {title} ارسال شد (id={chat_id})",
+    "admin_vip_forbidden_hint": (
+        "{error}. ربات را ادمین کانال کن با اجازه ارسال پیام. "
+        "شناسه باید عددی باشد (مثلاً -1001234567890)."
+    ),
+    "admin_vip_status_disabled": (
+        "لاگ VIP غیرفعال است.\n\n"
+        "۱. ربات را ادمین کانال خصوصی کن (با اجازه ارسال پیام)\n"
+        "۲. در کانال /channelid@HiiTRadioBot بزن یا یک پست را فوروارد کن\n"
+        "۳. در .env بگذار:\nVIP_LOG_CHANNEL_ID=-100xxxxxxxxxx\n"
+        "۴. ربات را ری‌استارت کن\n\n"
+        "برای تست: /viplogtest"
+    ),
+    "admin_vip_status_enabled": (
+        "VIP_LOG_CHANNEL_ID={channel}\n"
+        "شناسه پردازش‌شده: {parsed}\n\n"
+        "برای تست ارسال: /viplogtest"
+    ),
+    "vip_log_user_fmt": "شناسه={user_id}",
+    "vip_evt_startup": "راه‌اندازی ربات",
+    "vip_evt_shutdown": "خاموش شدن ربات",
+    "vip_evt_gate_denied": "مسدود — عضو کانال نیست",
+    "vip_evt_rate_limit": "محدودیت نرخ",
+    "vip_evt_dl_start": "شروع دانلود",
+    "vip_evt_cache_hit": "برخورد کش",
+    "vip_evt_request": "درخواست",
+    "vip_evt_dl_ok": "دانلود موفق",
+    "vip_evt_dl_fail": "دانلود ناموفق",
+    "vip_evt_error": "خطا",
+    "vip_evt_user_report": "گزارش خطا — کاربر",
+    "vip_evt_pl_start": "شروع پلی‌لیست",
+    "vip_evt_pl_track": "پلی‌لیست — آهنگ",
+    "vip_evt_pl_done": "پایان پلی‌لیست",
+    "vip_evt_broadcast": "پیام همگانی",
+    "vip_evt_cookie_health": "سلامت کوکی یوتیوب",
+    "vip_evt_button": "دکمه",
+    "vip_evt_inline": "اینلاین",
+    "vip_evt_command": "دستور",
+    "vip_evt_message": "پیام",
+    "vip_evt_channel_post": "پست کانال",
+    "vip_evt_update": "به‌روزرسانی",
+    "vip_fld_user": "کاربر",
+    "vip_fld_chat": "چت",
+    "vip_fld_data": "داده",
+    "vip_fld_search": "جستجو",
+    "vip_fld_text": "متن",
+    "vip_fld_kind": "نوع",
+    "vip_fld_gate": "گیت",
+    "vip_fld_vip_log": "لاگ VIP",
+    "vip_fld_youtube": "یوتیوب",
+    "vip_fld_wait": "انتظار",
+    "vip_fld_song": "آهنگ",
+    "vip_fld_artist": "هنرمند",
+    "vip_fld_source": "منبع",
+    "vip_fld_platform": "پلتفرم",
+    "vip_fld_cached": "کش",
+    "vip_fld_playlist": "پلی‌لیست",
+    "vip_fld_reason": "دلیل",
+    "vip_fld_message": "پیام",
+    "vip_fld_detail": "جزئیات",
+    "vip_fld_error_kind": "نوع",
+    "vip_fld_error_code": "کد",
+    "vip_fld_collection": "مجموعه",
+    "vip_fld_count": "تعداد",
+    "vip_fld_progress": "پیشرفت",
+    "vip_fld_status": "وضعیت",
+    "vip_fld_sent": "ارسال‌شده",
+    "vip_fld_failed": "ناموفق",
+    "vip_fld_stop_reason": "دلیل توقف",
+    "vip_fld_health": "وضعیت",
+    "vip_fld_channel": "کانال",
+    "vip_val_yes": "بله",
+    "vip_val_no": "خیر",
+    "vip_val_healthy": "سالم",
+    "vip_val_unhealthy": "ناسالم",
+    "vip_cookie_alert_detail": (
+        "کوکی یوتیوب نامعتبر یا منقضی است. cookies.txt را با نشست لاگین‌شده تازه "
+        "اکسپورت کن (SID / __Secure-*PSID غیرخالی)."
+    ),
+    "vip_fld_removed": "حذف‌شده",
+    "vip_evt_job_cancel": "لغو کار کاربر",
+    "vip_evt_cache_sweep": "پاکسازی کش",
+    "vip_evt_cache_sweep_fallback": "پاکسازی کش (fallback)",
+    "vip_evt_cache_sweep_startup": "پاکسازی کش (startup)",
+    "vip_evt_progress": "وضعیت",
+    "vip_fld_label": "برچسب",
 }

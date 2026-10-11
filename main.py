@@ -813,42 +813,43 @@ class _ChatReply:
         return await self._bot.send_message(self.chat_id, text, **kwargs)
 
 
-def _stats_text():
+def _stats_text(lang=None):
+    L = lambda key, **kw: msg.t_lang(lang, key, **kw)
     db = user_manager.database
     total_users, total_downloads = user_manager.get_stats()
     cached, total = db.cache_hit_rate()
-    hit_pct = f"{100 * cached / total:.1f}٪" if total else "—"
+    hit_pct = f"{100 * cached / total:.1f}%" if total else "—"
     lines = [
-        f"کاربران: {total_users}",
-        f"دانلودها: {total_downloads}",
-        f"نرخ برخورد کش: {hit_pct} ({cached}/{total})",
+        L("admin_stats_users", count=total_users),
+        L("admin_stats_downloads", count=total_downloads),
+        L("admin_stats_cache_rate", pct=hit_pct, cached=cached, total=total),
         "",
-        "پربازدیدترین هنرمندان:",
+        L("admin_stats_top_artists"),
     ]
     for row in db.top_artists(5):
         lines.append(f"  • {row['artist']} ({row['cnt']})")
     lines.append("")
-    lines.append("پربازدیدترین آهنگ‌ها:")
+    lines.append(L("admin_stats_top_songs"))
     for row in db.top_songs(5):
         lines.append(f"  • {row['title']} — {row['artist']} ({row['cnt']})")
     lines.append("")
-    lines.append("پلتفرم‌ها:")
+    lines.append(L("admin_stats_platforms"))
     for row in db.platform_breakdown():
         lines.append(f"  • {_platform_fa(row['platform'])}: {row['cnt']}")
     try:
         skipped_cl = db.count_skipped_changelogs()
         if skipped_cl:
             lines.append("")
-            lines.append(f"تغییرلاگ‌های ردشده (DB): {skipped_cl}")
+            lines.append(L("admin_stats_skipped_changelog", count=skipped_cl))
     except Exception:
         pass
     try:
         reports = db.count_submitted_error_reports()
-        lines.append(f"گزارش‌های کاربر (ثبت‌شده): {reports}")
+        lines.append(L("admin_stats_error_reports", count=reports))
     except Exception:
         pass
     lines.append("")
-    lines.append("گزارش کامل: /report  ·  گزارش کاربران: /reports")
+    lines.append(L("admin_stats_footer"))
     return "\n".join(lines)
 
 
@@ -1041,8 +1042,9 @@ async def aboutme_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
+    lang = resolve_lang(update.effective_user)
     await update.message.reply_text(
-        _stats_text(), reply_markup=_back_button(admin=True),
+        _stats_text(lang), reply_markup=_back_button(admin=True),
     )
 
 
@@ -1063,7 +1065,8 @@ async def analytics_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def creds_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
-    status_text, _ = get_credentials_status()
+    lang = resolve_lang(update.effective_user)
+    status_text, _ = get_credentials_status(lang)
     await update.message.reply_text(
         status_text, reply_markup=_back_button(admin=True),
     )
@@ -1077,7 +1080,11 @@ async def channelid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if msg.chat and msg.chat.type == "channel":
         await msg.reply_text(
-            f"شناسه چت: `{msg.chat.id}`\n\nدر .env:\nVIP_LOG_CHANNEL_ID={msg.chat.id}",
+            msg.t_lang(
+                resolve_lang(update.effective_user),
+                "admin_channelid_in_channel",
+                chat_id=msg.chat.id,
+            ),
             parse_mode="Markdown",
         )
         return
@@ -1097,15 +1104,20 @@ async def channelid_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat = msg.sender_chat
 
     if chat:
+        lang = resolve_lang(update.effective_user)
         lines = [
-            f"شناسه چت: `{chat.id}`",
-            f"نوع: {chat.type}",
+            msg.t_lang(lang, "admin_channelid_chat_id", chat_id=chat.id),
+            msg.t_lang(lang, "admin_channelid_type", chat_type=chat.type),
         ]
         if chat.title:
-            lines.append(f"عنوان: {chat.title}")
+            lines.append(msg.t_lang(lang, "admin_channelid_title", title=chat.title))
         if chat.username:
-            lines.append(f"یوزرنیم: @{chat.username}")
-        lines.append("\nدر .env قرار بده:\nVIP_LOG_CHANNEL_ID=" + str(chat.id))
+            lines.append(
+                msg.t_lang(lang, "admin_channelid_username", username=chat.username),
+            )
+        lines.append(
+            msg.t_lang(lang, "admin_channelid_env_hint", chat_id=chat.id),
+        )
         await msg.reply_text(
             "\n".join(lines),
             parse_mode="Markdown",
@@ -1464,7 +1476,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(
         log_system(
             context.bot,
-            "لغو کار کاربر",
+            "vip_evt_job_cancel",
             user=update.effective_user,
             kind=kinds,
             count=len(cancelled),
@@ -1964,12 +1976,14 @@ async def _handle_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
     if action == "stats":
+        lang = resolve_lang(user)
         await bot.send_message(
-            chat_id, _stats_text(), reply_markup=_back_button(admin=True),
+            chat_id, _stats_text(lang), reply_markup=_back_button(admin=True),
         )
         return
     if action == "creds":
-        status_text, _ = get_credentials_status()
+        lang = resolve_lang(user)
+        status_text, _ = get_credentials_status(lang)
         await bot.send_message(
             chat_id, status_text, reply_markup=_back_button(admin=True),
         )
@@ -3476,7 +3490,7 @@ async def cookies_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _cache_sweep_job(context: ContextTypes.DEFAULT_TYPE):
     removed = orchestrator.sweep_cache()
-    await log_system(context.bot, "پاکسازی کش", removed=removed)
+    await log_system(context.bot, "vip_evt_cache_sweep", removed=removed)
 
 
 async def _cookie_health_job(context: ContextTypes.DEFAULT_TYPE):
@@ -3517,7 +3531,7 @@ async def _check_and_report_cookie_health(bot):
 async def _cache_sweep_fallback_loop(bot):
     while True:
         removed = orchestrator.sweep_cache()
-        await log_system(bot, "پاکسازی کش (fallback)", removed=removed)
+        await log_system(bot, "vip_evt_cache_sweep_fallback", removed=removed)
         await _check_and_report_cookie_health(bot)
         await asyncio.sleep(3600)
 
@@ -3618,25 +3632,24 @@ async def _on_startup(application):
 
     asyncio.create_task(_deferred_youtube_setup(application.bot))
 
+    admin_lang = None
+    if ADMIN_ID:
+        admin_lang = msg.normalize_lang(user_manager.get_language(ADMIN_ID))
+    admin_logger.set_vip_log_language(admin_lang)
     if not vip_ok:
         await notify_admin_vip_issue(
             application.bot,
-            "⚠️ لاگ VIP کار نمی‌کند.\n"
-            "ربات را ادمین کانال خصوصی کن، VIP_LOG_CHANNEL_ID را در .env بگذار، "
-            "و /viplogtest را بزن.",
+            msg.t_lang(admin_lang, "admin_vip_startup_broken"),
         )
     await log_startup(application.bot, gate_ok, vip_ok, yt_ok=True)
     removed = orchestrator.sweep_cache()
-    await log_system(application.bot, "پاکسازی کش (startup)", removed=removed)
+    await log_system(application.bot, "vip_evt_cache_sweep_startup", removed=removed)
     try:
         from api.webapp_menu import configure_webapp_menu
         await configure_webapp_menu(application.bot)
     except Exception:
         logger.exception("Mini App menu setup skipped")
     try:
-        admin_lang = None
-        if ADMIN_ID:
-            admin_lang = msg.normalize_lang(user_manager.get_language(ADMIN_ID))
         await bot_commands.configure_menu(
             application.bot, ADMIN_ID, admin_lang=admin_lang,
         )

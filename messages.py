@@ -41,8 +41,7 @@ def reset_lang(token) -> None:
     _lang_var.reset(token)
 
 
-def t(key: str, **kwargs) -> str:
-    table = get_strings(get_lang())
+def _format_string(table: dict, key: str, **kwargs) -> str:
     text = table.get(key)
     if text is None:
         text = get_strings(DEFAULT_LANG).get(key, key)
@@ -52,6 +51,16 @@ def t(key: str, **kwargs) -> str:
         except (KeyError, ValueError):
             return text
     return text
+
+
+def t(key: str, **kwargs) -> str:
+    return _format_string(get_strings(get_lang()), key, **kwargs)
+
+
+def t_lang(lang: str | None, key: str, **kwargs) -> str:
+    """Locale lookup for a explicit language (admin/ops messages)."""
+    resolved = normalize_lang(lang) or "en"
+    return _format_string(get_strings(resolved), key, **kwargs)
 
 
 def __getattr__(name: str):

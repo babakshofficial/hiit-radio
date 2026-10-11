@@ -51,9 +51,10 @@ class ProgressReporter:
         import admin_logger
         await admin_logger.log_system(
             self.bot,
-            f"وضعیت — {self.label}",
+            "vip_evt_progress",
             user=self.user,
-            **{"پیشرفت": status_text},
+            label=self.label,
+            progress=status_text,
         )
 
     def reset_phase(self, current=0):
