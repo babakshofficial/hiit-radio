@@ -569,6 +569,20 @@ STRINGS = {
     "changelog_busy": "همین الان یک ارسال تغییر‌لاگ در حال اجراست.",
     "changelog_forbidden": "فقط ادمین می‌تواند از این استفاده کند.",
     "changelog_btn_manual_new": "✍️ تغییر‌لاگ جدید",
+    "changelog_btn_skipped_list": "⏭ تغییرلاگ‌های ردشده ({count})",
+    "changelog_skipped_header": "تغییرلاگ‌های ردشده ({count}) — صفحه {page}/{pages}",
+    "changelog_skipped_empty": "تغییرلاگ ردشده‌ای وجود ندارد.",
+    "changelog_skipped_line": "#{id} · {date} · {langs} · {preview}",
+    "changelog_skipped_detail": "تغییرلاگ ردشده #{id}\nتاریخ: {date}\nوضعیت: {status}\nزبان‌ها: {langs}\n\n{notes}",
+    "changelog_btn_skipped_send": "📣 ارسال",
+    "changelog_btn_skipped_delete": "🗑 حذف",
+    "changelog_btn_skipped_back": "⬅️ بازگشت",
+    "changelog_skipped_deleted": "تغییرلاگ ردشده حذف شد.",
+    "changelog_skipped_not_found": "تغییرلاگ ردشده پیدا نشد.",
+    "changelog_skipped_langs_all": "همه زبان‌ها",
+    "changelog_skipped_status_skipped": "ردشده",
+    "changelog_skipped_status_partial": "ارسال نیمه‌کاره",
+    "changelog_skipped_reminder": "📌 {count} تغییرلاگ ردشده دارید. برای ارسال، از مدیریت ← تغییرلاگ استفاده کنید.",
     "changelog_manual_intro": (
         "یادداشتی در CHANGELOG_PENDING.md نیست.\n"
         "«تغییر‌لاگ جدید» را بزن، یا در فایل repo یادداشت بگذار و ری‌استارت کن."

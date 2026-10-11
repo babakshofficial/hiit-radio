@@ -1009,6 +1009,64 @@ def changelog_btn_manual_new():
     return t("changelog_btn_manual_new")
 
 
+def changelog_btn_skipped_list(count):
+    return t("changelog_btn_skipped_list", count=count)
+
+
+def changelog_skipped_header(count, page, pages):
+    return t("changelog_skipped_header", count=count, page=page, pages=pages)
+
+
+def changelog_skipped_empty():
+    return t("changelog_skipped_empty")
+
+
+def changelog_skipped_line(entry_id, date, langs, preview):
+    return t(
+        "changelog_skipped_line", id=entry_id, date=date, langs=langs, preview=preview,
+    )
+
+
+def changelog_skipped_detail(entry_id, date, status, langs, notes):
+    return t(
+        "changelog_skipped_detail",
+        id=entry_id, date=date, status=status, langs=langs, notes=notes,
+    )
+
+
+def changelog_btn_skipped_send():
+    return t("changelog_btn_skipped_send")
+
+
+def changelog_btn_skipped_delete():
+    return t("changelog_btn_skipped_delete")
+
+
+def changelog_btn_skipped_back():
+    return t("changelog_btn_skipped_back")
+
+
+def changelog_skipped_deleted():
+    return t("changelog_skipped_deleted")
+
+
+def changelog_skipped_not_found():
+    return t("changelog_skipped_not_found")
+
+
+def changelog_skipped_langs_all():
+    return t("changelog_skipped_langs_all")
+
+
+def changelog_skipped_status(status):
+    key = "changelog_skipped_status_partial" if status == "partial" else "changelog_skipped_status_skipped"
+    return t(key)
+
+
+def changelog_skipped_reminder(count):
+    return t("changelog_skipped_reminder", count=count)
+
+
 def changelog_manual_intro():
     return t("changelog_manual_intro")
 

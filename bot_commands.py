@@ -82,20 +82,23 @@ async def _set_commands_safe(bot, commands, scope=None, language_code=None):
         )
 
 
-async def configure_menu(bot, admin_id=None) -> None:
-    """Register default + per-language command lists and MenuButtonCommands."""
+async def configure_menu(bot, admin_id=None, admin_lang=None) -> None:
+    """Register fallback command lists and MenuButtonCommands.
+
+    Only the bot default language is registered on the default scope so Telegram
+    does not pick command text from the client's UI language. Per-user menus are
+    set via ``refresh_user_commands`` from the user's stored bot language.
+    """
     from telegram import BotCommandScopeChat, BotCommandScopeDefault
 
     admin_id = (admin_id or "").strip()
+    admin_lang = msg.normalize_lang(admin_lang) or DEFAULT_LANG
 
-    for lang in (DEFAULT_LANG,) + tuple(SUPPORTED):
-        commands = build_commands(lang, admin=False)
-        if lang == DEFAULT_LANG:
-            await _set_commands_safe(bot, commands, scope=BotCommandScopeDefault())
-        else:
-            await _set_commands_safe(
-                bot, commands, scope=BotCommandScopeDefault(), language_code=lang,
-            )
+    await _set_commands_safe(
+        bot,
+        build_commands(DEFAULT_LANG, admin=False),
+        scope=BotCommandScopeDefault(),
+    )
 
     if admin_id:
         try:
@@ -103,15 +106,11 @@ async def configure_menu(bot, admin_id=None) -> None:
         except ValueError:
             chat_id = None
         if chat_id is not None:
-            scope = BotCommandScopeChat(chat_id)
-            for lang in (DEFAULT_LANG,) + tuple(SUPPORTED):
-                commands = build_commands(lang, admin=True)
-                if lang == DEFAULT_LANG:
-                    await _set_commands_safe(bot, commands, scope=scope)
-                else:
-                    await _set_commands_safe(
-                        bot, commands, scope=scope, language_code=lang,
-                    )
+            await _set_commands_safe(
+                bot,
+                build_commands(admin_lang, admin=True),
+                scope=BotCommandScopeChat(chat_id),
+            )
 
     mode = (os.getenv("MENU_BUTTON_MODE") or "commands").strip().lower()
     if mode == "webapp":
@@ -124,12 +123,12 @@ async def configure_menu(bot, admin_id=None) -> None:
         logger.warning("set_chat_menu_button(commands) failed: %s", exc)
 
 
-async def refresh_user_commands(bot, user_id, lang, admin_id=None) -> None:
-    """Per-user command list after /lang (overrides client language_code)."""
+async def refresh_user_commands(bot, user_id, lang, admin_id=None) -> bool:
+    """Per-user command list (overrides client language_code). Returns success."""
     from telegram import BotCommandScopeChat
 
-    admin_id = (admin_id or "").strip()
-    is_admin = admin_id and str(user_id) == str(admin_id)
+    admin_id = (str(admin_id) if admin_id else "").strip()
+    is_admin = bool(admin_id) and str(user_id) == admin_id
     lang = msg.normalize_lang(lang) or DEFAULT_LANG
     commands = build_commands(lang, admin=is_admin)
     try:
@@ -137,5 +136,7 @@ async def refresh_user_commands(bot, user_id, lang, admin_id=None) -> None:
             commands,
             scope=BotCommandScopeChat(int(user_id)),
         )
+        return True
     except Exception as exc:
-        logger.debug("refresh_user_commands(%s): %s", user_id, exc)
+        logger.warning("refresh_user_commands(%s, %s): %s", user_id, lang, exc)
+        return False

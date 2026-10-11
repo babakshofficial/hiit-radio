@@ -569,6 +569,20 @@ STRINGS = {
     "changelog_busy": "A changelog broadcast is already running.",
     "changelog_forbidden": "Only the admin can use this.",
     "changelog_btn_manual_new": "✍️ Write new changelog",
+    "changelog_btn_skipped_list": "⏭ Skipped changelogs ({count})",
+    "changelog_skipped_header": "Skipped changelogs ({count}) — page {page}/{pages}",
+    "changelog_skipped_empty": "No skipped changelogs.",
+    "changelog_skipped_line": "#{id} · {date} · {langs} · {preview}",
+    "changelog_skipped_detail": "Skipped changelog #{id}\nDate: {date}\nStatus: {status}\nLanguages: {langs}\n\n{notes}",
+    "changelog_btn_skipped_send": "📣 Broadcast",
+    "changelog_btn_skipped_delete": "🗑 Delete",
+    "changelog_btn_skipped_back": "⬅️ Back",
+    "changelog_skipped_deleted": "Skipped changelog deleted.",
+    "changelog_skipped_not_found": "Skipped changelog not found.",
+    "changelog_skipped_langs_all": "all languages",
+    "changelog_skipped_status_skipped": "skipped",
+    "changelog_skipped_status_partial": "partially sent",
+    "changelog_skipped_reminder": "📌 You have {count} skipped changelog(s). Open Admin → Changelog to broadcast them.",
     "changelog_manual_intro": (
         "No pending notes in CHANGELOG_PENDING.md.\n"
         "Tap Write new changelog, or append notes in the repo file and restart."

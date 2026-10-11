@@ -296,6 +296,20 @@ CREATE INDEX IF NOT EXISTS idx_user_music_submissions_status
 
 CREATE INDEX IF NOT EXISTS idx_user_music_submissions_approved
     ON user_music_submissions(status, title, artist);
+
+CREATE TABLE IF NOT EXISTS changelog_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    notes TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'pending',
+    status TEXT NOT NULL DEFAULT 'skipped',
+    skipped_langs TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    broadcast_at REAL
+);
+
+CREATE INDEX IF NOT EXISTS idx_changelog_entries_status
+    ON changelog_entries(status, created_at DESC);
 """
 
 EXPORT_EVENT_LIMIT = 10000
@@ -337,6 +351,12 @@ class Database:
             try:
                 conn.execute(
                     "ALTER TABLE users ADD COLUMN language TEXT"
+                )
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute(
+                    "ALTER TABLE users ADD COLUMN commands_lang TEXT"
                 )
             except sqlite3.OperationalError:
                 pass
@@ -403,6 +423,43 @@ class Database:
                 "UPDATE users SET language = ? WHERE user_id = ?",
                 (language, user_id),
             )
+
+    def get_commands_lang(self, user_id):
+        """Language of the last per-user Telegram command menu we registered."""
+        user_id = str(user_id)
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT commands_lang FROM users WHERE user_id = ?", (user_id,)
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            return row["commands_lang"]
+        except (KeyError, IndexError, TypeError):
+            return None
+
+    def set_commands_lang(self, user_id, language):
+        user_id = str(user_id)
+        self.touch_user(user_id)
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE users SET commands_lang = ? WHERE user_id = ?",
+                (language, user_id),
+            )
+
+    def list_users_needing_commands_sync(self, limit=500):
+        """Users with a stored language whose Telegram command menu is stale."""
+        limit = max(1, min(int(limit), 5000))
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT user_id, language FROM users
+                   WHERE language IS NOT NULL AND TRIM(language) != ''
+                     AND (commands_lang IS NULL OR commands_lang != language)
+                   ORDER BY last_seen DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_all_user_ids(self):
         with self._conn() as conn:
@@ -1364,6 +1421,9 @@ class Database:
                 "quota_bonuses": self._rows_to_dicts(conn, "quota_bonuses"),
                 "payments": self._rows_to_dicts(conn, "payments"),
                 "referrals": self._rows_to_dicts(conn, "referrals"),
+                "changelog_entries": self._rows_to_dicts(
+                    conn, "changelog_entries", order="created_at DESC"
+                ),
             }
 
     # --- Subscriptions / quotas / payments / referrals ---
@@ -1763,6 +1823,94 @@ class Database:
             page,
             per_page,
         )
+
+    # --- Changelog entries (skipped / partial / broadcast) ---
+
+    @staticmethod
+    def _decode_skipped_langs(raw):
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return []
+        return [str(x) for x in data] if isinstance(data, list) else []
+
+    def _changelog_row(self, row):
+        if not row:
+            return None
+        d = dict(row)
+        d["skipped_langs"] = self._decode_skipped_langs(d.get("skipped_langs"))
+        return d
+
+    def create_changelog_entry(
+        self, notes, source="pending", status="skipped", skipped_langs=None
+    ):
+        now = time.time()
+        langs = json.dumps(list(skipped_langs)) if skipped_langs else None
+        with self._conn() as conn:
+            cur = conn.execute(
+                """INSERT INTO changelog_entries
+                   (notes, source, status, skipped_langs, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                ((notes or "").strip(), source, status, langs, now, now),
+            )
+            return cur.lastrowid
+
+    def get_changelog_entry(self, entry_id):
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM changelog_entries WHERE id=?", (int(entry_id),)
+            ).fetchone()
+        return self._changelog_row(row)
+
+    def update_changelog_entry(self, entry_id, **fields):
+        allowed = {"notes", "source", "status", "skipped_langs", "broadcast_at"}
+        updates = {k: v for k, v in fields.items() if k in allowed}
+        if not updates:
+            return False
+        if "skipped_langs" in updates:
+            langs = updates["skipped_langs"]
+            updates["skipped_langs"] = json.dumps(list(langs)) if langs else None
+        updates["updated_at"] = time.time()
+        cols = ", ".join(f"{k}=?" for k in updates)
+        with self._conn() as conn:
+            cur = conn.execute(
+                f"UPDATE changelog_entries SET {cols} WHERE id=?",
+                (*updates.values(), int(entry_id)),
+            )
+            return cur.rowcount > 0
+
+    def list_changelog_entries(self, status_in=("skipped", "partial"), page=0, per_page=5):
+        statuses = tuple(status_in) if status_in else ()
+        where = ""
+        if statuses:
+            where = "WHERE status IN (%s)" % ",".join("?" for _ in statuses)
+        rows, total, total_pages = self._paginate(
+            f"SELECT COUNT(*) FROM changelog_entries {where}",
+            statuses,
+            f"SELECT * FROM changelog_entries {where} ORDER BY created_at DESC",
+            statuses,
+            page,
+            per_page,
+        )
+        for r in rows:
+            r["skipped_langs"] = self._decode_skipped_langs(r.get("skipped_langs"))
+        return rows, total, total_pages
+
+    def count_skipped_changelogs(self):
+        with self._conn() as conn:
+            return conn.execute(
+                """SELECT COUNT(*) AS c FROM changelog_entries
+                   WHERE status IN ('skipped', 'partial')"""
+            ).fetchone()["c"]
+
+    def delete_changelog_entry(self, entry_id):
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM changelog_entries WHERE id=?", (int(entry_id),)
+            )
+            return cur.rowcount > 0
 
     def search_approved_user_music(self, query, limit=5, min_score=0.45):
         import re

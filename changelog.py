@@ -145,6 +145,85 @@ def archive_and_clear(
         logger.error("Could not clear pending changelog: %s", e)
 
 
+def _db():
+    return getattr(_user_manager, "database", None) if _user_manager else None
+
+
+def _entry_state(review: dict) -> tuple[str, list[str]] | None:
+    """Desired DB state (status, skipped_langs) for the review's changelog entry."""
+    status = review.get("status", {})
+    sent = {lang for lang, st in status.items() if st == "sent"}
+    base = review.get("entry_langs")
+    if base is not None:
+        remaining = sorted(lang for lang in base if lang not in sent)
+        if not remaining:
+            return "broadcast", []
+        if not sent and review.get("entry_whole"):
+            return "skipped", []
+        return "partial", remaining
+    skipped = sorted(lang for lang, st in status.items() if st == "skipped")
+    if not skipped:
+        return None
+    active = _active_langs(review.get("counts", {}))
+    if not sent and all(lang in skipped for lang in active):
+        return "skipped", []
+    return "partial", skipped
+
+
+def _sync_entry(review: dict) -> None:
+    """Persist skipped / partial / broadcast state of a review in the database."""
+    db = _db()
+    if db is None:
+        return
+    try:
+        state = _entry_state(review)
+        if state is None:
+            return
+        status, langs = state
+        entry_id = review.get("entry_id")
+        if entry_id is None:
+            if status == "broadcast":
+                return
+            review["entry_id"] = db.create_changelog_entry(
+                review.get("notes") or "",
+                source="manual" if review.get("manual") else "pending",
+                status=status,
+                skipped_langs=langs,
+            )
+            return
+        fields = {"status": status, "skipped_langs": langs}
+        if status == "broadcast":
+            fields["broadcast_at"] = time.time()
+        db.update_changelog_entry(entry_id, **fields)
+    except Exception:
+        logger.exception("Could not record changelog entry state")
+
+
+def _skipped_count() -> int:
+    db = _db()
+    if db is None:
+        return 0
+    try:
+        return int(db.count_skipped_changelogs())
+    except Exception:
+        logger.exception("Could not count skipped changelogs")
+        return 0
+
+
+def _record_whole_skip(notes: str, review: dict | None = None) -> None:
+    db = _db()
+    if db is None or not (notes or "").strip():
+        return
+    try:
+        entry_id = (review or {}).get("entry_id")
+        if entry_id is not None:
+            db.update_changelog_entry(entry_id, status="skipped", skipped_langs=[])
+        else:
+            db.create_changelog_entry(notes, source="pending", status="skipped")
+    except Exception:
+        logger.exception("Could not record skipped changelog")
+
+
 def _admin_lang_token():
     if not _admin_id or not _resolve_admin_lang:
         return msg.use_lang(DEFAULT_LANG)
@@ -241,13 +320,26 @@ async def prompt_admin(bot) -> None:
     if not _admin_id:
         return
     notes = read_pending()
+    skipped_count = _skipped_count()
     if not notes:
+        if skipped_count:
+            token = _admin_lang_token()
+            try:
+                text = msg.changelog_skipped_reminder(skipped_count)
+            finally:
+                msg.reset_lang(token)
+            try:
+                await bot.send_message(chat_id=int(_admin_id), text=text)
+            except Exception as e:
+                logger.error("Could not DM admin skipped changelog reminder: %s", e)
         return
 
     token = _admin_lang_token()
     try:
         llm_ok = is_configured()
         text = _prompt_text(notes, llm_ok=llm_ok)
+        if skipped_count:
+            text = f"{text}\n\n{msg.changelog_skipped_reminder(skipped_count)}"
         kb = _keyboard(include_send=llm_ok)
     finally:
         msg.reset_lang(token)
@@ -441,11 +533,13 @@ async def _maybe_finish_review(bot, context, review: dict, admin_user=None) -> b
         elif st == "skipped":
             skipped_langs += 1
 
-    archive_and_clear(
-        notes,
-        reason="manual" if review.get("manual") else "sent",
-        clear_pending=not review.get("manual"),
-    )
+    _sync_entry(review)
+    if not (review.get("entry_langs") is not None and sent_langs == 0):
+        archive_and_clear(
+            notes,
+            reason="manual" if review.get("manual") else "sent",
+            clear_pending=not review.get("manual"),
+        )
     _clear_review(context)
 
     chat_id = admin_user.id if admin_user else int(_admin_id)
@@ -490,6 +584,8 @@ async def _start_review(
     *,
     notes: str | None = None,
     manual: bool = False,
+    only_langs: list[str] | None = None,
+    entry_id: int | None = None,
 ) -> str | None:
     """Generate per-language previews. Returns error key or None on success."""
     global _busy
@@ -505,7 +601,15 @@ async def _start_review(
         _busy = True
     try:
         user_ids_by_lang, counts = _lang_audience()
+        if only_langs:
+            wanted = set(only_langs)
+            user_ids_by_lang = {
+                lang: uids for lang, uids in user_ids_by_lang.items() if lang in wanted
+            }
+            counts = {lang: n for lang, n in counts.items() if lang in wanted}
         active = set(_active_langs(counts))
+        if not active and (only_langs or entry_id is not None):
+            return "empty"
         if not active:
             active = {DEFAULT_LANG}
             counts = {DEFAULT_LANG: 0}
@@ -522,6 +626,10 @@ async def _start_review(
             "card_msg_ids": {},
             "manual": manual,
         }
+        if entry_id is not None:
+            review["entry_id"] = entry_id
+            review["entry_langs"] = sorted(active)
+            review["entry_whole"] = not only_langs
         _set_review(context, review)
 
         token = _admin_lang_token()
@@ -558,6 +666,14 @@ async def admin_changelog_menu(bot, chat_id: int, context) -> None:
                 ),
             ],
         ]
+        skipped_count = _skipped_count()
+        if skipped_count:
+            rows.append([
+                InlineKeyboardButton(
+                    msg.changelog_btn_skipped_list(skipped_count),
+                    callback_data="changelog:skipped:0",
+                ),
+            ])
         if notes:
             llm_ok = is_configured()
             text = (
@@ -730,6 +846,7 @@ async def _handle_lang_callback(query, context, user, action: str, lang: str) ->
 
     if action == "skip":
         review["status"][lang] = "skipped"
+        _sync_entry(review)
         _set_review(context, review)
         try:
             await query.answer()
@@ -836,6 +953,7 @@ async def _handle_lang_callback(query, context, user, action: str, lang: str) ->
             sent, failed = await _broadcast_lang(context.bot, review, lang)
             review["status"][lang] = "sent"
             review.setdefault("send_stats", {})[lang] = {"sent": sent, "failed": failed}
+            _sync_entry(review)
             _set_review(context, review)
             await _update_lang_card(context.bot, user.id, review, lang)
             await _maybe_finish_review(context.bot, context, review, admin_user=user)
@@ -845,6 +963,195 @@ async def _handle_lang_callback(query, context, user, action: str, lang: str) ->
         return
 
     msg.reset_lang(admin_token)
+
+
+_SKIPPED_PER_PAGE = 5
+
+
+def _fmt_date(ts) -> str:
+    try:
+        return time.strftime("%Y-%m-%d", time.gmtime(float(ts)))
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _langs_label(entry: dict) -> str:
+    langs = entry.get("skipped_langs") or []
+    if not langs:
+        return msg.changelog_skipped_langs_all()
+    return ", ".join(langs)
+
+
+def _one_line(text: str, limit: int = 40) -> str:
+    flat = " ".join((text or "").split())
+    flat = flat.lstrip("#- ").strip()
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+async def _edit_or_send(query, bot, chat_id: int, text: str, markup=None) -> None:
+    try:
+        await query.edit_message_text(text, reply_markup=markup)
+    except Exception:
+        await bot.send_message(chat_id=chat_id, text=text, reply_markup=markup)
+
+
+async def _show_skipped_list(query, bot, chat_id: int, page: int = 0) -> None:
+    db = _db()
+    token = _admin_lang_token()
+    try:
+        if db is None:
+            await _edit_or_send(query, bot, chat_id, msg.changelog_skipped_empty())
+            return
+        entries, total, pages = db.list_changelog_entries(
+            ("skipped", "partial"), page=page, per_page=_SKIPPED_PER_PAGE,
+        )
+        if not entries and page > 0 and total:
+            page = max(pages - 1, 0)
+            entries, total, pages = db.list_changelog_entries(
+                ("skipped", "partial"), page=page, per_page=_SKIPPED_PER_PAGE,
+            )
+        back = [InlineKeyboardButton(
+            msg.changelog_btn_skipped_back(), callback_data="changelog:menu",
+        )]
+        if not entries:
+            await _edit_or_send(
+                query, bot, chat_id, msg.changelog_skipped_empty(),
+                InlineKeyboardMarkup([back]),
+            )
+            return
+        lines = [msg.changelog_skipped_header(total, page + 1, pages), ""]
+        rows = []
+        for e in entries:
+            lines.append(msg.changelog_skipped_line(
+                e["id"], _fmt_date(e["created_at"]), _langs_label(e),
+                _one_line(e["notes"]),
+            ))
+            rows.append([InlineKeyboardButton(
+                f"#{e['id']} · {_fmt_date(e['created_at'])}",
+                callback_data=f"changelog:sk:view:{e['id']}",
+            )])
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀️", callback_data=f"changelog:skipped:{page - 1}"))
+        if page + 1 < pages:
+            nav.append(InlineKeyboardButton("▶️", callback_data=f"changelog:skipped:{page + 1}"))
+        if nav:
+            rows.append(nav)
+        rows.append(back)
+        await _edit_or_send(
+            query, bot, chat_id, "\n".join(lines), InlineKeyboardMarkup(rows),
+        )
+    finally:
+        msg.reset_lang(token)
+
+
+async def _handle_skipped_callback(query, context, user, parts: list[str]) -> None:
+    """Handle ``changelog:skipped:{page}`` and ``changelog:sk:{view|send|del}:{id}``."""
+    bot = context.bot
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    if parts[1] == "skipped":
+        try:
+            page = int(parts[2]) if len(parts) > 2 else 0
+        except ValueError:
+            page = 0
+        await _show_skipped_list(query, bot, user.id, page)
+        return
+
+    action = parts[2] if len(parts) > 2 else ""
+    try:
+        entry_id = int(parts[3]) if len(parts) > 3 else 0
+    except ValueError:
+        entry_id = 0
+    db = _db()
+    entry = db.get_changelog_entry(entry_id) if (db is not None and entry_id) else None
+
+    token = _admin_lang_token()
+    try:
+        if entry is None or entry.get("status") not in ("skipped", "partial"):
+            await _edit_or_send(
+                query, bot, user.id, msg.changelog_skipped_not_found(),
+                InlineKeyboardMarkup([[InlineKeyboardButton(
+                    msg.changelog_btn_skipped_back(),
+                    callback_data="changelog:skipped:0",
+                )]]),
+            )
+            return
+
+        if action == "view":
+            text = msg.changelog_skipped_detail(
+                entry["id"], _fmt_date(entry["created_at"]),
+                msg.changelog_skipped_status(entry["status"]),
+                _langs_label(entry), _preview(entry["notes"]),
+            )
+            rows = []
+            if is_configured():
+                rows.append([InlineKeyboardButton(
+                    msg.changelog_btn_skipped_send(),
+                    callback_data=f"changelog:sk:send:{entry['id']}",
+                )])
+            rows.append([InlineKeyboardButton(
+                msg.changelog_btn_skipped_delete(),
+                callback_data=f"changelog:sk:del:{entry['id']}",
+            )])
+            rows.append([InlineKeyboardButton(
+                msg.changelog_btn_skipped_back(),
+                callback_data="changelog:skipped:0",
+            )])
+            await _edit_or_send(query, bot, user.id, text, InlineKeyboardMarkup(rows))
+            return
+
+        if action == "del":
+            db.delete_changelog_entry(entry["id"])
+            if (_get_review(context) or {}).get("entry_id") == entry["id"]:
+                _clear_review(context)
+            await _edit_or_send(
+                query, bot, user.id, msg.changelog_skipped_deleted(),
+                InlineKeyboardMarkup([[InlineKeyboardButton(
+                    msg.changelog_btn_skipped_back(),
+                    callback_data="changelog:skipped:0",
+                )]]),
+            )
+            return
+
+        if action != "send":
+            return
+
+        if not is_configured():
+            await _edit_or_send(query, bot, user.id, msg.changelog_llm_unavailable())
+            return
+        if _busy:
+            await _edit_or_send(query, bot, user.id, msg.changelog_busy())
+            return
+        try:
+            await query.edit_message_text(msg.changelog_generating())
+        except Exception:
+            pass
+    finally:
+        msg.reset_lang(token)
+
+    err = await _start_review(
+        bot, context, user, query,
+        notes=entry["notes"],
+        manual=True,
+        only_langs=entry.get("skipped_langs") or None,
+        entry_id=entry["id"],
+    )
+    if err is None:
+        return
+    token = _admin_lang_token()
+    try:
+        text = {
+            "busy": msg.changelog_busy(),
+            "empty": msg.changelog_empty(),
+            "llm_unavailable": msg.changelog_llm_unavailable(),
+        }.get(err, msg.changelog_empty())
+    finally:
+        msg.reset_lang(token)
+    await _edit_or_send(query, bot, user.id, text)
 
 
 async def handle_callback(update, context) -> bool:
@@ -876,12 +1183,24 @@ async def handle_callback(update, context) -> bool:
         return True
 
     action = parts[1] if len(parts) > 1 else ""
+    if action in ("skipped", "sk"):
+        await _handle_skipped_callback(query, context, user, parts)
+        return True
+    if action == "menu":
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        await admin_changelog_menu(context.bot, user.id, context)
+        return True
     token = _admin_lang_token()
     try:
         if action == "skip":
+            review = _get_review(context)
             _clear_review(context)
-            notes = read_pending()
-            archive_and_clear(notes, reason="skipped")
+            notes = (review or {}).get("notes") or read_pending()
+            _record_whole_skip(notes, review)
+            archive_and_clear(read_pending(), reason="skipped")
             text = msg.changelog_skipped()
             try:
                 await query.edit_message_text(text)

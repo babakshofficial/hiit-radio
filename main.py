@@ -463,8 +463,59 @@ def resolve_lang(user) -> str:
     return msg.set_lang(None)
 
 
+_COMMANDS_SYNC_COOLDOWN_SEC = 300
+_commands_sync_failed_at: dict[str, float] = {}
+
+
+def _stored_ui_lang(user_id) -> str:
+    """Bot UI language from DB; falls back to the current update's resolved lang."""
+    if user_id is None:
+        return msg.get_lang()
+    stored = user_manager.get_language(user_id)
+    if stored and msg.normalize_lang(stored):
+        return msg.normalize_lang(stored)
+    return msg.get_lang()
+
+
+async def _sync_commands_lang(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    lang,
+    *,
+    force: bool = False,
+):
+    """Keep the Telegram command menu in the user's configured bot language."""
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or chat.type != "private" or not lang:
+        return
+    uid = str(user.id)
+    lang = msg.normalize_lang(lang) or msg.DEFAULT_LANG
+    try:
+        if not force and msg.normalize_lang(user_manager.get_commands_lang(uid)) == lang:
+            return
+    except Exception:
+        if not force:
+            return
+    last_fail = _commands_sync_failed_at.get(uid)
+    if last_fail and time.time() - last_fail < _COMMANDS_SYNC_COOLDOWN_SEC:
+        return
+    ok = await bot_commands.refresh_user_commands(
+        context.bot, user.id, lang, admin_id=ADMIN_ID,
+    )
+    if ok:
+        _commands_sync_failed_at.pop(uid, None)
+        try:
+            user_manager.set_commands_lang(uid, lang)
+        except Exception:
+            logger.debug("set_commands_lang failed for %s", uid)
+    else:
+        _commands_sync_failed_at[uid] = time.time()
+
+
 async def apply_user_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    resolve_lang(update.effective_user)
+    lang = resolve_lang(update.effective_user)
+    await _sync_commands_lang(update, context, lang)
 
 
 async def clear_await_on_slash(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -584,6 +635,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     inviter = referrals.parse_start_payload(context.args)
     existed = user_manager.database.user_exists(user.id) if user else True
     await _touch_user(update)
+    if user:
+        lang = resolve_lang(user)
+        await _sync_commands_lang(update, context, lang, force=True)
     clear_await_input(context)
     if inviter and user and not existed:
         status = referrals.record_pending(
@@ -612,54 +666,68 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _with_user_lang(user_id, fn):
+    token = msg.use_lang(_stored_ui_lang(user_id))
+    try:
+        return fn()
+    finally:
+        msg.reset_lang(token)
+
+
 def _start_menu_keyboard(user_id=None):
-    rows = [
-        [
-            InlineKeyboardButton(msg.t("menu_search"), callback_data="menu:search"),
-            InlineKeyboardButton(msg.t("menu_artist"), callback_data="menu:artist"),
-        ],
-        [
-            InlineKeyboardButton(msg.t("menu_follow"), callback_data="menu:follow"),
-            InlineKeyboardButton(msg.t("menu_quality"), callback_data="menu:quality"),
-        ],
-        [
-            InlineKeyboardButton(msg.t("menu_history"), callback_data="menu:history"),
-            InlineKeyboardButton(msg.t("menu_liked"), callback_data="menu:liked"),
-        ],
-        [
-            InlineKeyboardButton(msg.t("menu_top"), callback_data="menu:top"),
-            InlineKeyboardButton(msg.t("menu_discover"), callback_data="menu:discover"),
-        ],
-        [
-            InlineKeyboardButton(msg.t("menu_following"), callback_data="menu:following"),
-            InlineKeyboardButton(msg.t("menu_invite"), callback_data="menu:invite"),
-        ],
-        [
-            InlineKeyboardButton(msg.t("menu_premium"), callback_data="menu:premium"),
-            InlineKeyboardButton(msg.t("menu_support"), callback_data="menu:support"),
-        ],
-        [
-            InlineKeyboardButton(msg.t("menu_submit_music"), callback_data="menu:submit_music"),
-            InlineKeyboardButton(msg.t("menu_my_submissions"), callback_data="menu:my_submissions"),
-        ],
-        [
-            InlineKeyboardButton(msg.t("menu_aboutme"), callback_data="menu:aboutme"),
-            InlineKeyboardButton(msg.t("menu_lang"), callback_data="menu:lang"),
-        ],
-        [
-            InlineKeyboardButton(msg.t("menu_help"), callback_data="menu:help"),
-            InlineKeyboardButton(msg.t("menu_cancel"), callback_data="menu:cancel"),
-        ],
-    ]
-    if user_id is not None and _is_admin(user_id):
-        rows.append([
-            InlineKeyboardButton(msg.t("menu_admin"), callback_data="admin:menu"),
-        ])
-    return InlineKeyboardMarkup(rows)
+    def _build():
+        rows = [
+            [
+                InlineKeyboardButton(msg.t("menu_search"), callback_data="menu:search"),
+                InlineKeyboardButton(msg.t("menu_artist"), callback_data="menu:artist"),
+            ],
+            [
+                InlineKeyboardButton(msg.t("menu_follow"), callback_data="menu:follow"),
+                InlineKeyboardButton(msg.t("menu_quality"), callback_data="menu:quality"),
+            ],
+            [
+                InlineKeyboardButton(msg.t("menu_history"), callback_data="menu:history"),
+                InlineKeyboardButton(msg.t("menu_liked"), callback_data="menu:liked"),
+            ],
+            [
+                InlineKeyboardButton(msg.t("menu_top"), callback_data="menu:top"),
+                InlineKeyboardButton(msg.t("menu_discover"), callback_data="menu:discover"),
+            ],
+            [
+                InlineKeyboardButton(msg.t("menu_following"), callback_data="menu:following"),
+                InlineKeyboardButton(msg.t("menu_invite"), callback_data="menu:invite"),
+            ],
+            [
+                InlineKeyboardButton(msg.t("menu_premium"), callback_data="menu:premium"),
+                InlineKeyboardButton(msg.t("menu_support"), callback_data="menu:support"),
+            ],
+            [
+                InlineKeyboardButton(msg.t("menu_submit_music"), callback_data="menu:submit_music"),
+                InlineKeyboardButton(msg.t("menu_my_submissions"), callback_data="menu:my_submissions"),
+            ],
+            [
+                InlineKeyboardButton(msg.t("menu_aboutme"), callback_data="menu:aboutme"),
+                InlineKeyboardButton(msg.t("menu_lang"), callback_data="menu:lang"),
+            ],
+            [
+                InlineKeyboardButton(msg.t("menu_help"), callback_data="menu:help"),
+                InlineKeyboardButton(msg.t("menu_cancel"), callback_data="menu:cancel"),
+            ],
+        ]
+        if user_id is not None and _is_admin(user_id):
+            rows.append([
+                InlineKeyboardButton(msg.t("menu_admin"), callback_data="admin:menu"),
+            ])
+        return InlineKeyboardMarkup(rows)
+
+    return _with_user_lang(user_id, _build)
 
 
-def _back_row():
-    return [InlineKeyboardButton(msg.t("menu_back"), callback_data="menu:back")]
+def _back_row(user_id=None):
+    return _with_user_lang(
+        user_id,
+        lambda: [InlineKeyboardButton(msg.t("menu_back"), callback_data="menu:back")],
+    )
 
 
 def _admin_home_row():
@@ -821,17 +889,22 @@ async def lang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_manager.set_language(user.id, code)
     msg.set_lang(code)
-    await bot_commands.refresh_user_commands(
+    if await bot_commands.refresh_user_commands(
         context.bot, user.id, code, admin_id=ADMIN_ID,
-    )
+    ):
+        user_manager.set_commands_lang(user.id, code)
+        _commands_sync_failed_at.pop(str(user.id), None)
     await query.answer(msg.lang_set(code))
+    first_name = user.first_name or ""
     try:
         await query.message.edit_text(
-            msg.lang_set(code), reply_markup=_back_button(),
+            msg.start_text(first_name),
+            reply_markup=_start_menu_keyboard(user.id),
         )
     except Exception:
         await query.message.reply_text(
-            msg.lang_set(code), reply_markup=_back_button(),
+            msg.start_text(first_name),
+            reply_markup=_start_menu_keyboard(user.id),
         )
 
 
@@ -1970,6 +2043,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("menu:"):
         action = data.split(":", 1)[1]
         user = update.effective_user
+        if user:
+            resolve_lang(user)
         chat_id = query.message.chat_id
         had_await = bool(peek_await_input(context))
         clear_await_input(context)
@@ -3479,6 +3554,30 @@ async def _deferred_youtube_setup(bot):
         logger.warning("Cookie health report failed: %s", exc)
 
 
+async def _backfill_commands_menu(bot) -> None:
+    """Push per-user command menus for users whose stored language is stale on Telegram."""
+    try:
+        rows = user_manager.database.list_users_needing_commands_sync(500)
+    except Exception:
+        logger.exception("commands menu backfill: could not list users")
+        return
+    if not rows:
+        return
+    logger.info("Syncing Telegram command menu for %s user(s)", len(rows))
+    for row in rows:
+        uid = row["user_id"]
+        lang = msg.normalize_lang(row.get("language")) or msg.DEFAULT_LANG
+        try:
+            ok = await bot_commands.refresh_user_commands(
+                bot, uid, lang, admin_id=ADMIN_ID,
+            )
+            if ok:
+                user_manager.set_commands_lang(uid, lang)
+        except Exception:
+            logger.debug("commands backfill failed for %s", uid, exc_info=True)
+        await asyncio.sleep(0.05)
+
+
 async def _on_startup(application):
     gate_ok = await validate_channel_gate(application.bot)
     vip_ok = await validate_vip_log_channel(application.bot)
@@ -3501,9 +3600,15 @@ async def _on_startup(application):
     except Exception:
         logger.exception("Mini App menu setup skipped")
     try:
-        await bot_commands.configure_menu(application.bot, ADMIN_ID)
+        admin_lang = None
+        if ADMIN_ID:
+            admin_lang = msg.normalize_lang(user_manager.get_language(ADMIN_ID))
+        await bot_commands.configure_menu(
+            application.bot, ADMIN_ID, admin_lang=admin_lang,
+        )
     except Exception:
         logger.exception("Bot commands menu setup skipped")
+    asyncio.create_task(_backfill_commands_menu(application.bot))
     if application.job_queue:
         application.job_queue.run_repeating(_cache_sweep_job, interval=3600, first=60)
         application.job_queue.run_repeating(_cookie_health_job, interval=3600, first=120)
