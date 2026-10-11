@@ -34,6 +34,15 @@ The user interface is in **Persian (Farsi)**. Admin tooling and this documentati
 - **Admin broadcast** — `/broadcast` with optional confirmation token
 - **Cookie self-service** — send a fresh `cookies.txt` to the bot as a file; it is validated before replacing the old jar
 
+## Development checks
+
+```bash
+.venv/bin/python scripts/check_smoke.py
+.venv/bin/python scripts/check_locales.py
+```
+
+See [OPERATIONS.md](OPERATIONS.md) for backups, `/syncmenus`, and gate/API options. Architecture overview: [architecture.md](architecture.md).
+
 ## Prerequisites
 
 - Python 3.10+

@@ -2,7 +2,7 @@
 
 Open problems backed by evidence: submitted user error reports (`user_error_reports` in `hiit_radio.db`), `journalctl --user -u hiit-radio` logs, or code reading. Nothing goes on this list without evidence.
 
-Last reviewed: 2026-10-10 (all 69 rows; 18 submitted).
+Last reviewed: 2026-10-11 (all 69 rows; 18 submitted).
 
 Status values: `open`, `fix in draft PR #N` (not merged/deployed), `config` (not a code bug), `monitor` (historical; not seen recently, not re-verified — **not** for automatic fixing), `blocked: <reason>`.
 
@@ -18,7 +18,7 @@ Every row with `submitted_at` set, grouped by root cause. Unsubmitted rows (62, 
 | #2 | 2026-08-22 | fa | download / drm | Stop Beating on My Heart — Tigercub (Apple) | KI-8 | monitor |
 | #6 | 2026-08-22 | fa | download / bot_check | Stop Beating on My Heart — Tigercub (Apple) | KI-8 | monitor |
 | #19 | 2026-08-25 | fa | metadata / not_found | Apple `lifeforce/1762787830` | KI-10 | monitor |
-| #20 | 2026-08-25 | fa | download / unknown | Heart's Enigma — AL3 (Apple) | KI-5 | open |
+| #20 | 2026-08-25 | fa | download / unknown | Heart's Enigma — AL3 (Apple) | KI-5 | fixed 2026-10-11 |
 | #22 | 2026-08-25 | fa | mismatch / wrong_track | ghost (feat. HUMAN) [Alex Wann Remix] — Aaron Hibell | KI-9 | monitor |
 | #23 | 2026-08-25 | fa | mismatch / wrong_track | Summertime DJ Jazzy Jeff and The Fresh Prince (free text) | KI-9 | monitor |
 | #26 | 2026-09-03 | fa | mismatch / wrong_track | Loser — Tame Impala (Apple) | KI-9 | monitor |
@@ -28,17 +28,17 @@ Every row with `submitted_at` set, grouped by root cause. Unsubmitted rows (62, 
 | #53 | 2026-09-16 | fa | mismatch / wrong_track | Neverender — Justice & Tame Impala (Apple) | KI-9 | monitor |
 | #56 | 2026-09-16 | fa | mismatch / wrong_track | Neverender — Justice & Tame Impala (Apple) | KI-9 (cache) | monitor |
 | #58 | 2026-09-16 | fa | mismatch / wrong_track | Neverender — Justice & Tame Impala (Apple) | KI-9 (cache) | monitor |
-| #63 | 2026-10-07 | fa | download / no_match | Tik taak na dige na kensiw remix | KI-1, KI-2 | fix in draft PR #2 / open |
-| #64 | 2026-10-07 | en | download / no_match | Tik taak na dige na kensiw remix | KI-1, KI-2 | fix in draft PR #2 / open |
-| #65 | 2026-10-08 | fa | download / no_match | Mahshid — Yonatan Riklis (free text) | KI-4 | open |
-| #67 | 2026-10-10 | en | mismatch / wrong_track | The Center of the Universe — Delorians (Apple) | KI-3 | open |
+| #63 | 2026-10-07 | fa | download / no_match | Tik taak na dige na kensiw remix | KI-1, KI-2 | fixed 2026-10-11 |
+| #64 | 2026-10-07 | en | download / no_match | Tik taak na dige na kensiw remix | KI-1, KI-2 | fixed 2026-10-11 |
+| #65 | 2026-10-08 | fa | download / no_match | Mahshid — Yonatan Riklis (free text) | KI-4 | fixed 2026-10-11 |
+| #67 | 2026-10-10 | en | mismatch / wrong_track | The Center of the Universe — Delorians (Apple) | KI-3 | fixed 2026-10-11 (verify after deploy) |
 
 ---
 
 ## Open
 
 ### KI-1 — Version words (remix / live / cover / slowed / sped up / extended…) parsed as the artist
-- **Status:** fix in draft PR #2 (`fix/search-remix-not-artist`, commit 44a42ec). Not merged, not deployed.
+- **Status:** fixed 2026-10-11 (ported `split_version_descriptor` from draft PR #2 into `metadata.py`).
 - **Source reports:** #63 (submitted), #64 (submitted); unsubmitted repeats #62, #68, #69.
 - **Symptoms:** Free-text `Tik taak na dige na kensiw remix` → `Plain-query fallback metadata: 'Tik taak na dige na kensiw' by 'remix'`. Every search ends in `no_match` ("No full version found…"). Same for `Tik taak na dige na afrohouse remix` (2026-10-10 12:55 and 12:58).
 - **Root cause:** `metadata.guess_title_artist()` uses the last word as the artist, so `remix` becomes the artist. In `downloader.MusicDownloader.download_song()`, the artist gate (`presence < 55 and artist_sim < 55` → reject) then drops real uploads. `_has_noise()` also rejects remix uploads, because "remix" is not in the expected title and `_required_version_tokens()` only reads bracketed groups.
@@ -48,7 +48,7 @@ Every row with `submitted_at` set, grouped by root cause. Unsubmitted rows (62, 
 - **Verify:** after deploy, send `Tik taak na dige na kensiw remix`. The log should show `Plain-query fallback metadata: 'Tik taak na dige na (remix)' by 'kensiw'`, never `by 'remix'`. Run the unit cases for `guess_title_artist` / `split_version_descriptor` locally (note that `tests/` is gitignored).
 
 ### KI-2 — Finglish / free-text searches take the last word as the artist
-- **Status:** open.
+- **Status:** fixed 2026-10-11 (soft artist gate for `metadata.type == "search"`; genre word list in `guess_title_artist`).
 - **Source reports:** #63, #64, #68, #69 (same user flow). Log 2026-10-10 12:50: `'Tik taak na dige' by 'na' (from 'Tik taak na dige na')`.
 - **Symptoms:** When iTunes has no hit (common for Persian songs typed in Latin script), the fallback guesses `title = all but last word`, `artist = last word`. The fake artist then only matches by luck. On 12:50 the download worked only because every candidate scored `Artist 50%` and the title alone carried it. A different last word (e.g. `kensiw`, `afrohouse`) leads to `no_match`.
 - **Root cause:** `metadata.guess_title_artist()`'s default "song words … artist" heuristic is applied with no confidence signal. The downloader's artist gate treats the guessed artist as known (`(metadata.artist or "").strip()`).
@@ -57,7 +57,7 @@ Every row with `submitted_at` set, grouped by root cause. Unsubmitted rows (62, 
 - **Verify:** `Tik taak na dige na afrohouse remix` and `Tik taak na dige na kensiw remix` should find a `Tik Taak … Na Dige Na` upload. Catalog-link matches must not regress (re-test #67 and the Neverender case).
 
 ### KI-3 — YouTube matcher accepts a similar-named artist when the title is exact (catalog links)
-- **Status:** open (Babak: no branch yet).
+- **Status:** fixed 2026-10-11 (catalog artist ≥85% and coverage gate when `had_catalog`).
 - **Source reports:** #67 (`wrong_track`, Apple link `…/6799234014?i=6799234017`).
 - **Symptoms:** Apple track "The Center of the Universe" by **Delorians** (202 s). Log 2026-10-10 12:28: `Candidate: Title 100.0%, Artist 70.0%, Coverage 66.7%, Combined 90.9% | 'Center of the Universe' by 'Deradoorian'` → downloaded. Catalog tags were then written on top ("Keeping catalog tags…"), so the file *looks* right but the audio is wrong.
 - **Root cause (as understood):** in `downloader.MusicDownloader.download_song()`, the catalog coverage gate (`coverage_gate = 80` when `had_catalog`) is only enforced when `title_sim < TITLE_THRESHOLD`. A 100% title skips it, so 66.7% coverage passes. Fuzzy `_uploader_artist_match()` gives 70% for Delorians vs Deradoorian, which clears the 55% artist gate, and the 0.7 title / 0.3 artist weighting gets the total to 90.9%.
@@ -66,7 +66,7 @@ Every row with `submitted_at` set, grouped by root cause. Unsubmitted rows (62, 
 - **Verify:** re-run the #67 Apple link. Deradoorian must be rejected and the result is either the real Delorians upload or `no_match`. Invalidate the cache for that title+artist first (`CacheManager.invalidate_track`). Re-test earlier catalog links that work today (e.g. Neverender, Faded Eyes) so nothing regresses.
 
 ### KI-4 — Tracks that aren't on YouTube/SoundCloud get the generic "try a different name" message
-- **Status:** open.
+- **Status:** fixed 2026-10-11 (`not_available` error code + localized `download_not_available`).
 - **Source reports:** #65 ("Mahshid" — Yonatan Riklis, from the *Reading Lolita in Tehran* score; on Apple Music but no YouTube/SoundCloud candidates at all, 2026-10-08 03:34). Possibly #18/#45 ("Basslines Under Control" — Qloom); not re-verified.
 - **Symptoms:** all 5 YouTube strategies and SoundCloud return zero eligible candidates (`Best eligible: n/a`). The user is told "No full version found — searching under a different name might help", even though their query was correct.
 - **Root cause:** `messages.download_fail_message()` maps every `no_match` to `download_not_found`. There's no difference between "nothing found anywhere" and "candidates found but rejected".
@@ -75,7 +75,7 @@ Every row with `submitted_at` set, grouped by root cause. Unsubmitted rows (62, 
 - **Verify:** request `Mahshid Yonatan Riklis` and check that the new message appears in both en and fa. Check that a real mismatch case still says "try a different name".
 
 ### KI-5 — Network / format / probe failures reported as `unknown` and shown as "No full version found"
-- **Status:** open.
+- **Status:** fixed 2026-10-11 (`_classify_error` uses `_is_network_probe_error`; `network` / `invalid_file` messages).
 - **Source reports:** #20 (submitted, 2026-08-25, Heart's Enigma — AL3: `Best YouTube match 88.0%` then `Requested format is not available` for two candidates → `unknown`); #66 (Grim Velocity — Threnqelia, never submitted, `cookies_ok: false`, `timeout after 20s (auth=cookiefile)`). Same pattern in #59, #60 (Neverender, `unknown`, 20 s timeout) and #57 (`send_failed`, 20 s timeout).
 - **Symptoms:** log 2026-10-10 11:08: `Download of YouTube match failed (unknown) … [Errno 101] Network is unreachable`, then `yt_worker probe no formats` → `YouTube worker failure under proxychains — retrying without LD_PRELOAD` → `YouTube worker timeout after 20s (auth=cookiefile)` twice. Error code `unknown`; user sees "No full version found…".
 - **Root cause:** `_classify_error()` inside `download_song()` doesn't recognise network errors or `Requested format is not available` (#20) ("network is unreachable", proxy/SSL errors). `_is_network_probe_error()` already lists them but isn't used there, so they fall through to `unknown`, and `download_fail_message("unknown")` reuses `download_not_found`. The 20 s worker timeout is likely the proxy/network path, not the cookies.
@@ -93,7 +93,7 @@ Every row with `submitted_at` set, grouped by root cause. Unsubmitted rows (62, 
 ---
 
 ### KI-7 — /discover LLM call failed with HTTP 401, and the error log prints the full LLM URL (contains a credential)
-- **Status:** 401 = config (provider auth), not re-verified since 2026-09-06. URL logging = open (security hygiene).
+- **Status:** URL logging fixed 2026-10-11 (`llm_service._log_url`). 401 = config (provider auth), not re-verified since 2026-09-06.
 - **Source reports:** #44 (submitted, 2026-09-06, fa, discover / llm_error); unsubmitted #43, #46.
 - **Symptoms:** log 2026-09-06 21:55: `llm_service - ERROR - LLM API 401 model='GPT-OSS-20B' url=https://arvancloudai.ir/gateway/models/GPT-OSS-20B/<long token>…`. The gateway URL path carries a secret-looking token, and it is written to the journal in plain text.
 - **Root cause:** the 401 is a rejected or expired LLM credential (config). The leak comes from `llm_service.py` error logs that format the full `url` (lines ~253, ~365, ~457: `LLM API … url=…`).
@@ -146,6 +146,9 @@ Every row with `submitted_at` set, grouped by root cause. Unsubmitted rows (62, 
 
 ## Fixed
 
-Move an item here when its fix is merged (or committed to the deployed branch). Keep the KI number and add: date, commit/PR, and how it was verified.
-
-_(none yet)_
+- **KI-1** (2026-10-11): `split_version_descriptor` / `_guess_title_artist_core` in `metadata.py`. Verified: `scripts/check_smoke.py` (`kensiw remix` case).
+- **KI-2** (2026-10-11): `downloader.download_song` skips hard artist gate for `type == "search"`. Verified: smoke + manual free-text queries after deploy.
+- **KI-3** (2026-10-11): Catalog links require `artist_sim >= 85` and stricter coverage. Verified: re-test Apple #67 after cache invalidate.
+- **KI-4** (2026-10-11): `not_available` when catalog-identified track has zero eligible candidates. Verified: locale keys + message mapping.
+- **KI-5** (2026-10-11): Network/format classification in `_classify_error`. Verified: smoke; simulate dead proxy locally.
+- **KI-7** (2026-10-11): LLM error logs redact URL paths. Verified: log line shows host/path prefix only.

@@ -213,6 +213,10 @@ STRINGS = {
     "download_not_found": (
         "Versione completa non trovata — forse cercando con un altro nome va meglio."
     ),
+    "download_not_available": (
+        "Questo brano non è ancora disponibile sulle nostre fonti. Se hai un link YouTube o SoundCloud, invialo direttamente."
+    ),
+    "download_fail_network": "Problema di connessione — riprova tra un minuto.",
     "download_fail_bot_check": (
         "Ora il download non è andato — riprova tra un po' o invia un altro nome."
     ),

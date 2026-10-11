@@ -163,7 +163,8 @@ def _ydl_opts_factory():
 
 
 def _is_admin(user_id):
-    return str(user_id) == str(ADMIN_ID)
+    import admin_guards
+    return admin_guards.is_admin(user_id)
 
 
 def _platform_fa(platform):
@@ -834,6 +835,18 @@ def _stats_text():
     lines.append("پلتفرم‌ها:")
     for row in db.platform_breakdown():
         lines.append(f"  • {_platform_fa(row['platform'])}: {row['cnt']}")
+    try:
+        skipped_cl = db.count_skipped_changelogs()
+        if skipped_cl:
+            lines.append("")
+            lines.append(f"تغییرلاگ‌های ردشده (DB): {skipped_cl}")
+    except Exception:
+        pass
+    try:
+        reports = db.count_submitted_error_reports()
+        lines.append(f"گزارش‌های کاربر (ثبت‌شده): {reports}")
+    except Exception:
+        pass
     lines.append("")
     lines.append("گزارش کامل: /report  ·  گزارش کاربران: /reports")
     return "\n".join(lines)
@@ -2050,15 +2063,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_await_input(context)
 
         if action == "back":
-            try:
-                await query.message.delete()
-            except Exception:
-                pass
             first_name = user.first_name if user else ""
-            await context.bot.send_message(
-                chat_id, msg.start_text(first_name),
-                reply_markup=_start_menu_keyboard(user.id if user else None),
-            )
+            text = msg.start_text(first_name)
+            markup = _start_menu_keyboard(user.id if user else None)
+            try:
+                await query.message.edit_text(text, reply_markup=markup)
+            except Exception:
+                try:
+                    await query.message.delete()
+                except Exception:
+                    pass
+                await context.bot.send_message(chat_id, text, reply_markup=markup)
             return
 
         try:
@@ -3554,28 +3569,47 @@ async def _deferred_youtube_setup(bot):
         logger.warning("Cookie health report failed: %s", exc)
 
 
-async def _backfill_commands_menu(bot) -> None:
+async def _backfill_commands_menu(bot, *, batch_size: int = 200) -> int:
     """Push per-user command menus for users whose stored language is stale on Telegram."""
+    synced = 0
     try:
-        rows = user_manager.database.list_users_needing_commands_sync(500)
+        while True:
+            rows = user_manager.database.list_users_needing_commands_sync(batch_size)
+            if not rows:
+                break
+            logger.info("Syncing Telegram command menu for %s user(s)", len(rows))
+            for row in rows:
+                uid = row["user_id"]
+                lang = msg.normalize_lang(row.get("language")) or msg.DEFAULT_LANG
+                try:
+                    ok = await bot_commands.refresh_user_commands(
+                        bot, uid, lang, admin_id=ADMIN_ID,
+                    )
+                    if ok:
+                        user_manager.set_commands_lang(uid, lang)
+                        synced += 1
+                except Exception:
+                    logger.debug("commands backfill failed for %s", uid, exc_info=True)
+                await asyncio.sleep(0.05)
     except Exception:
         logger.exception("commands menu backfill: could not list users")
+    return synced
+
+
+async def syncmenus_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: refresh Telegram command menus for all users with stale commands_lang."""
+    if not _is_admin(update.effective_user.id):
         return
-    if not rows:
-        return
-    logger.info("Syncing Telegram command menu for %s user(s)", len(rows))
-    for row in rows:
-        uid = row["user_id"]
-        lang = msg.normalize_lang(row.get("language")) or msg.DEFAULT_LANG
-        try:
-            ok = await bot_commands.refresh_user_commands(
-                bot, uid, lang, admin_id=ADMIN_ID,
-            )
-            if ok:
-                user_manager.set_commands_lang(uid, lang)
-        except Exception:
-            logger.debug("commands backfill failed for %s", uid, exc_info=True)
-        await asyncio.sleep(0.05)
+    n = user_manager.database.count_users_needing_commands_sync()
+    await update.effective_message.reply_text(
+        f"Syncing command menus for up to {n} user(s)…",
+        reply_markup=_back_button(admin=True),
+    )
+    synced = await _backfill_commands_menu(context.bot, batch_size=200)
+    await update.effective_message.reply_text(
+        f"Done. Updated {synced} user menu(s).",
+        reply_markup=_back_button(admin=True),
+    )
 
 
 async def _on_startup(application):
@@ -3888,6 +3922,15 @@ async def retry_error_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
+
+    if row.get("error_code") == "wrong_track" or kind == "mismatch":
+        title = (ctx.get("title") or "").strip()
+        artist = (ctx.get("artist") or "").strip()
+        if title:
+            try:
+                orchestrator.cache.invalidate_track(title, artist)
+            except Exception:
+                logger.exception("Cache invalidate on retry failed")
 
     retry = ctx.get("retry") or {}
     message = query.message
@@ -4475,6 +4518,7 @@ def main():
     application.add_handler(CommandHandler("premium", premium_command))
     application.add_handler(CommandHandler("invite", invite_command))
     application.add_handler(CommandHandler("grant", grant_command))
+    application.add_handler(CommandHandler("syncmenus", syncmenus_command))
     application.add_handler(CommandHandler("topup", topup_command))
     application.add_handler(CommandHandler("aboutme", aboutme_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
@@ -4487,8 +4531,9 @@ def main():
     application.add_handler(CallbackQueryHandler(lang_callback, pattern=r"^lang:"))
     application.add_handler(CallbackQueryHandler(support_callback, pattern=r"^sup:"))
     application.add_handler(CallbackQueryHandler(report_callback, pattern=r"^rpt:"))
-    application.add_handler(CallbackQueryHandler(callback_handler, block=False))
+    application.add_handler(CallbackQueryHandler(callback_handler, block=True))
     application.add_handler(InlineQueryHandler(inline_search))
+    payments.init(user_manager=user_manager)
     payments.register_handlers(application)
     if ADMIN_ID:
         application.add_handler(

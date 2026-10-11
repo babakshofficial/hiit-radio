@@ -12,6 +12,24 @@ import messages as msg
 
 logger = logging.getLogger(__name__)
 
+_db = None
+
+
+def init(user_manager=None, database=None):
+    """Use the bot's shared database (avoids a second UserManager/connection)."""
+    global _db
+    if database is not None:
+        _db = database
+    elif user_manager is not None:
+        _db = user_manager.database
+
+
+def _database():
+    if _db is not None:
+        return _db
+    from user_manager import UserManager
+    return UserManager().database
+
 STARS_DAYPASS = int(os.getenv("STARS_DAYPASS", "15"))
 STARS_WEEKLY = int(os.getenv("STARS_WEEKLY", "75"))
 STARS_MONTHLY = int(os.getenv("STARS_MONTHLY", "200"))
@@ -132,11 +150,9 @@ def _apply_purchase(db, user_id, kind, source="stars"):
 
 
 async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    from user_manager import UserManager
-
     payment = update.message.successful_payment
     user = update.effective_user
-    db = UserManager().database
+    db = _database()
     try:
         data = json.loads(payment.invoice_payload or "{}")
     except json.JSONDecodeError:

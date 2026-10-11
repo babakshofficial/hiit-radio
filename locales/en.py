@@ -193,6 +193,10 @@ STRINGS = {
     ),
     "send_failed": "I couldn't send the track — please try again 🙏",
     "download_not_found": "No full version found — searching under a different name might help.",
+    "download_not_available": (
+        "This track isn't on our sources yet. If you have a YouTube or SoundCloud link, send it directly."
+    ),
+    "download_fail_network": "Connection problem — please try again in a minute.",
     "download_fail_bot_check": (
         "The download failed right now — try again in a bit or send a different name."
     ),

@@ -395,6 +395,14 @@ def download_not_found():
     return t("download_not_found")
 
 
+def download_not_available():
+    return t("download_not_available")
+
+
+def download_fail_network():
+    return t("download_fail_network")
+
+
 def download_fail_bot_check():
     return t("download_fail_bot_check")
 
@@ -410,8 +418,10 @@ def download_fail_invalid():
 def download_fail_message(error_code):
     mapping = {
         "no_match": download_not_found(),
+        "not_available": download_not_available(),
         "bot_check": download_fail_bot_check(),
         "timeout": download_fail_timeout(),
+        "network": download_fail_network(),
         "invalid_file": download_fail_invalid(),
         "cancelled": download_cancelled(),
         "send_failed": send_failed(),

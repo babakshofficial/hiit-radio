@@ -461,6 +461,20 @@ class Database:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def count_users_needing_commands_sync(self):
+        with self._conn() as conn:
+            return conn.execute(
+                """SELECT COUNT(*) AS c FROM users
+                   WHERE language IS NOT NULL AND TRIM(language) != ''
+                     AND (commands_lang IS NULL OR commands_lang != language)"""
+            ).fetchone()["c"]
+
+    def count_submitted_error_reports(self):
+        with self._conn() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) AS c FROM user_error_reports WHERE submitted_at IS NOT NULL"
+            ).fetchone()["c"]
+
     def get_all_user_ids(self):
         with self._conn() as conn:
             rows = conn.execute(

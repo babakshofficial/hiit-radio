@@ -13,10 +13,14 @@ Persian RTL web app and Telegram Mini App sharing the bot’s users, quotas, and
 Set in root `.env`:
 
 - `WEBAPP_URL` — URL of the Next.js app (Mini App URL). Local dev: `http://127.0.0.1:3000`
+- `MENU_BUTTON_MODE` — `commands` (default slash menu) or `webapp` (Mini App button; needs HTTPS `WEBAPP_URL`)
+- `DATABASE_PATH` — SQLite file (default `hiit_radio.db`); shared by bot and API
 - `API_PUBLIC_URL` — public URL of FastAPI for signed MP3 links. Leave empty for same-origin `/backend`
-- `JWT_SECRET` — dedicated secret in production
+- `JWT_SECRET` — dedicated secret in production (`API_STRICT_SECRETS=1` enforces length)
 - `CORS_ORIGINS` — include your web origin
 - `BOT_USERNAME` — without `@` (Login Widget + invite links)
+
+Community uploads (`/submit`, `/uploads`) are bot-only; search hits approved tracks in the same DB.
 
 Frontend: copy `web/.env.local.example` → `web/.env.local`. Default `NEXT_PUBLIC_API_URL=/backend` (Next.js rewrites that path to FastAPI on port 8000).
 

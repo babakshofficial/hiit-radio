@@ -1196,6 +1196,11 @@ class MusicDownloader:
             return bool(user_id is not None and jobs.abort_requested(user_id))
 
         def _classify_error(err):
+            if _is_network_probe_error(err):
+                text = str(err or "").lower()
+                if "timeout" in text or "timed out" in text:
+                    return "timeout"
+                return "network"
             text = str(err or "").lower()
             if "cancelled" in text:
                 return "cancelled"
@@ -1203,6 +1208,8 @@ class MusicDownloader:
                 return "bot_check"
             if "no video formats found" in text:
                 return "bot_check"
+            if "format is not available" in text or "probe_no_formats" in text:
+                return "invalid_file"
             if "drm" in text:
                 return "drm"
             if "404" in text or "not found" in text:
@@ -1301,6 +1308,12 @@ class MusicDownloader:
             host in catalog_url
             for host in ("spotify.com", "music.apple.com", "deezer.com")
         )
+        is_search_guess = getattr(metadata, "type", None) == "search"
+        catalog_identified = had_catalog or (
+            not is_search_guess
+            and bool((metadata.title or "").strip())
+            and getattr(metadata, "type", None) not in ("top", "retry")
+        )
 
         def score(video):
             raw_title = video.get('title', '') or ''
@@ -1341,9 +1354,21 @@ class MusicDownloader:
             else:
                 artist_sim = max(uploader_match, min(presence, 50.0))
 
-            # When artist is known, refuse weak artist matches — stops same-title
-            # wrong uploads (e.g. SoundCloud "She's so Lovely" by another band).
-            if (metadata.artist or "").strip() and presence < 55.0 and artist_sim < 55.0:
+            # Plain-text search fallback: artist is only a guess — don't hard-reject.
+            if (
+                not is_search_guess
+                and (metadata.artist or "").strip()
+                and presence < 55.0
+                and artist_sim < 55.0
+            ):
+                return None
+            if (
+                had_catalog
+                and not version_required
+                and not is_topic
+                and not is_vevo
+                and artist_sim < 85.0
+            ):
                 return None
             # Catalog links: reject remix accounts that only credit artist in the title.
             if (
@@ -1596,9 +1621,12 @@ class MusicDownloader:
                             f"'{c_title}' by '{c_artist}' | "
                             f"Expected: '{expected_title_clean}' by '{metadata.artist}'"
                         )
-                        if title_sim < TITLE_THRESHOLD and coverage < coverage_gate:
+                        coverage_fail = coverage < coverage_gate
+                        title_fail = title_sim < TITLE_THRESHOLD
+                        if coverage_fail and (had_catalog or title_fail):
                             topic_ok = (
-                                is_topic
+                                not had_catalog
+                                and is_topic
                                 and token_sim >= 85.0
                                 and artist_sim >= 80.0
                                 and (
@@ -1726,7 +1754,11 @@ class MusicDownloader:
                 f"No candidate passed validation on any source (title >= {TITLE_THRESHOLD:.0f}% and "
                 f"combined >= {MATCH_THRESHOLD:.0f}%). Best eligible: {score_txt}"
             )
-            return None, ("bot_check" if saw_bot_check else "no_match"), failure_trail
+            if saw_bot_check:
+                return None, "bot_check", failure_trail
+            if best is None and catalog_identified:
+                return None, "not_available", failure_trail
+            return None, "no_match", failure_trail
 
         def _source_label_for(video):
             extractor = (video.get("extractor") or "").lower()

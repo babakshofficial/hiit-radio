@@ -102,16 +102,73 @@ def looks_like_music_query(text):
     return True
 
 
-def guess_title_artist(query):
-    """Split free-text into (title, artist) without trusting a single orientation.
+# Trailing words that describe a *version* of a song, never its artist.
+_VERSION_DESCRIPTOR_WORDS = (
+    r"remix(?:es|ed)?|live|cover|acoustic|instrumental|karaoke|nightcore|"
+    r"slowed|reverb|reverbed|sped\s*up|speed\s*up|extended(?:\s+mix)?|"
+    r"club\s*mix|radio\s*edit|edit|version|remaster(?:ed)?|lo-?fi|8d(?:\s*audio)?|"
+    r"bass\s*boosted|mashup|bootleg|rework|vip"
+)
+_TRAILING_DESCRIPTOR_RE = re.compile(
+    r"(?:\s+|^)(?:"
+    r"[\(\[]\s*[^\)\]]*\b(?:" + _VERSION_DESCRIPTOR_WORDS + r")\b[^\)\]]*[\)\]]"
+    r"|(?:" + _VERSION_DESCRIPTOR_WORDS + r")"
+    r")\s*$",
+    re.I,
+)
+_DESCRIPTOR_JOINERS_RE = re.compile(r"(?:\s+|^)(?:[+&,/-]|and|with|n)\s*$", re.I)
 
-    Patterns:
-    - "Oscar and the Wolf Breathe" → title=Breathe, artist=Oscar and the Wolf
-    - "dont wanna be here naits" → title=dont wanna be here, artist=naits
-    """
+_GENRE_DESCRIPTOR_WORDS = frozenset({
+    "afrohouse", "house", "techno", "trance", "dnb", "drumandbass", "dubstep",
+    "trap", "lofi", "lo-fi", "edm", "electro", "garage", "jungle", "hardstyle",
+    "phonk", "hyperpop", "ambient", "chillout", "deephouse", "progressive",
+})
+
+
+def split_version_descriptor(query):
+    """Split trailing version words off a free-text query → (core, descriptor)."""
+    q = (query or "").strip()
+    core = q
+    while True:
+        m = _TRAILING_DESCRIPTOR_RE.search(core)
+        if not m:
+            break
+        candidate = core[:m.start()].rstrip()
+        j = _DESCRIPTOR_JOINERS_RE.search(candidate)
+        if j and j.start() > 0:
+            candidate = candidate[:j.start()].rstrip()
+        candidate = candidate.rstrip(" -–,")
+        if not candidate:
+            break
+        core = candidate
+    if core == q:
+        return q, ""
+    descriptor = q[len(core):].strip(" -–,")
+    return core, descriptor
+
+
+def _with_descriptor(title, descriptor):
+    if not descriptor:
+        return title
+    d = descriptor.strip()
+    if not (d.startswith("(") or d.startswith("[")):
+        d = f"({d})"
+    return f"{title} {d}".strip() if title else d
+
+
+def guess_title_artist(query):
+    """Split free-text into (title, artist) without trusting a single orientation."""
     q = (query or "").strip()
     if not q:
         return "", ""
+    core, descriptor = split_version_descriptor(q)
+    if descriptor:
+        title, artist = _guess_title_artist_core(core)
+        return _with_descriptor(title, descriptor), artist
+    return _guess_title_artist_core(q)
+
+
+def _guess_title_artist_core(q):
     if re.search(r'\s+by\s+', q, re.I):
         parts = re.split(r'\s+by\s+', q, maxsplit=1, flags=re.I)
         if len(parts) == 2:
@@ -124,18 +181,18 @@ def guess_title_artist(query):
     if len(words) < 2:
         return q, ""
     if len(words) == 2:
-        # Ambiguous — prefer Title Artist (song then artist)
         return words[0], words[1]
 
     last = words[-1]
     rest = words[:-1]
     rest_l = " ".join(rest).lower()
 
-    # Band-name cue: "X and the Y Title" → last word is the song title
+    if last.lower() in _GENRE_DESCRIPTOR_WORDS:
+        return q, ""
+
     if re.search(r'\band\s+the\b', rest_l) or re.search(r'\b&\b', rest_l):
         return last, " ".join(rest)
 
-    # Default chat pattern: "song title words … artist"
     return " ".join(rest), last
 
 
@@ -1229,19 +1286,25 @@ class TrackMetadata:
 
         # Smart title/artist guess, then retry iTunes with both orientations.
         title, artist = guess_title_artist(query)
-        for variant in (
+        core_query, descriptor = split_version_descriptor(query)
+        core_title, core_artist = guess_title_artist(core_query)
+        for variant in dict.fromkeys((
             f"{title} {artist}".strip(),
             f"{artist} {title}".strip(),
             query,
-        ):
+            f"{core_title} {core_artist}".strip(),
+            core_query,
+        )):
             if not variant:
                 continue
             source = await AppleMusicMetadata.search_by_query(variant)
             if source:
-                # Keep only if still relevant to the *original* query.
                 if score_query_coverage(query, source.title, source.artist) >= 55:
                     meta._copy_from(source, url=None)
                     meta.search_query = query
+                    if descriptor and not split_version_descriptor(meta.title or "")[1]:
+                        meta.title = _with_descriptor(meta.title, descriptor)
+                        meta.id = f"{meta.id or ''}-{abs(hash(descriptor.lower()))}"
                     return meta
 
         meta.title = title or query

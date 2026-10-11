@@ -96,12 +96,31 @@ def require_agent_secret(
     return True
 
 
-def _touch(user: dict):
-    get_user_manager().touch_user(
+def _touch(user: dict, *, language_code: str | None = None):
+    um = get_user_manager()
+    um.touch_user(
         user["id"],
         username=user.get("username"),
         first_name=user.get("first_name"),
     )
+    if language_code and not um.get_language(user["id"]):
+        from locales import normalize_lang
+        lang = normalize_lang(language_code)
+        if lang:
+            um.set_language(user["id"], lang)
+
+
+def _allowed_file_path(path: str) -> bool:
+    path = os.path.realpath(path)
+    roots = [
+        os.path.realpath(config.CACHE_DIR),
+        os.path.realpath(str(config.ROOT / "downloads")),
+        os.path.realpath(str(config.ROOT / os.getenv("USER_MUSIC_DIR", "user_music"))),
+    ]
+    for root in roots:
+        if os.path.isdir(root) and (path == root or path.startswith(root + os.sep)):
+            return True
+    return False
 
 
 @app.get("/health")
@@ -114,7 +133,7 @@ async def auth_webapp(body: WebAppAuthBody):
     parsed = auth.validate_webapp_init_data(body.initData)
     user = parsed["user"]
     um = get_user_manager()
-    um.touch_user(user["id"], username=user.get("username"), first_name=user.get("first_name"))
+    _touch(user, language_code=user.get("language_code"))
     token = auth.issue_token(user)
     return {
         "token": token,
@@ -134,7 +153,7 @@ async def auth_login(body: LoginWidgetBody):
     parsed = auth.validate_login_widget(body.model_dump())
     user = parsed["user"]
     um = get_user_manager()
-    um.touch_user(user["id"], username=user.get("username"), first_name=user.get("first_name"))
+    _touch(user)
     token = auth.issue_token(user)
     return {
         "token": token,
@@ -325,8 +344,10 @@ async def discover(user=Depends(get_current_user)):
 @app.get("/files/{token}")
 async def serve_file(token: str):
     claims = auth.decode_file_token(token)
+    if not claims.get("uid"):
+        raise HTTPException(401, "Invalid file token")
     path = claims.get("path")
-    if not path or not os.path.isfile(path):
+    if not path or not os.path.isfile(path) or not _allowed_file_path(path):
         raise HTTPException(404, "File not found")
     filename = os.path.basename(path)
     media = "audio/mpeg" if path.endswith(".mp3") else "application/octet-stream"
