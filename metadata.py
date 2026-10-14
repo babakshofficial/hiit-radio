@@ -57,6 +57,36 @@ def _normalize_apple_artwork_url(url):
     )
 
 
+_FEAT_GROUP_RE = re.compile(
+    r"\s*[\(\[][^\)\]]*\b(?:feat\.?|ft\.?|featuring)\b[^\)\]]*[\)\]]",
+    re.IGNORECASE,
+)
+
+
+def strip_featured_credit(text, primary_artist=""):
+    """Remove featured-artist credits from text used for coverage scoring.
+
+    ``(feat. Lefty Gunplay)`` groups are dropped. An inline ``feat. …`` clause
+    is removed only when it sits immediately before ``primary_artist``, so a
+    catalog query like ``title feat. Guest Primary`` keeps the primary name.
+    """
+    if not text:
+        return ""
+    cleaned = _FEAT_GROUP_RE.sub(" ", text)
+    primary = (primary_artist or "").strip()
+    if primary:
+        cleaned = re.sub(
+            r"\b(?:feat\.?|ft\.?|featuring)\s+.*?(?=\s+"
+            + re.escape(primary)
+            + r"\b)",
+            " ",
+            cleaned,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def score_query_coverage(query, title, artist):
     """Symmetric coverage of query tokens in title+artist (0-100).
 
@@ -123,6 +153,41 @@ _GENRE_DESCRIPTOR_WORDS = frozenset({
     "trap", "lofi", "lo-fi", "edm", "electro", "garage", "jungle", "hardstyle",
     "phonk", "hyperpop", "ambient", "chillout", "deephouse", "progressive",
 })
+
+_TYPE_BEAT_PHRASE_RE = re.compile(
+    r"\btype\s+beats?\b|\binstrumental\s+beats?\b|\boriginally\s+performed\s+by\b",
+    re.IGNORECASE,
+)
+_INSTRUMENTAL_GROUP_RE = re.compile(
+    r"[\(\[]\s*instrumental(?:\s+version)?\s*[\)\]]",
+    re.IGNORECASE,
+)
+_GENRE_SPAM_WORDS = _GENRE_DESCRIPTOR_WORDS | frozenset({
+    "westcoast", "trap", "drill", "hip", "hop", "hiphop", "rap", "beat",
+    "beats", "type", "lofi", "phonk", "rnb", "freestyle", "boom", "bap",
+    "afro", "rage", "plugg", "jersey", "club", "amapiano", "dancehall",
+})
+
+
+def looks_like_type_beat(title):
+    """True for type-beat and karaoke titles that are not the chart recording.
+
+    iTunes indexes these under famous-artist keywords. They rarely exist on
+    YouTube or SoundCloud, so nearby suggestions should not offer them.
+    """
+    text = title or ""
+    if _TYPE_BEAT_PHRASE_RE.search(text) or _INSTRUMENTAL_GROUP_RE.search(text):
+        return True
+    for match in re.finditer(r"[\(\[]([^\)\]]+)[\)\]]", text):
+        words = re.findall(r"[a-z0-9]+", match.group(1).lower())
+        if "beat" not in words and "beats" not in words and "instrumental" not in words:
+            continue
+        if len(words) < 4:
+            continue
+        genreish = sum(1 for word in words if word in _GENRE_SPAM_WORDS)
+        if genreish >= 3:
+            return True
+    return False
 
 
 def split_version_descriptor(query):
@@ -924,6 +989,8 @@ class AppleMusicMetadata:
                 tid = track.get("trackId")
                 title = track.get("trackName", "") or ""
                 artist = track.get("artistName", "") or ""
+                if looks_like_type_beat(title):
+                    continue
                 key = (title.strip().lower(), artist.strip().lower())
                 if tid is not None:
                     if tid in seen_ids:

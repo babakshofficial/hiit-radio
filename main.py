@@ -37,7 +37,10 @@ from telegram.ext import (
     ContextTypes,
 )
 
-from metadata import TrackMetadata, AppleMusicMetadata, looks_like_music_query, is_music_url
+from metadata import (
+    TrackMetadata, AppleMusicMetadata, looks_like_music_query, is_music_url,
+    looks_like_type_beat,
+)
 from downloader import MusicDownloader, QUALITIES, DEFAULT_QUALITY
 import catalog
 from user_manager import UserManager
@@ -2960,6 +2963,8 @@ async def _offer_nearby_tracks(message, context, metadata, query=None):
                 (r.artist or "").strip().lower(),
             )
             if not key[0] or key in seen:
+                continue
+            if looks_like_type_beat(r.title):
                 continue
             if seed and key == seed:
                 continue

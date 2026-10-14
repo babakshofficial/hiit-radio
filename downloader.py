@@ -15,7 +15,7 @@ import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageChops
 import io
 
-from metadata import score_query_coverage
+from metadata import score_query_coverage, strip_featured_credit
 import jobs
 import messages as msg
 
@@ -455,6 +455,29 @@ def _candidate_url(video, source_label="YouTube"):
         # Flat scsearch results sometimes only expose a numeric/track id.
         return None
     return f"https://www.youtube.com/watch?v={vid}"
+
+
+def _no_candidate_code(
+    *,
+    nothing_scored,
+    catalog_identified,
+    saw_raw_results,
+    saw_search_error,
+    saw_bot_check,
+):
+    """Code when the download queue is empty.
+
+    ``not_available`` means nothing was indexed (or a catalog track had no
+    eligible candidate). ``no_match`` means results existed but none were
+    close enough for the query.
+    """
+    if saw_bot_check:
+        return "bot_check"
+    if nothing_scored and (
+        catalog_identified or (not saw_raw_results and not saw_search_error)
+    ):
+        return "not_available"
+    return "no_match"
 
 
 def _strip_track_noise(title):
@@ -1277,16 +1300,22 @@ class MusicDownloader:
             """How well this candidate matches the user's original search text."""
             if not original_query:
                 return 100.0
+            # Featured names are usually absent from Topic/official titles.
+            # Score coverage without them so "(feat. …)" does not fail the
+            # catalog gate when title and primary artist already match.
+            coverage_query = strip_featured_credit(
+                original_query, _primary_artist(metadata.artist or ""),
+            ) or original_query
             raw = video.get("title") or ""
             uploader = clean_artist(video.get("uploader") or video.get("channel") or "")
-            scores = [score_query_coverage(original_query, raw, uploader)]
+            scores = [score_query_coverage(coverage_query, raw, uploader)]
             if " - " in raw:
                 left, right = raw.split(" - ", 1)
-                scores.append(score_query_coverage(original_query, left, right))
-                scores.append(score_query_coverage(original_query, right, left))
+                scores.append(score_query_coverage(coverage_query, left, right))
+                scores.append(score_query_coverage(coverage_query, right, left))
             scores.append(
                 score_query_coverage(
-                    original_query,
+                    coverage_query,
                     clean_title(raw, metadata.artist),
                     uploader,
                 )
@@ -1561,6 +1590,8 @@ class MusicDownloader:
             ranked = []
             seen_ids = set()
             bot_blocked = False
+            saw_results = False
+            saw_error = False
             n = max(len(strategies), 1)
 
             def _extract_search(q):
@@ -1572,7 +1603,7 @@ class MusicDownloader:
 
             for strategy_idx, search_query in enumerate(strategies):
                 if _is_cancelled():
-                    return [], False, True
+                    return [], False, True, saw_results, saw_error
                 pct = pct_start + int((pct_end - pct_start) * (strategy_idx / n))
                 await _report(
                     pct,
@@ -1591,11 +1622,12 @@ class MusicDownloader:
                         _is_cancelled,
                     )
                     if search_cancelled or _is_cancelled():
-                        return [], False, True
+                        return [], False, True, saw_results, saw_error
                     entries = info.get('entries') if info else None
                     if not entries:
                         logger.warning(f"[{source_label}] Strategy {strategy_idx + 1} returned no results")
                         continue
+                    saw_results = True
 
                     for video in entries:
                         if not video:
@@ -1667,6 +1699,7 @@ class MusicDownloader:
                         if source_label == "YouTube":
                             break
                     else:
+                        saw_error = True
                         logger.error(f"[{source_label}] Strategy {strategy_idx + 1} failed: {e}")
                     continue
             ranked.sort(key=lambda x: x[0], reverse=True)
@@ -1676,7 +1709,7 @@ class MusicDownloader:
                     "YouTube bot-check blocked all strategies — falling through to SoundCloud. "
                     "Fix cookies to restore YouTube downloads."
                 )
-            return ranked, bot_blocked, False
+            return ranked, bot_blocked, False, saw_results, saw_error
 
         if _is_cancelled():
             return None, "cancelled", failure_trail
@@ -1687,10 +1720,12 @@ class MusicDownloader:
         }
         found_by_source = {}
         saw_bot_check = False
+        saw_raw_results = False
+        saw_search_error = False
 
         async def search_source(label, pct_start, pct_end):
             """Search one source at most once per download; returns (candidates, cancelled)."""
-            nonlocal saw_bot_check
+            nonlocal saw_bot_check, saw_raw_results, saw_search_error
             if label in found_by_source:
                 return found_by_source[label], False
             prefix, strategies, note = _SOURCES[label]
@@ -1698,11 +1733,13 @@ class MusicDownloader:
                 max(pct_start - 2, 0),
                 f"{metadata.title} — {metadata.artist}\n{note}",
             )
-            ranked, blocked, cancelled = await gather_best(
+            ranked, blocked, cancelled, saw_results, saw_error = await gather_best(
                 prefix, label, strategies, pct_start, pct_end
             )
             found_by_source[label] = ranked
             saw_bot_check = saw_bot_check or blocked
+            saw_raw_results = saw_raw_results or saw_results
+            saw_search_error = saw_search_error or saw_error
             return ranked, cancelled
 
         # Without usable cookies YouTube downloads hit the bot check anyway, so
@@ -1754,11 +1791,13 @@ class MusicDownloader:
                 f"No candidate passed validation on any source (title >= {TITLE_THRESHOLD:.0f}% and "
                 f"combined >= {MATCH_THRESHOLD:.0f}%). Best eligible: {score_txt}"
             )
-            if saw_bot_check:
-                return None, "bot_check", failure_trail
-            if best is None and catalog_identified:
-                return None, "not_available", failure_trail
-            return None, "no_match", failure_trail
+            return None, _no_candidate_code(
+                nothing_scored=best is None,
+                catalog_identified=catalog_identified,
+                saw_raw_results=saw_raw_results,
+                saw_search_error=saw_search_error,
+                saw_bot_check=saw_bot_check,
+            ), failure_trail
 
         def _source_label_for(video):
             extractor = (video.get("extractor") or "").lower()
