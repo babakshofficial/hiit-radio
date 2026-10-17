@@ -21,7 +21,21 @@ class DownloadOrchestrator:
         self.cache = CacheManager(db)
         os.makedirs(download_dir, exist_ok=True)
 
+    def _community_submission_id(self, metadata):
+        cid = getattr(metadata, "community_submission_id", None)
+        if cid:
+            return int(cid)
+        url = (getattr(metadata, "url", None) or "").strip().lower()
+        if url.startswith("community:"):
+            try:
+                return int(url.split(":", 1)[1])
+            except (ValueError, IndexError):
+                return None
+        return None
+
     def _source_label(self, metadata):
+        if self._community_submission_id(metadata) is not None:
+            return "community"
         if getattr(metadata, "source_url", None):
             url = metadata.source_url.lower()
             if "soundcloud" in url:
@@ -89,6 +103,29 @@ class DownloadOrchestrator:
 
         if _cancelled():
             return None, None, False, "cancelled"
+
+        community_id = self._community_submission_id(metadata)
+        if community_id is not None:
+            row = self.db.get_approved_user_music_submission(community_id)
+            if not row or not row.get("audio_path") or not os.path.exists(row["audio_path"]):
+                return None, None, False, "not_found"
+            send_copy = os.path.join(
+                self.download_dir, f"community_{community_id}_send.mp3",
+            )
+            shutil.copy2(row["audio_path"], send_copy)
+            if not metadata.title:
+                metadata.title = row.get("title")
+            if not metadata.artist:
+                metadata.artist = row.get("artist")
+            self.music_downloader.sync_metadata_from_file(send_copy, metadata)
+            self.cache.put(metadata.title, metadata.artist, cache_source, send_copy)
+            self.db.log_event("download_success", payload={
+                "title": metadata.title,
+                "artist": metadata.artist,
+                "platform": "community",
+                "submission_id": community_id,
+            })
+            return send_copy, cache_source, False, None
 
         cached_path = self.cache.get(metadata.title, metadata.artist, cache_source)
         if cached_path:

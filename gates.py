@@ -74,11 +74,16 @@ async def is_member(bot, user_id, channel=None):
         return ok
     except (BadRequest, Forbidden) as e:
         logger.warning(f"Channel membership check failed for {uid}: {e}")
-        # Fail open so a misconfigured gate does not brick the bot.
-        return True
+        fail_closed = os.getenv("CHANNEL_GATE_FAIL_CLOSED", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        return False if fail_closed else True
     except Exception as e:
         logger.warning(f"Channel membership check failed for {uid}: {e}")
-        return True
+        fail_closed = os.getenv("CHANNEL_GATE_FAIL_CLOSED", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        return False if fail_closed else True
 
 
 async def ensure_access(update, context, allow_start=False):

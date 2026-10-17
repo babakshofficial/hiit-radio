@@ -87,6 +87,20 @@ def grant_bonus(db, user_id, amount=None, source="topup", day=None):
     return amount, day
 
 
+def grant_music_approval_bonus(db, user_id, submission_id, amount=None, day=None):
+    """Extra daily downloads when a user's community track is approved."""
+    bonus = int(os.getenv("USER_MUSIC_APPROVAL_BONUS", "2"))
+    if amount is not None:
+        bonus = int(amount)
+    day = day or today_key()
+    tier, _ = resolve_tier(db, user_id)
+    if daily_limit(tier) is None:
+        return 0, day
+    return grant_bonus(
+        db, user_id, amount=bonus, source=f"user_music:{submission_id}", day=day,
+    )
+
+
 def grant_subscription(db, user_id, tier, days, source="manual"):
     return db.grant_subscription(user_id, tier, days, source=source)
 

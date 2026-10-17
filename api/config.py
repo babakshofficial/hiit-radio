@@ -11,6 +11,10 @@ load_dotenv(ROOT / ".env")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = os.getenv("ADMIN_ID", "").strip()
 JWT_SECRET = os.getenv("JWT_SECRET", "").strip() or (BOT_TOKEN or "dev-insecure-secret")
+if len(JWT_SECRET) < 24 and os.getenv("API_STRICT_SECRETS", "").strip().lower() in (
+    "1", "true", "yes", "on",
+):
+    raise RuntimeError("JWT_SECRET must be at least 24 characters when API_STRICT_SECRETS=1")
 JWT_TTL_SEC = int(os.getenv("JWT_TTL_SEC", "604800"))  # 7 days
 FILE_URL_TTL_SEC = int(os.getenv("FILE_URL_TTL_SEC", "3600"))
 API_PUBLIC_URL = os.getenv("API_PUBLIC_URL", "").strip().rstrip("/")
