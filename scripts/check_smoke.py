@@ -19,7 +19,14 @@ def main():
         strip_featured_credit,
         looks_like_type_beat,
     )
-    from downloader import _no_candidate_code
+    from downloader import (
+        _no_candidate_code,
+        _primary_artist,
+        _lead_artist,
+        _coverage_query,
+        _uploader_artist_match,
+        _title_artist_credit,
+    )
     from bot_commands import build_commands
     from locales import SUPPORTED
 
@@ -52,6 +59,38 @@ def main():
         "Deradoorian",
     )
     assert delorians < 80, delorians
+
+    # KI-13: "&" collaborators and label "Artist - Song" uploads.
+    assert _primary_artist("Florence & The Machine") == "Florence & The Machine"
+    assert _lead_artist("WizTheMc & bees & honey") == "WizTheMc"
+    assert _uploader_artist_match("WizTheMc & bees & honey", "WizTheMc") >= 85
+    assert _uploader_artist_match("Delorians", "Deradoorian") < 85
+    assert _title_artist_credit(
+        "Jazzy & Ankhoï - Closer To The Floor", "Jazzy & Ankhoï",
+    ) >= 85
+    assert _title_artist_credit(
+        "WizTheMc - Take My Mind (Official Video)", "WizTheMc & bees & honey",
+    ) >= 85
+    assert _title_artist_credit("Center of the Universe", "Delorians") == 0
+    assert _title_artist_credit(
+        "Deradoorian - Center of the Universe", "Delorians",
+    ) < 85
+    wiz = _coverage_query(
+        "Take My Mind WizTheMc & bees & honey", "WizTheMc & bees & honey",
+    )
+    assert "bees" not in wiz.lower() and "honey" not in wiz.lower(), wiz
+    assert score_query_coverage(
+        wiz, "WizTheMc - Take My Mind (Official Video)", "WizTheMc",
+    ) >= 80
+    jazzy = _coverage_query("Closer To The Floor Jazzy & Ankhoï", "Jazzy & Ankhoï")
+    assert score_query_coverage(
+        jazzy, "Jazzy & Ankhoï - Closer To The Floor", "Melodicity Recordings",
+    ) >= 80, jazzy
+    assert score_query_coverage(
+        _coverage_query("The Center of the Universe Delorians", "Delorians"),
+        "Center of the Universe",
+        "Deradoorian",
+    ) < 80
 
     # KI-12: type-beat spam stays out of nearby suggestions.
     assert looks_like_type_beat(

@@ -297,6 +297,26 @@ def _primary_artist(artist):
     return name.strip()
 
 
+def _lead_artist(artist):
+    """First name in an ``A & B`` credit. Search queries still use the full primary."""
+    return re.split(r"\s+&\s+", _primary_artist(artist), maxsplit=1)[0].strip()
+
+
+def _coverage_query(query, artist):
+    """Coverage text without feat. credits or ``&`` collaborators after the lead."""
+    lead = _lead_artist(artist)
+    text = strip_featured_credit(query, lead)
+    if lead:
+        text = re.sub(
+            rf"({re.escape(lead)})(?:\s+&\s+.+)$",
+            r"\1",
+            text,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _token_title_similarity(expected, actual):
     """Fraction of significant title words found in the candidate (0-100)."""
     words = [w for w in re.findall(r'\w+', (expected or "").lower()) if len(w) > 3]
@@ -409,9 +429,34 @@ def _uploader_artist_match(expected_artist, uploader):
     scores = [
         difflib.SequenceMatcher(None, up, expected_artist.lower()).ratio() * 100,
     ]
-    primary = _primary_artist(expected_artist)
-    if primary:
-        scores.append(difflib.SequenceMatcher(None, up, primary.lower()).ratio() * 100)
+    for name in (_primary_artist(expected_artist), _lead_artist(expected_artist)):
+        if name:
+            scores.append(difflib.SequenceMatcher(None, up, name.lower()).ratio() * 100)
+    return max(scores)
+
+
+def _title_artist_credit(raw_title, expected_artist):
+    """Match an ``Artist - Song`` prefix to the expected artist (0-100).
+
+    Label uploads use this layout while the channel is the label. A title with
+    no artist prefix returns 0, so a similar channel name still fails.
+    """
+    if not (raw_title or "").strip() or not (expected_artist or "").strip():
+        return 0.0
+    parts = re.split(r"\s*[-–]\s*", raw_title, maxsplit=1)
+    if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+        return 0.0
+    left = parts[0].strip()
+    expected = expected_artist.strip()
+    scores = [
+        difflib.SequenceMatcher(None, left.lower(), expected.lower()).ratio() * 100,
+    ]
+    lead = _lead_artist(expected)
+    if lead:
+        scores.append(difflib.SequenceMatcher(None, left.lower(), lead.lower()).ratio() * 100)
+        scores.append(
+            difflib.SequenceMatcher(None, _lead_artist(left).lower(), lead.lower()).ratio() * 100
+        )
     return max(scores)
 
 
@@ -1303,8 +1348,8 @@ class MusicDownloader:
             # Featured names are usually absent from Topic/official titles.
             # Score coverage without them so "(feat. …)" does not fail the
             # catalog gate when title and primary artist already match.
-            coverage_query = strip_featured_credit(
-                original_query, _primary_artist(metadata.artist or ""),
+            coverage_query = _coverage_query(
+                original_query, metadata.artist or "",
             ) or original_query
             raw = video.get("title") or ""
             uploader = clean_artist(video.get("uploader") or video.get("channel") or "")
@@ -1382,6 +1427,10 @@ class MusicDownloader:
                 artist_sim = max(uploader_match, presence)
             else:
                 artist_sim = max(uploader_match, min(presence, 50.0))
+            # "Artist - Song" on a label channel is the artist, not a remix account.
+            title_credit = _title_artist_credit(raw_title, metadata.artist or "")
+            if title_credit >= 85.0:
+                artist_sim = max(artist_sim, title_credit)
 
             # Plain-text search fallback: artist is only a guess — don't hard-reject.
             if (
