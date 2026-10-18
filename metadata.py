@@ -793,6 +793,13 @@ def _iso_duration_seconds(value):
     return total or None
 
 
+def _has_class_prefix(value, prefix):
+    if not value:
+        return False
+    classes = value.split() if isinstance(value, str) else value
+    return any(str(item).startswith(prefix) for item in classes)
+
+
 def _shazam_person_name(value):
     if isinstance(value, str):
         return value.strip() or None
@@ -930,9 +937,15 @@ class ShazamMetadata:
                 return False
             html = await resp.text()
         soup = BeautifulSoup(html, "html.parser")
-        if not self._apply_jsonld(soup) and not self._apply_og_title(soup):
+        if (
+            not self._apply_jsonld(soup)
+            and not self._apply_og_title(soup)
+            and not self._apply_page_header(soup)
+            and not self._apply_fragment()
+        ):
             return False
         self._apply_og_image(soup)
+        self._apply_track_length()
         self.type = "song"
         return bool(self.title)
 
@@ -982,7 +995,74 @@ class ShazamMetadata:
             self.title = parts[0].strip()
             if len(parts) > 1:
                 self.artist = parts[1].strip() or None
-        return bool(self.title)
+        return bool(self.title) and self.title.lower() != "shazam"
+
+    def _apply_page_header(self, soup):
+        """Title and artist from the track header when share tags are missing."""
+        title_el = soup.find(
+            class_=lambda value: _has_class_prefix(value, "NewTrackPageHeader_trackTitle"),
+        )
+        title = title_el.get_text(" ", strip=True) if title_el else ""
+        if not title or title.lower() == "shazam":
+            return False
+        artist_el = soup.find(
+            class_=lambda value: _has_class_prefix(
+                value, "TrackPageArtistLink_artistNameText",
+            ),
+        )
+        self.title = title
+        if artist_el:
+            self.artist = artist_el.get_text(" ", strip=True) or None
+        if not self.artwork_url:
+            cover = soup.find(
+                class_=lambda value: _has_class_prefix(
+                    value, "NewTrackPageHeader_trackCover",
+                ),
+            )
+            img = cover.find("img") if cover else None
+            src = ""
+            if img:
+                src = (img.get("src") or "").strip()
+                if not src.startswith("http"):
+                    srcset = (img.get("srcset") or "").strip()
+                    src = srcset.split()[0] if srcset else ""
+            if src.startswith("http"):
+                self.artwork_url = src
+        return True
+
+    def _apply_fragment(self):
+        """Shazam module links put title and artist in the URL hash."""
+        fragment = urllib.parse.urlparse(self.url or "").fragment
+        if not fragment:
+            return False
+        try:
+            data = json.loads(urllib.parse.unquote(fragment))
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        title = (data.get("title") or "").strip()
+        if not title or title.lower() == "shazam":
+            return False
+        self.title = title
+        artist = (data.get("artist") or "").strip()
+        if artist:
+            self.artist = artist
+        return True
+
+    def _apply_track_length(self):
+        if self.duration:
+            return
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.url or "").query)
+        raw = (query.get("trackLength") or [None])[0]
+        if not raw:
+            return
+        try:
+            millis = float(raw)
+        except (TypeError, ValueError):
+            return
+        if millis > 1000:
+            self.duration = millis / 1000.0
 
     def _apply_og_image(self, soup):
         if self.artwork_url:

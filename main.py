@@ -2948,8 +2948,8 @@ async def _offer_nearby_tracks(message, context, metadata, query=None):
     search_query = (query or "").strip()
     if not search_query and metadata:
         search_query = (getattr(metadata, "search_query", None) or "").strip()
-        if search_query and (is_music_url(search_query) or "http" in search_query.lower()):
-            search_query = ""
+    if search_query and (is_music_url(search_query) or "http" in search_query.lower()):
+        search_query = ""
     seed_title = title or search_query
     if not seed_title:
         return

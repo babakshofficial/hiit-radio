@@ -20,7 +20,9 @@ def main():
         looks_like_type_beat,
         shazam_track_id,
         is_shazam_url,
+        ShazamMetadata,
     )
+    from bs4 import BeautifulSoup
     from downloader import (
         _no_candidate_code,
         _primary_artist,
@@ -145,6 +147,25 @@ def main():
     assert is_shazam_url("https://www.shazam.com/track/1/x")
     assert is_shazam_url("https://shz.am/t/abc")
     assert not is_shazam_url("https://music.apple.com/us/album/x/1")
+
+    # KI-14: unavailable Shazam pages omit og:title; the header still has the song.
+    header = ShazamMetadata("https://www.shazam.com/track/861026094/x")
+    assert header._apply_page_header(BeautifulSoup(
+        '<div class="NewTrackPageHeader_trackTitle__abc">'
+        'Million Pieces (feat. x) [Malive Remix]</div>'
+        '<span class="TrackPageArtistLink_artistNameText__xyz">'
+        'Adam Ten &amp; Mita Gami</span>',
+        "html.parser",
+    ))
+    assert header.title.startswith("Million Pieces")
+    assert header.artist == "Adam Ten & Mita Gami"
+    hashed = ShazamMetadata(
+        "https://www.shazam.com/track/861026094/x"
+        "#%7B%22title%22%3A%22Million%20Pieces%22%2C%22artist%22%3A%22Adam%20Ten%22%7D"
+    )
+    assert hashed._apply_fragment()
+    assert hashed.title == "Million Pieces"
+    assert hashed.artist == "Adam Ten"
 
     for lang in SUPPORTED:
         cmds = build_commands(lang, admin=False)
