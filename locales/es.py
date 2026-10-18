@@ -10,6 +10,7 @@ STRINGS = {
     "platform_youtube": "YouTube",
     "platform_soundcloud": "SoundCloud",
     "platform_deezer": "Deezer",
+    "platform_shazam": "Shazam",
     "platform_cache": "Caché",
     "platform_community": "Comunidad",
 
@@ -24,7 +25,7 @@ STRINGS = {
         "¡Hola {name}! 🎶\n\n"
         "Bienvenido a HiiT Radio: el bot de descarga de música sin límites.\n\n"
         "Solo envía un enlace de canción, álbum o lista de reproducción "
-        "(Spotify · Apple Music · Deezer · YouTube · SoundCloud) "
+        "(Spotify · Apple Music · Deezer · Shazam · YouTube · SoundCloud) "
         "o escribe el nombre de una canción; yo me encargo del resto.\n\n"
         "Empieza con los botones de abajo 👇"
     ),
@@ -64,7 +65,7 @@ STRINGS = {
     "help_text": (
         "¿Cómo se usa?\n\n"
         "1. Envía un enlace de canción, álbum o lista\n"
-        "   (Spotify · Apple Music · Deezer · YouTube · SoundCloud)\n"
+        "   (Spotify · Apple Music · Deezer · Shazam · YouTube · SoundCloud)\n"
         "2. O escribe el nombre de la canción y del artista\n"
         "3. Usa los botones de abajo para buscar, artistas, calidad y más\n"
         "4. O en línea: {bot_inline} nombre de la canción — en cualquier chat\n\n"
@@ -79,7 +80,7 @@ STRINGS = {
         "📻 Canal: {channel}{developer_line}\n"
         "\n"
         "¿Qué puede hacer?\n"
-        "• Enlaces de Spotify / Apple / Deezer / YouTube / SoundCloud\n"
+        "• Enlaces de Spotify / Apple / Deezer / Shazam / YouTube / SoundCloud\n"
         "• Búsqueda y artistas desde los botones del menú\n"
         "• Calidad de audio desde el menú\n"
         "• Recomendaciones personales desde Descubrir\n"

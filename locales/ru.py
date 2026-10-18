@@ -10,6 +10,7 @@ STRINGS = {
     "platform_youtube": "YouTube",
     "platform_soundcloud": "SoundCloud",
     "platform_deezer": "Deezer",
+    "platform_shazam": "Shazam",
     "platform_cache": "Кэш",
     "platform_community": "Сообщество",
 
@@ -24,7 +25,7 @@ STRINGS = {
         "Привет, {name}! 🎶\n\n"
         "Добро пожаловать в HiiT Radio — бот для скачивания музыки без ограничений!\n\n"
         "Просто пришли ссылку на трек, альбом или плейлист "
-        "(Spotify · Apple Music · Deezer · YouTube · SoundCloud) "
+        "(Spotify · Apple Music · Deezer · Shazam · YouTube · SoundCloud) "
         "или напиши название песни — остальное сделаю я.\n\n"
         "Начни с кнопок ниже 👇"
     ),
@@ -64,7 +65,7 @@ STRINGS = {
     "help_text": (
         "Как этим пользоваться?\n\n"
         "1. Пришли ссылку на трек, альбом или плейлист\n"
-        "   (Spotify · Apple Music · Deezer · YouTube · SoundCloud)\n"
+        "   (Spotify · Apple Music · Deezer · Shazam · YouTube · SoundCloud)\n"
         "2. Или напиши название песни и исполнителя\n"
         "3. Кнопки ниже — поиск, артисты, качество и другое\n"
         "4. Или инлайн: {bot_inline} название трека — в любом чате\n\n"
@@ -80,7 +81,7 @@ STRINGS = {
         "📻 Канал: {channel}{developer_line}\n"
         "\n"
         "Что он умеет?\n"
-        "• Ссылки Spotify / Apple / Deezer / YouTube / SoundCloud\n"
+        "• Ссылки Spotify / Apple / Deezer / Shazam / YouTube / SoundCloud\n"
         "• Поиск и артисты через кнопки меню\n"
         "• Качество звука из меню\n"
         "• Персональные рекомендации из «Рекомендации»\n"

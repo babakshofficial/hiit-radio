@@ -50,6 +50,8 @@ class DownloadOrchestrator:
                 return "apple"
             if "deezer.com" in url:
                 return "deezer"
+            if "shazam.com" in url or "shz.am" in url:
+                return "shazam"
             if "soundcloud.com" in url:
                 return "soundcloud"
             if "youtube.com" in url or "youtu.be" in url:

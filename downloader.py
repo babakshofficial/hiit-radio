@@ -1380,7 +1380,10 @@ class MusicDownloader:
         catalog_url = (getattr(metadata, "url", None) or "").lower()
         had_catalog = any(
             host in catalog_url
-            for host in ("spotify.com", "music.apple.com", "deezer.com")
+            for host in (
+                "spotify.com", "music.apple.com", "deezer.com",
+                "shazam.com", "shz.am",
+            )
         )
         is_search_guess = getattr(metadata, "type", None) == "search"
         catalog_identified = had_catalog or (
@@ -2312,8 +2315,10 @@ class MusicDownloader:
         if not video:
             return
         src_title, src_artist = _parse_source_track_name(video)
-        had_catalog = bool(getattr(metadata, "url", None)) and (
-            "spotify.com" in (metadata.url or "") or "music.apple.com" in (metadata.url or "")
+        catalog_url = metadata.url or ""
+        had_catalog = bool(getattr(metadata, "url", None)) and any(
+            host in catalog_url
+            for host in ("spotify.com", "music.apple.com", "shazam.com", "shz.am")
         )
 
         if not had_catalog:

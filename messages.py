@@ -97,6 +97,8 @@ def platform_fa(platform):
         return t("platform_soundcloud")
     if "deezer" in p:
         return t("platform_deezer")
+    if "shazam" in p:
+        return t("platform_shazam")
     if "cache" in p:
         return t("platform_cache")
     if "community" in p:

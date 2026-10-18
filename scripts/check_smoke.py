@@ -18,6 +18,8 @@ def main():
         score_query_coverage,
         strip_featured_credit,
         looks_like_type_beat,
+        shazam_track_id,
+        is_shazam_url,
     )
     from downloader import (
         _no_candidate_code,
@@ -130,6 +132,19 @@ def main():
         saw_search_error=False,
         saw_bot_check=True,
     ) == "bot_check"
+
+    assert shazam_track_id(
+        "https://www.shazam.com/track/549952578/blinding-lights"
+    ) == "549952578"
+    assert shazam_track_id(
+        "https://www.shazam.com/en-us/song/657717032/as-it-was"
+    ) == "657717032"
+    assert shazam_track_id(
+        "https://www.shazam.com/charts/top-200/united-states"
+    ) is None
+    assert is_shazam_url("https://www.shazam.com/track/1/x")
+    assert is_shazam_url("https://shz.am/t/abc")
+    assert not is_shazam_url("https://music.apple.com/us/album/x/1")
 
     for lang in SUPPORTED:
         cmds = build_commands(lang, admin=False)

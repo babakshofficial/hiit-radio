@@ -102,8 +102,35 @@ def score_query_coverage(query, title, artist):
     return 100.0 * hits / len(q_tokens)
 
 
+_SHAZAM_TRACK_RE = re.compile(
+    r"(?:shazam\.com|shz\.am)/(?:[a-z]{2}(?:-[a-z]{2})?/)?(?:track|song)/(\d+)",
+    re.IGNORECASE,
+)
+# A desktop browser UA is rejected with Fastly 405 ("Error 54113"). Shazam
+# still answers a legacy mobile client.
+_SHAZAM_HEADERS = {
+    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 6.0.1; SM-G920F Build/MMB29K)",
+    "X-Shazam-Platform": "IPHONE",
+    "X-Shazam-AppVersion": "14.1.0",
+    "Accept": "*/*",
+    "Accept-Language": "en-US",
+}
+
+
+def is_shazam_url(text):
+    """True if text looks like a Shazam track or short link."""
+    t = (text or "").lower()
+    return "shazam.com" in t or "shz.am" in t
+
+
+def shazam_track_id(url):
+    """Numeric Shazam track id from a /track/ or /song/ URL, else None."""
+    match = _SHAZAM_TRACK_RE.search(url or "")
+    return match.group(1) if match else None
+
+
 def is_music_url(text):
-    """True if text looks like a Spotify/Apple/Deezer/YouTube/SoundCloud link."""
+    """True if text looks like a Spotify/Apple/Deezer/Shazam/YouTube/SoundCloud link."""
     t = (text or "").strip()
     if not t:
         return False
@@ -111,7 +138,7 @@ def is_music_url(text):
     if catalog.is_deezer_url(t) or catalog.is_direct_media_url(t):
         return True
     tl = t.lower()
-    return "spotify.com" in tl or "music.apple.com" in tl
+    return "spotify.com" in tl or "music.apple.com" in tl or is_shazam_url(t)
 
 
 def looks_like_music_query(text):
@@ -716,6 +743,255 @@ class SpotifyMetadata:
             return False
 
 
+def _shazam_actions(data):
+    hub = (data or {}).get("hub") or {}
+    for action in hub.get("actions") or []:
+        if isinstance(action, dict):
+            yield action
+    for option in hub.get("options") or []:
+        if not isinstance(option, dict):
+            continue
+        for action in option.get("actions") or []:
+            if isinstance(action, dict):
+                yield action
+
+
+def _shazam_album(data):
+    for section in (data or {}).get("sections") or []:
+        if (section.get("type") or "").upper() != "SONG":
+            continue
+        for item in section.get("metadata") or []:
+            if (item.get("title") or "").strip().lower() == "album":
+                return (item.get("text") or "").strip() or None
+    return None
+
+
+def _shazam_preview(data):
+    for action in _shazam_actions(data):
+        uri = (action.get("uri") or "").strip()
+        if not uri.startswith("http"):
+            continue
+        low = uri.lower()
+        if "audio" in low or "preview" in low or low.endswith(".m4a"):
+            return uri
+    return None
+
+
+def _iso_duration_seconds(value):
+    """Parse a schema.org duration such as PT4M2S into seconds."""
+    match = re.fullmatch(
+        r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?",
+        (value or "").strip(),
+        flags=re.IGNORECASE,
+    )
+    if not match or not any(match.groups()):
+        return None
+    hours = int(match.group(1) or 0)
+    minutes = int(match.group(2) or 0)
+    seconds = float(match.group(3) or 0)
+    total = hours * 3600 + minutes * 60 + seconds
+    return total or None
+
+
+def _shazam_person_name(value):
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        return (value.get("name") or "").strip() or None
+    if isinstance(value, list):
+        for item in value:
+            name = _shazam_person_name(item)
+            if name:
+                return name
+    return None
+
+
+def _shazam_apple_id(data):
+    for action in _shazam_actions(data):
+        kind = (action.get("type") or "").lower()
+        if "apple" in kind:
+            apple_id = str(action.get("id") or "").strip()
+            if apple_id.isdigit():
+                return apple_id
+        uri = action.get("uri") or ""
+        match = re.search(r"[?&]i=(\d+)", uri)
+        if match:
+            return match.group(1)
+    apple = ((data or {}).get("share") or {}).get("apple") or ""
+    match = re.search(r"[?&]i=(\d+)", apple)
+    return match.group(1) if match else None
+
+
+class ShazamMetadata:
+    """Turn a Shazam track URL into title, artist, artwork, and duration."""
+
+    def __init__(self, url):
+        self.url = url
+        self.title = None
+        self.artist = None
+        self.album = None
+        self.artwork_url = None
+        self.preview_url = None
+        self.duration = None
+        self.type = "song"
+        self.id = None
+
+    async def fetch(self):
+        if not self.url:
+            return False
+        try:
+            timeout = aiohttp.ClientTimeout(total=25, connect=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                page_url = self.url
+                track_id = shazam_track_id(page_url)
+                if not track_id:
+                    page_url = await self._final_url(session, self.url)
+                    track_id = shazam_track_id(page_url or "")
+                if not track_id:
+                    logger.error("Shazam URL has no track id: %s", self.url)
+                    return False
+                self.id = track_id
+                data = await self._fetch_json(session, track_id)
+                if data and self._apply_json(data):
+                    await self._fill_duration(session, data)
+                elif not await self._fetch_og(
+                    session,
+                    page_url if shazam_track_id(page_url or "") else (
+                        f"https://www.shazam.com/track/{track_id}"
+                    ),
+                ):
+                    return False
+            logger.info(
+                "Fetched Shazam meta: %s by %s", self.title, self.artist,
+            )
+            return bool(self.title)
+        except Exception as e:
+            logger.error("Error fetching Shazam meta: %s", e, exc_info=True)
+            return False
+
+    async def _final_url(self, session, url):
+        async with session.get(url, headers=_SHAZAM_HEADERS, allow_redirects=True) as resp:
+            return str(resp.url)
+
+    async def _fetch_json(self, session, track_id):
+        url = (
+            "https://www.shazam.com/discovery/v5/en-US/US/web/-/track/"
+            f"{track_id}?shazamapiversion=v3&video=v3"
+        )
+        async with session.get(url, headers=_SHAZAM_HEADERS) as resp:
+            if resp.status != 200:
+                logger.warning("Shazam track JSON %s for %s", resp.status, track_id)
+                return None
+            return await resp.json(content_type=None)
+
+    def _apply_json(self, data):
+        title = (data.get("title") or "").strip()
+        if not title:
+            return False
+        self.title = title
+        self.artist = (data.get("subtitle") or "").strip() or None
+        images = data.get("images") or {}
+        self.artwork_url = images.get("coverarthq") or images.get("coverart")
+        self.album = _shazam_album(data)
+        self.preview_url = _shazam_preview(data)
+        self.type = "song"
+        return True
+
+    async def _fill_duration(self, session, data):
+        apple_id = _shazam_apple_id(data)
+        if not apple_id:
+            return
+        url = f"https://itunes.apple.com/lookup?id={apple_id}"
+        try:
+            async with session.get(url, headers=_SHAZAM_HEADERS) as resp:
+                if resp.status != 200:
+                    return
+                payload = await resp.json(content_type=None)
+        except Exception as e:
+            logger.warning("Shazam iTunes duration lookup failed: %s", e)
+            return
+        for result in payload.get("results") or []:
+            if result.get("wrapperType") == "track" and result.get("kind") == "song":
+                ms = result.get("trackTimeMillis")
+                if ms:
+                    self.duration = float(ms) / 1000.0
+                if not self.preview_url and result.get("previewUrl"):
+                    self.preview_url = result["previewUrl"]
+                if not self.album and result.get("collectionName"):
+                    self.album = result["collectionName"]
+                break
+
+    async def _fetch_og(self, session, page_url):
+        headers = dict(_SHAZAM_HEADERS)
+        headers["Accept"] = "text/html,application/xhtml+xml"
+        async with session.get(page_url, headers=headers) as resp:
+            if resp.status != 200:
+                logger.warning("Shazam page %s for %s", resp.status, page_url)
+                return False
+            html = await resp.text()
+        soup = BeautifulSoup(html, "html.parser")
+        if not self._apply_jsonld(soup) and not self._apply_og_title(soup):
+            return False
+        self._apply_og_image(soup)
+        self.type = "song"
+        return bool(self.title)
+
+    def _apply_jsonld(self, soup):
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.get_text() or "")
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(data, dict) or data.get("@type") != "MusicRecording":
+                continue
+            title = (data.get("name") or "").strip()
+            if not title:
+                continue
+            self.title = title
+            self.artist = _shazam_person_name(data.get("byArtist"))
+            album = data.get("inAlbum") or {}
+            if isinstance(album, dict) and album.get("name"):
+                self.album = album["name"].strip() or None
+            duration = _iso_duration_seconds(data.get("duration"))
+            if duration:
+                self.duration = duration
+            thumb = data.get("thumbnailUrl") or data.get("thumbnail")
+            if isinstance(thumb, str) and thumb.startswith("http"):
+                self.artwork_url = thumb
+            return True
+        return False
+
+    def _apply_og_title(self, soup):
+        og_title = soup.find("meta", property="og:title")
+        if not og_title or not og_title.get("content"):
+            return False
+        text = og_title["content"]
+        text = re.sub(
+            r"\s*[|–-]\s*Shazam.*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(r":\s*Song Lyrics.*$", "", text, flags=re.IGNORECASE).strip()
+        by_parts = re.split(r"\s+by\s+", text, maxsplit=1, flags=re.IGNORECASE)
+        if len(by_parts) == 2:
+            self.title = by_parts[0].strip()
+            self.artist = by_parts[1].strip() or None
+        else:
+            parts = text.rsplit(" - ", 1)
+            self.title = parts[0].strip()
+            if len(parts) > 1:
+                self.artist = parts[1].strip() or None
+        return bool(self.title)
+
+    def _apply_og_image(self, soup):
+        if self.artwork_url:
+            return
+        og_image = soup.find("meta", property="og:image")
+        if og_image and og_image.get("content"):
+            self.artwork_url = og_image["content"]
+
+
 class AppleMusicMetadata:
     """Handle Apple Music metadata extraction and iTunes search."""
     def __init__(self, url):
@@ -1265,8 +1541,8 @@ class SpotifyCollection:
 
 
 class TrackMetadata:
-    """Unified entry point for turning any user input (Spotify link, Apple Music
-    link, or a plain search query) into normalised track metadata.
+    """Unified entry point for turning any user input (Spotify, Apple Music,
+    Shazam, or a plain search query) into normalised track metadata.
 
     Always returns a TrackMetadata instance. On failure the instance has
     ``title = None`` so callers can simply check ``if not metadata.title``.
@@ -1337,6 +1613,15 @@ class TrackMetadata:
                 meta._copy_from(source, url=text)
             else:
                 logger.error("Apple Music metadata extraction failed")
+            return meta
+
+        # SHAZAM LINK
+        if is_shazam_url(text):
+            source = ShazamMetadata(text)
+            if await source.fetch():
+                meta._copy_from(source, url=text)
+            else:
+                logger.error("Shazam metadata extraction failed")
             return meta
 
         # PLAIN TEXT SEARCH QUERY
