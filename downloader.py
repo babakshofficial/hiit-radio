@@ -15,7 +15,7 @@ import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageChops
 import io
 
-from metadata import score_query_coverage
+from metadata import score_query_coverage, strip_featured_credit
 import jobs
 import messages as msg
 
@@ -297,6 +297,26 @@ def _primary_artist(artist):
     return name.strip()
 
 
+def _lead_artist(artist):
+    """First name in an ``A & B`` credit. Search queries still use the full primary."""
+    return re.split(r"\s+&\s+", _primary_artist(artist), maxsplit=1)[0].strip()
+
+
+def _coverage_query(query, artist):
+    """Coverage text without feat. credits or ``&`` collaborators after the lead."""
+    lead = _lead_artist(artist)
+    text = strip_featured_credit(query, lead)
+    if lead:
+        text = re.sub(
+            rf"({re.escape(lead)})(?:\s+&\s+.+)$",
+            r"\1",
+            text,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _token_title_similarity(expected, actual):
     """Fraction of significant title words found in the candidate (0-100)."""
     words = [w for w in re.findall(r'\w+', (expected or "").lower()) if len(w) > 3]
@@ -409,9 +429,34 @@ def _uploader_artist_match(expected_artist, uploader):
     scores = [
         difflib.SequenceMatcher(None, up, expected_artist.lower()).ratio() * 100,
     ]
-    primary = _primary_artist(expected_artist)
-    if primary:
-        scores.append(difflib.SequenceMatcher(None, up, primary.lower()).ratio() * 100)
+    for name in (_primary_artist(expected_artist), _lead_artist(expected_artist)):
+        if name:
+            scores.append(difflib.SequenceMatcher(None, up, name.lower()).ratio() * 100)
+    return max(scores)
+
+
+def _title_artist_credit(raw_title, expected_artist):
+    """Match an ``Artist - Song`` prefix to the expected artist (0-100).
+
+    Label uploads use this layout while the channel is the label. A title with
+    no artist prefix returns 0, so a similar channel name still fails.
+    """
+    if not (raw_title or "").strip() or not (expected_artist or "").strip():
+        return 0.0
+    parts = re.split(r"\s*[-–]\s*", raw_title, maxsplit=1)
+    if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+        return 0.0
+    left = parts[0].strip()
+    expected = expected_artist.strip()
+    scores = [
+        difflib.SequenceMatcher(None, left.lower(), expected.lower()).ratio() * 100,
+    ]
+    lead = _lead_artist(expected)
+    if lead:
+        scores.append(difflib.SequenceMatcher(None, left.lower(), lead.lower()).ratio() * 100)
+        scores.append(
+            difflib.SequenceMatcher(None, _lead_artist(left).lower(), lead.lower()).ratio() * 100
+        )
     return max(scores)
 
 
@@ -455,6 +500,29 @@ def _candidate_url(video, source_label="YouTube"):
         # Flat scsearch results sometimes only expose a numeric/track id.
         return None
     return f"https://www.youtube.com/watch?v={vid}"
+
+
+def _no_candidate_code(
+    *,
+    nothing_scored,
+    catalog_identified,
+    saw_raw_results,
+    saw_search_error,
+    saw_bot_check,
+):
+    """Code when the download queue is empty.
+
+    ``not_available`` means nothing was indexed (or a catalog track had no
+    eligible candidate). ``no_match`` means results existed but none were
+    close enough for the query.
+    """
+    if saw_bot_check:
+        return "bot_check"
+    if nothing_scored and (
+        catalog_identified or (not saw_raw_results and not saw_search_error)
+    ):
+        return "not_available"
+    return "no_match"
 
 
 def _strip_track_noise(title):
@@ -1196,6 +1264,11 @@ class MusicDownloader:
             return bool(user_id is not None and jobs.abort_requested(user_id))
 
         def _classify_error(err):
+            if _is_network_probe_error(err):
+                text = str(err or "").lower()
+                if "timeout" in text or "timed out" in text:
+                    return "timeout"
+                return "network"
             text = str(err or "").lower()
             if "cancelled" in text:
                 return "cancelled"
@@ -1203,6 +1276,8 @@ class MusicDownloader:
                 return "bot_check"
             if "no video formats found" in text:
                 return "bot_check"
+            if "format is not available" in text or "probe_no_formats" in text:
+                return "invalid_file"
             if "drm" in text:
                 return "drm"
             if "404" in text or "not found" in text:
@@ -1270,16 +1345,22 @@ class MusicDownloader:
             """How well this candidate matches the user's original search text."""
             if not original_query:
                 return 100.0
+            # Featured names are usually absent from Topic/official titles.
+            # Score coverage without them so "(feat. …)" does not fail the
+            # catalog gate when title and primary artist already match.
+            coverage_query = _coverage_query(
+                original_query, metadata.artist or "",
+            ) or original_query
             raw = video.get("title") or ""
             uploader = clean_artist(video.get("uploader") or video.get("channel") or "")
-            scores = [score_query_coverage(original_query, raw, uploader)]
+            scores = [score_query_coverage(coverage_query, raw, uploader)]
             if " - " in raw:
                 left, right = raw.split(" - ", 1)
-                scores.append(score_query_coverage(original_query, left, right))
-                scores.append(score_query_coverage(original_query, right, left))
+                scores.append(score_query_coverage(coverage_query, left, right))
+                scores.append(score_query_coverage(coverage_query, right, left))
             scores.append(
                 score_query_coverage(
-                    original_query,
+                    coverage_query,
                     clean_title(raw, metadata.artist),
                     uploader,
                 )
@@ -1299,7 +1380,16 @@ class MusicDownloader:
         catalog_url = (getattr(metadata, "url", None) or "").lower()
         had_catalog = any(
             host in catalog_url
-            for host in ("spotify.com", "music.apple.com", "deezer.com")
+            for host in (
+                "spotify.com", "music.apple.com", "deezer.com",
+                "shazam.com", "shz.am",
+            )
+        )
+        is_search_guess = getattr(metadata, "type", None) == "search"
+        catalog_identified = had_catalog or (
+            not is_search_guess
+            and bool((metadata.title or "").strip())
+            and getattr(metadata, "type", None) not in ("top", "retry")
         )
 
         def score(video):
@@ -1340,10 +1430,26 @@ class MusicDownloader:
                 artist_sim = max(uploader_match, presence)
             else:
                 artist_sim = max(uploader_match, min(presence, 50.0))
+            # "Artist - Song" on a label channel is the artist, not a remix account.
+            title_credit = _title_artist_credit(raw_title, metadata.artist or "")
+            if title_credit >= 85.0:
+                artist_sim = max(artist_sim, title_credit)
 
-            # When artist is known, refuse weak artist matches — stops same-title
-            # wrong uploads (e.g. SoundCloud "She's so Lovely" by another band).
-            if (metadata.artist or "").strip() and presence < 55.0 and artist_sim < 55.0:
+            # Plain-text search fallback: artist is only a guess — don't hard-reject.
+            if (
+                not is_search_guess
+                and (metadata.artist or "").strip()
+                and presence < 55.0
+                and artist_sim < 55.0
+            ):
+                return None
+            if (
+                had_catalog
+                and not version_required
+                and not is_topic
+                and not is_vevo
+                and artist_sim < 85.0
+            ):
                 return None
             # Catalog links: reject remix accounts that only credit artist in the title.
             if (
@@ -1536,6 +1642,8 @@ class MusicDownloader:
             ranked = []
             seen_ids = set()
             bot_blocked = False
+            saw_results = False
+            saw_error = False
             n = max(len(strategies), 1)
 
             def _extract_search(q):
@@ -1547,7 +1655,7 @@ class MusicDownloader:
 
             for strategy_idx, search_query in enumerate(strategies):
                 if _is_cancelled():
-                    return [], False, True
+                    return [], False, True, saw_results, saw_error
                 pct = pct_start + int((pct_end - pct_start) * (strategy_idx / n))
                 await _report(
                     pct,
@@ -1566,11 +1674,12 @@ class MusicDownloader:
                         _is_cancelled,
                     )
                     if search_cancelled or _is_cancelled():
-                        return [], False, True
+                        return [], False, True, saw_results, saw_error
                     entries = info.get('entries') if info else None
                     if not entries:
                         logger.warning(f"[{source_label}] Strategy {strategy_idx + 1} returned no results")
                         continue
+                    saw_results = True
 
                     for video in entries:
                         if not video:
@@ -1596,9 +1705,12 @@ class MusicDownloader:
                             f"'{c_title}' by '{c_artist}' | "
                             f"Expected: '{expected_title_clean}' by '{metadata.artist}'"
                         )
-                        if title_sim < TITLE_THRESHOLD and coverage < coverage_gate:
+                        coverage_fail = coverage < coverage_gate
+                        title_fail = title_sim < TITLE_THRESHOLD
+                        if coverage_fail and (had_catalog or title_fail):
                             topic_ok = (
-                                is_topic
+                                not had_catalog
+                                and is_topic
                                 and token_sim >= 85.0
                                 and artist_sim >= 80.0
                                 and (
@@ -1639,6 +1751,7 @@ class MusicDownloader:
                         if source_label == "YouTube":
                             break
                     else:
+                        saw_error = True
                         logger.error(f"[{source_label}] Strategy {strategy_idx + 1} failed: {e}")
                     continue
             ranked.sort(key=lambda x: x[0], reverse=True)
@@ -1648,7 +1761,7 @@ class MusicDownloader:
                     "YouTube bot-check blocked all strategies — falling through to SoundCloud. "
                     "Fix cookies to restore YouTube downloads."
                 )
-            return ranked, bot_blocked, False
+            return ranked, bot_blocked, False, saw_results, saw_error
 
         if _is_cancelled():
             return None, "cancelled", failure_trail
@@ -1659,10 +1772,12 @@ class MusicDownloader:
         }
         found_by_source = {}
         saw_bot_check = False
+        saw_raw_results = False
+        saw_search_error = False
 
         async def search_source(label, pct_start, pct_end):
             """Search one source at most once per download; returns (candidates, cancelled)."""
-            nonlocal saw_bot_check
+            nonlocal saw_bot_check, saw_raw_results, saw_search_error
             if label in found_by_source:
                 return found_by_source[label], False
             prefix, strategies, note = _SOURCES[label]
@@ -1670,11 +1785,13 @@ class MusicDownloader:
                 max(pct_start - 2, 0),
                 f"{metadata.title} — {metadata.artist}\n{note}",
             )
-            ranked, blocked, cancelled = await gather_best(
+            ranked, blocked, cancelled, saw_results, saw_error = await gather_best(
                 prefix, label, strategies, pct_start, pct_end
             )
             found_by_source[label] = ranked
             saw_bot_check = saw_bot_check or blocked
+            saw_raw_results = saw_raw_results or saw_results
+            saw_search_error = saw_search_error or saw_error
             return ranked, cancelled
 
         # Without usable cookies YouTube downloads hit the bot check anyway, so
@@ -1726,7 +1843,13 @@ class MusicDownloader:
                 f"No candidate passed validation on any source (title >= {TITLE_THRESHOLD:.0f}% and "
                 f"combined >= {MATCH_THRESHOLD:.0f}%). Best eligible: {score_txt}"
             )
-            return None, ("bot_check" if saw_bot_check else "no_match"), failure_trail
+            return None, _no_candidate_code(
+                nothing_scored=best is None,
+                catalog_identified=catalog_identified,
+                saw_raw_results=saw_raw_results,
+                saw_search_error=saw_search_error,
+                saw_bot_check=saw_bot_check,
+            ), failure_trail
 
         def _source_label_for(video):
             extractor = (video.get("extractor") or "").lower()
@@ -2192,8 +2315,10 @@ class MusicDownloader:
         if not video:
             return
         src_title, src_artist = _parse_source_track_name(video)
-        had_catalog = bool(getattr(metadata, "url", None)) and (
-            "spotify.com" in (metadata.url or "") or "music.apple.com" in (metadata.url or "")
+        catalog_url = metadata.url or ""
+        had_catalog = bool(getattr(metadata, "url", None)) and any(
+            host in catalog_url
+            for host in ("spotify.com", "music.apple.com", "shazam.com", "shz.am")
         )
 
         if not had_catalog:

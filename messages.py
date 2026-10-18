@@ -41,8 +41,7 @@ def reset_lang(token) -> None:
     _lang_var.reset(token)
 
 
-def t(key: str, **kwargs) -> str:
-    table = get_strings(get_lang())
+def _format_string(table: dict, key: str, **kwargs) -> str:
     text = table.get(key)
     if text is None:
         text = get_strings(DEFAULT_LANG).get(key, key)
@@ -52,6 +51,16 @@ def t(key: str, **kwargs) -> str:
         except (KeyError, ValueError):
             return text
     return text
+
+
+def t(key: str, **kwargs) -> str:
+    return _format_string(get_strings(get_lang()), key, **kwargs)
+
+
+def t_lang(lang: str | None, key: str, **kwargs) -> str:
+    """Locale lookup for a explicit language (admin/ops messages)."""
+    resolved = normalize_lang(lang) or "en"
+    return _format_string(get_strings(resolved), key, **kwargs)
 
 
 def __getattr__(name: str):
@@ -88,8 +97,12 @@ def platform_fa(platform):
         return t("platform_soundcloud")
     if "deezer" in p:
         return t("platform_deezer")
+    if "shazam" in p:
+        return t("platform_shazam")
     if "cache" in p:
         return t("platform_cache")
+    if "community" in p:
+        return t("platform_community")
     return platform
 
 
@@ -393,6 +406,14 @@ def download_not_found():
     return t("download_not_found")
 
 
+def download_not_available():
+    return t("download_not_available")
+
+
+def download_fail_network():
+    return t("download_fail_network")
+
+
 def download_fail_bot_check():
     return t("download_fail_bot_check")
 
@@ -408,8 +429,10 @@ def download_fail_invalid():
 def download_fail_message(error_code):
     mapping = {
         "no_match": download_not_found(),
+        "not_available": download_not_available(),
         "bot_check": download_fail_bot_check(),
         "timeout": download_fail_timeout(),
+        "network": download_fail_network(),
         "invalid_file": download_fail_invalid(),
         "cancelled": download_cancelled(),
         "send_failed": send_failed(),
@@ -1005,6 +1028,64 @@ def changelog_all_done(*, sent_langs, skipped_langs, sent, failed):
 
 def changelog_btn_manual_new():
     return t("changelog_btn_manual_new")
+
+
+def changelog_btn_skipped_list(count):
+    return t("changelog_btn_skipped_list", count=count)
+
+
+def changelog_skipped_header(count, page, pages):
+    return t("changelog_skipped_header", count=count, page=page, pages=pages)
+
+
+def changelog_skipped_empty():
+    return t("changelog_skipped_empty")
+
+
+def changelog_skipped_line(entry_id, date, langs, preview):
+    return t(
+        "changelog_skipped_line", id=entry_id, date=date, langs=langs, preview=preview,
+    )
+
+
+def changelog_skipped_detail(entry_id, date, status, langs, notes):
+    return t(
+        "changelog_skipped_detail",
+        id=entry_id, date=date, status=status, langs=langs, notes=notes,
+    )
+
+
+def changelog_btn_skipped_send():
+    return t("changelog_btn_skipped_send")
+
+
+def changelog_btn_skipped_delete():
+    return t("changelog_btn_skipped_delete")
+
+
+def changelog_btn_skipped_back():
+    return t("changelog_btn_skipped_back")
+
+
+def changelog_skipped_deleted():
+    return t("changelog_skipped_deleted")
+
+
+def changelog_skipped_not_found():
+    return t("changelog_skipped_not_found")
+
+
+def changelog_skipped_langs_all():
+    return t("changelog_skipped_langs_all")
+
+
+def changelog_skipped_status(status):
+    key = "changelog_skipped_status_partial" if status == "partial" else "changelog_skipped_status_skipped"
+    return t(key)
+
+
+def changelog_skipped_reminder(count):
+    return t("changelog_skipped_reminder", count=count)
 
 
 def changelog_manual_intro():

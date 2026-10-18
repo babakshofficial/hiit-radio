@@ -90,6 +90,12 @@ class UserManager:
     def set_language(self, user_id, language):
         self.db.set_language(user_id, language)
 
+    def get_commands_lang(self, user_id):
+        return self.db.get_commands_lang(user_id)
+
+    def set_commands_lang(self, user_id, language):
+        self.db.set_commands_lang(user_id, language)
+
     def get_favorite_by_id(self, favorite_id, user_id=None):
         return self.db.get_favorite_by_id(favorite_id, user_id)
 

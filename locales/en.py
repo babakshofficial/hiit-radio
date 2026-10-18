@@ -10,7 +10,9 @@ STRINGS = {
     "platform_youtube": "YouTube",
     "platform_soundcloud": "SoundCloud",
     "platform_deezer": "Deezer",
+    "platform_shazam": "Shazam",
     "platform_cache": "Cache",
+    "platform_community": "Community",
 
     # --- download buttons ---
     "btn_redownload": "🔄 Download again: {label}",
@@ -23,14 +25,48 @@ STRINGS = {
         "Hi {name}! 🎶\n\n"
         "Welcome to HiiT Radio — the unlimited music download bot!\n\n"
         "Just send a track, album or playlist link "
-        "(Spotify · Apple Music · Deezer · YouTube · SoundCloud) "
+        "(Spotify · Apple Music · Deezer · Shazam · YouTube · SoundCloud) "
         "or type a song name — I'll take care of the rest.\n\n"
         "Start with the buttons below 👇"
     ),
+    # --- slash command menu (Telegram Menu button) ---
+    "cmd_start": "Open the main menu",
+    "cmd_search": "Search for a track",
+    "cmd_artist": "Browse an artist",
+    "cmd_follow": "Follow an artist",
+    "cmd_following": "Artists you follow",
+    "cmd_history": "Download history",
+    "cmd_liked": "Your favorites",
+    "cmd_top": "Most popular tracks",
+    "cmd_discover": "Personal recommendations",
+    "cmd_quality": "Audio quality",
+    "cmd_premium": "Premium status",
+    "cmd_invite": "Invite a friend",
+    "cmd_submit": "Submit your own track",
+    "cmd_uploads": "Your submitted tracks",
+    "cmd_support": "Contact support",
+    "cmd_lang": "Change language",
+    "cmd_help": "How to use the bot",
+    "cmd_aboutme": "About HiiT Radio",
+    "cmd_stop": "Cancel current download",
+    "cmd_admin": "Admin panel",
+    "cmd_stats": "Bot statistics",
+    "cmd_report": "Usage dashboard",
+    "cmd_reports": "User failure reports",
+    "cmd_users": "List users",
+    "cmd_user": "User details",
+    "cmd_export": "Export database",
+    "cmd_cookies": "YouTube cookies status",
+    "cmd_creds": "Credentials status",
+    "cmd_broadcast": "Message all users",
+    "cmd_grant": "Grant premium days",
+    "cmd_topup": "Add download quota",
+    "cmd_supportend": "End support session",
+
     "help_text": (
         "How do I use this?\n\n"
         "1. Send a track, album or playlist link\n"
-        "   (Spotify · Apple Music · Deezer · YouTube · SoundCloud)\n"
+        "   (Spotify · Apple Music · Deezer · Shazam · YouTube · SoundCloud)\n"
         "2. Or type a song and artist name\n"
         "3. Use the buttons below for search, artists, quality, and more\n"
         "4. Or inline: {bot_inline} song name — in any chat\n\n"
@@ -45,7 +81,7 @@ STRINGS = {
         "📻 Channel: {channel}{developer_line}\n"
         "\n"
         "What can it do?\n"
-        "• Spotify / Apple / Deezer / YouTube / SoundCloud links\n"
+        "• Spotify / Apple / Deezer / Shazam / YouTube / SoundCloud links\n"
         "• Search and browse artists from the menu buttons\n"
         "• Set audio quality from the menu\n"
         "• Personal recommendations from Discover\n"
@@ -158,6 +194,10 @@ STRINGS = {
     ),
     "send_failed": "I couldn't send the track — please try again 🙏",
     "download_not_found": "No full version found — searching under a different name might help.",
+    "download_not_available": (
+        "This track isn't on our sources yet. If you have a YouTube or SoundCloud link, send it directly."
+    ),
+    "download_fail_network": "Connection problem — please try again in a minute.",
     "download_fail_bot_check": (
         "The download failed right now — try again in a bit or send a different name."
     ),
@@ -437,6 +477,9 @@ STRINGS = {
     "admin_channelid": "🆔 Channel ID",
     "admin_grant": "➕ Grant",
     "admin_topup": "💰 Top-up",
+    "admin_user_music": "🎵 User music",
+    "menu_submit_music": "📤 Submit music",
+    "menu_my_submissions": "📋 My uploads",
     "admin_broadcast_usage": "Usage: /broadcast <message>",
     "admin_grant_usage": "Usage: /grant <user_id> <premium|unlimited> <days>",
     "admin_topup_usage": "Usage: /topup <user_id> [amount]",
@@ -531,6 +574,20 @@ STRINGS = {
     "changelog_busy": "A changelog broadcast is already running.",
     "changelog_forbidden": "Only the admin can use this.",
     "changelog_btn_manual_new": "✍️ Write new changelog",
+    "changelog_btn_skipped_list": "⏭ Skipped changelogs ({count})",
+    "changelog_skipped_header": "Skipped changelogs ({count}) — page {page}/{pages}",
+    "changelog_skipped_empty": "No skipped changelogs.",
+    "changelog_skipped_line": "#{id} · {date} · {langs} · {preview}",
+    "changelog_skipped_detail": "Skipped changelog #{id}\nDate: {date}\nStatus: {status}\nLanguages: {langs}\n\n{notes}",
+    "changelog_btn_skipped_send": "📣 Broadcast",
+    "changelog_btn_skipped_delete": "🗑 Delete",
+    "changelog_btn_skipped_back": "⬅️ Back",
+    "changelog_skipped_deleted": "Skipped changelog deleted.",
+    "changelog_skipped_not_found": "Skipped changelog not found.",
+    "changelog_skipped_langs_all": "all languages",
+    "changelog_skipped_status_skipped": "skipped",
+    "changelog_skipped_status_partial": "partially sent",
+    "changelog_skipped_reminder": "📌 You have {count} skipped changelog(s). Open Admin → Changelog to broadcast them.",
     "changelog_manual_intro": (
         "No pending notes in CHANGELOG_PENDING.md.\n"
         "Tap Write new changelog, or append notes in the repo file and restart."
@@ -543,6 +600,86 @@ STRINGS = {
     "changelog_manual_empty": "Empty message — send the changelog notes text.",
     "changelog_pending_admin_header": "Pending changelog (from CHANGELOG_PENDING.md):",
 
+    # --- user music submissions ---
+    "usub_prompt_audio": "Send an audio file or MP3 document for your track.",
+    "usub_prompt_title": "Track title?",
+    "usub_prompt_artist": "Artist name?",
+    "usub_prompt_genre": "Pick a genre:",
+    "usub_prompt_genre_other": "Type the genre:",
+    "usub_prompt_artwork": "Send cover art (photo or image file).",
+    "usub_submitted": "✅ Submitted for review: {title} — {artist}",
+    "usub_quota_max_pending": "You already have 3 tracks waiting for review. Withdraw one or wait for admin.",
+    "usub_quota_daily": "You can submit up to 3 tracks per day. Try again tomorrow.",
+    "usub_bad_audio": "Couldn’t use that file. Send MP3 or another audio format.",
+    "usub_audio_too_large": "File is too large (max {max_mb} MB).",
+    "usub_bad_artwork": "Send a photo or image for the cover.",
+    "usub_title_invalid": "Title must be 1–200 characters.",
+    "usub_artist_invalid": "Artist must be 1–200 characters.",
+    "usub_genre_invalid": "Genre must be 1–80 characters.",
+    "usub_session_expired": "Upload session expired — start again from the menu.",
+    "usub_not_found": "Submission not found.",
+    "usub_withdrawn": "Withdrawn — it won’t be reviewed.",
+    "usub_no_artwork": "No artwork on file.",
+    "usub_my_header": "📋 Your submitted tracks",
+    "usub_my_empty": "Nothing here yet.",
+    "usub_my_line": "• {title} — {artist} ({status})",
+    "usub_detail": (
+        "🎵 {title}\n"
+        "👤 {artist}\n"
+        "🎼 {genre}\n"
+        "📌 {status}"
+    ),
+    "usub_btn_submit": "📤 Submit another",
+    "usub_btn_my_list": "📋 My uploads",
+    "usub_btn_withdraw": "🗑 Withdraw",
+    "usub_status_pending": "Pending review",
+    "usub_status_approved": "Approved",
+    "usub_status_rejected": "Rejected",
+    "usub_status_withdrawn": "Withdrawn",
+    "usub_genre_pop": "Pop",
+    "usub_genre_rock": "Rock",
+    "usub_genre_hiphop": "Hip-Hop",
+    "usub_genre_electronic": "Electronic",
+    "usub_genre_classical": "Classical",
+    "usub_genre_jazz": "Jazz",
+    "usub_genre_folk": "Folk",
+    "usub_genre_metal": "Metal",
+    "usub_genre_rnb": "R&B",
+    "usub_genre_other": "Other",
+    "usub_admin_new": (
+        "🎵 New community submission #{id}\n"
+        "{title} — {artist}\n"
+        "From {user_id} {username}"
+    ),
+    "usub_admin_review": "Review",
+    "usub_admin_queue_header": "Pending user music ({count})",
+    "usub_admin_queue_empty": "Queue is empty.",
+    "usub_admin_queue_line": "#{id} {title} — {artist} ({user})",
+    "usub_admin_detail": (
+        "Submission #{id}\n"
+        "{title} — {artist}\n"
+        "Genre: {genre}\n"
+        "Status: {status}\n"
+        "User: {user_id} ({username})"
+    ),
+    "usub_admin_listen": "▶️ Listen",
+    "usub_admin_artwork": "🖼 Cover",
+    "usub_admin_approve": "✅ Approve",
+    "usub_admin_reject": "❌ Reject",
+    "usub_admin_back_queue": "📋 Queue",
+    "usub_admin_approved_ok": "Approved #{id} — live in search.",
+    "usub_admin_reject_prompt": "Pick a reason or send a short message:",
+    "usub_admin_rejected_ok": "Rejected #{id}.",
+    "usub_reject_low_quality": "Low quality",
+    "usub_reject_rights": "Rights / copyright",
+    "usub_reject_metadata": "Wrong metadata",
+    "usub_approved_user": "✅ Your track “{title}” was approved — everyone can search and download it.",
+    "usub_approved_user_bonus": (
+        "✅ Your track “{title}” was approved.\n"
+        "+{bonus} extra downloads for today ({used}/{limit})."
+    ),
+    "usub_rejected_user": "Your submission “{title}” was not approved.\nReason: {reason}",
+
     # --- language selection ---
     "lang_choose": "🌐 Choose the bot language:",
     "lang_set": "✅ Language set to {lang_name}.",
@@ -552,4 +689,141 @@ STRINGS = {
     "lang_name_es": "Español",
     "lang_name_ru": "Русский",
     "lang_name_it": "Italiano",
+
+    # --- admin ops (credentials, stats, VIP setup) ---
+    "creds_header": "Credentials status:",
+    "creds_yt_section": "▶ YouTube (audio downloads — all links)",
+    "creds_yt_browser": "  ✓ Browser: YTDLP_COOKIES_FROM_BROWSER={browser}",
+    "creds_yt_live_ok": "  ✓ Live probe: {detail}",
+    "creds_yt_live_fail": "  ✗ Live probe: {detail}",
+    "creds_yt_browser_hint": "    → Log into youtube.com in Chrome; install secretstorage",
+    "creds_yt_cookies_path": "  ✓ cookies.txt: {path}",
+    "creds_yt_expired_hint": "    → Cookies expired — export from PC or send /cookies",
+    "creds_yt_cookies_incomplete": "  ✗ cookies.txt exists but YouTube session is incomplete",
+    "creds_yt_cookies_incomplete_hint": (
+        "    → Log into youtube.com in the browser and re-export cookies\n"
+        "    → Or set YTDLP_COOKIES_FROM_BROWSER=chrome and YTDLP_AUTO_REFRESH_COOKIES=1"
+    ),
+    "creds_yt_cookies_missing": "  ✗ cookies.txt not found: {path}",
+    "creds_yt_cookies_missing_hint": "    → Copy the file from your PC or export from the browser",
+    "creds_spotify_section": "▶ Spotify API (metadata only — audio from YouTube)",
+    "creds_spotify_ok": "  ✓ SPOTIFY_CLIENT_ID / SECRET set in .env",
+    "creds_spotify_embed_note": "  (On 403 errors, embed is used for track/album/playlist links)",
+    "creds_spotify_missing": "  ✗ Missing CLIENT_ID/SECRET — Spotify links use embed",
+    "creds_result_ok": "Result: YouTube is ready for downloads.",
+    "creds_result_fail": "Result: YouTube is not ready — fix cookies.txt.",
+    "admin_stats_users": "Users: {count}",
+    "admin_stats_downloads": "Downloads: {count}",
+    "admin_stats_cache_rate": "Cache hit rate: {pct} ({cached}/{total})",
+    "admin_stats_top_artists": "Top artists:",
+    "admin_stats_top_songs": "Top tracks:",
+    "admin_stats_platforms": "Platforms:",
+    "admin_stats_skipped_changelog": "Skipped changelogs (DB): {count}",
+    "admin_stats_error_reports": "Submitted user reports: {count}",
+    "admin_stats_footer": "Full dashboard: /report  ·  User reports: /reports",
+    "admin_channelid_in_channel": "Chat id: `{chat_id}`\n\nIn .env:\nVIP_LOG_CHANNEL_ID={chat_id}",
+    "admin_channelid_chat_id": "Chat id: `{chat_id}`",
+    "admin_channelid_type": "Type: {chat_type}",
+    "admin_channelid_title": "Title: {title}",
+    "admin_channelid_username": "Username: @{username}",
+    "admin_channelid_env_hint": "\nAdd to .env:\nVIP_LOG_CHANNEL_ID={chat_id}",
+    "admin_vip_startup_broken": (
+        "⚠️ VIP logging is not working.\n"
+        "Make the bot a private channel admin, set VIP_LOG_CHANNEL_ID in .env, "
+        "then run /viplogtest."
+    ),
+    "admin_vip_env_missing": "VIP_LOG_CHANNEL_ID is not set in .env",
+    "admin_vip_not_admin": "Bot is not a channel administrator",
+    "admin_vip_no_post": "Bot cannot post messages in the channel",
+    "admin_vip_not_member": "Bot is not a chat member (status: {status})",
+    "admin_vip_test_title": "VIP log test",
+    "admin_vip_test_channel": "Channel: {title}",
+    "admin_vip_test_id": "Id: {chat_id}",
+    "admin_vip_send_failed": "Could not send message — check server logs",
+    "admin_vip_test_ok": "Test message sent to {title} (id={chat_id})",
+    "admin_vip_forbidden_hint": (
+        "{error}. Make the bot a channel admin with post permission. "
+        "Chat id must be numeric (e.g. -1001234567890)."
+    ),
+    "admin_vip_status_disabled": (
+        "VIP logging is disabled.\n\n"
+        "1. Add the bot as admin of a private channel (with post permission)\n"
+        "2. In the channel run /channelid@HiiTRadioBot or forward a post\n"
+        "3. In .env set:\nVIP_LOG_CHANNEL_ID=-100xxxxxxxxxx\n"
+        "4. Restart the bot\n\n"
+        "Test: /viplogtest"
+    ),
+    "admin_vip_status_enabled": (
+        "VIP_LOG_CHANNEL_ID={channel}\n"
+        "Parsed id: {parsed}\n\n"
+        "Send a test: /viplogtest"
+    ),
+    "vip_log_user_fmt": "id={user_id}",
+    "vip_evt_startup": "Bot startup",
+    "vip_evt_shutdown": "Bot shutdown",
+    "vip_evt_gate_denied": "Blocked — not a channel member",
+    "vip_evt_rate_limit": "Rate limit",
+    "vip_evt_dl_start": "Download started",
+    "vip_evt_cache_hit": "Cache hit",
+    "vip_evt_request": "Request",
+    "vip_evt_dl_ok": "Download OK",
+    "vip_evt_dl_fail": "Download failed",
+    "vip_evt_error": "Error",
+    "vip_evt_user_report": "User error report",
+    "vip_evt_pl_start": "Playlist started",
+    "vip_evt_pl_track": "Playlist — track",
+    "vip_evt_pl_done": "Playlist finished",
+    "vip_evt_broadcast": "Broadcast",
+    "vip_evt_cookie_health": "YouTube cookie health",
+    "vip_evt_button": "Button",
+    "vip_evt_inline": "Inline",
+    "vip_evt_command": "Command",
+    "vip_evt_message": "Message",
+    "vip_evt_channel_post": "Channel post",
+    "vip_evt_update": "Update",
+    "vip_fld_user": "User",
+    "vip_fld_chat": "Chat",
+    "vip_fld_data": "Data",
+    "vip_fld_search": "Query",
+    "vip_fld_text": "Text",
+    "vip_fld_kind": "Kind",
+    "vip_fld_gate": "Gate",
+    "vip_fld_vip_log": "VIP log",
+    "vip_fld_youtube": "YouTube",
+    "vip_fld_wait": "Wait",
+    "vip_fld_song": "Track",
+    "vip_fld_artist": "Artist",
+    "vip_fld_source": "Source",
+    "vip_fld_platform": "Platform",
+    "vip_fld_cached": "Cached",
+    "vip_fld_playlist": "Playlist",
+    "vip_fld_reason": "Reason",
+    "vip_fld_message": "Message",
+    "vip_fld_detail": "Detail",
+    "vip_fld_error_kind": "Kind",
+    "vip_fld_error_code": "Code",
+    "vip_fld_collection": "Collection",
+    "vip_fld_count": "Count",
+    "vip_fld_progress": "Progress",
+    "vip_fld_status": "Status",
+    "vip_fld_sent": "Sent",
+    "vip_fld_failed": "Failed",
+    "vip_fld_stop_reason": "Stop reason",
+    "vip_fld_health": "Status",
+    "vip_fld_channel": "Channel",
+    "vip_val_yes": "yes",
+    "vip_val_no": "no",
+    "vip_val_healthy": "OK",
+    "vip_val_unhealthy": "FAIL",
+    "vip_cookie_alert_detail": (
+        "YouTube cookies look invalid or expired. Re-export cookies.txt with a logged-in "
+        "session (non-empty SID / __Secure-*PSID)."
+    ),
+    "vip_fld_removed": "Removed",
+    "vip_evt_job_cancel": "User job cancelled",
+    "vip_evt_cache_sweep": "Cache sweep",
+    "vip_evt_cache_sweep_fallback": "Cache sweep (fallback)",
+    "vip_evt_cache_sweep_startup": "Cache sweep (startup)",
+    "vip_evt_progress": "Progress",
+    "vip_fld_label": "Label",
 }

@@ -10,6 +10,18 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
+
+def _log_url(url: str) -> str:
+    """Host + path prefix only — never log API keys embedded in URLs."""
+    try:
+        from urllib.parse import urlsplit
+        parts = urlsplit(url)
+        path = (parts.path or "")[:96]
+        return f"{parts.scheme}://{parts.netloc}{path}"
+    except Exception:
+        return "<redacted>"
+
+
 DISCOVER_CACHE_TTL = 3600
 _discover_cache = {}
 
@@ -250,12 +262,13 @@ async def recommend_songs(history, user_id=None, limit=10):
                 body = await resp.text()
                 if resp.status != 200:
                     logger.error(
-                        f"LLM API {resp.status} model={model!r} url={url}: {body[:500]}"
+                        "LLM API %s model=%r url=%s: %s",
+                        resp.status, model, _log_url(url), body[:500],
                     )
                     return None, usage
                 data = json.loads(body)
     except Exception as e:
-        logger.error(f"LLM request failed ({url}): {e}", exc_info=True)
+        logger.error("LLM request failed (%s): %s", _log_url(url), e, exc_info=True)
         return None, usage
 
     api_usage = data.get("usage") or {}
@@ -362,12 +375,13 @@ async def recommend_similar(title, artist, limit=8):
                 body = await resp.text()
                 if resp.status != 200:
                     logger.error(
-                        f"LLM similar API {resp.status} model={model!r} url={url}: {body[:500]}"
+                        "LLM similar API %s model=%r url=%s: %s",
+                        resp.status, model, _log_url(url), body[:500],
                     )
                     return None, usage
                 data = json.loads(body)
     except Exception as e:
-        logger.error(f"LLM similar request failed ({url}): {e}", exc_info=True)
+        logger.error("LLM similar request failed (%s): %s", _log_url(url), e, exc_info=True)
         return None, usage
 
     api_usage = data.get("usage") or {}
@@ -455,12 +469,12 @@ async def _chat_text(system_prompt, user_prompt, *, temperature=0.5):
                 if resp.status != 200:
                     logger.error(
                         "LLM API %s model=%r url=%s: %s",
-                        resp.status, model, url, body[:500],
+                        resp.status, model, _log_url(url), body[:500],
                     )
                     return None
                 data = json.loads(body)
     except Exception as e:
-        logger.error("LLM request failed (%s): %s", url, e, exc_info=True)
+        logger.error("LLM request failed (%s): %s", _log_url(url), e, exc_info=True)
         return None
     try:
         content = _message_text(data["choices"][0]["message"])

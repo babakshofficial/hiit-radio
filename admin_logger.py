@@ -10,9 +10,29 @@ from pathlib import Path
 from dotenv import load_dotenv
 from telegram.error import BadRequest, Forbidden
 
+from messages import t_lang
+
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 logger = logging.getLogger(__name__)
+
+_vip_lang: str | None = None
+
+
+def set_vip_log_language(lang: str | None) -> None:
+    """VIP channel log labels follow the admin's bot language."""
+    global _vip_lang
+    _vip_lang = lang
+
+
+def _L(key: str, **kwargs) -> str:
+    return t_lang(_vip_lang, key, **kwargs)
+
+
+def _vip_field_label(key: str) -> str:
+    fld = f"vip_fld_{key}"
+    text = _L(fld)
+    return text if text != fld else key
 
 
 def _vip_channel_id():
@@ -31,7 +51,6 @@ def _normalize_chat_id(raw):
         return stripped
     if stripped.startswith("-100"):
         return int(stripped)
-    # Private channels/groups use -100xxxxxxxxxx; fix common copy mistakes.
     return int(f"-100{digits}")
 
 
@@ -43,10 +62,9 @@ def _enabled():
     return bool(_vip_channel_id())
 
 
-# Debounce VIP cookie alerts (seconds).
 _COOKIE_ALERT_COOLDOWN = 30 * 60
 _last_cookie_alert_at = 0.0
-_last_cookie_health = None  # None | True | False
+_last_cookie_health = None
 
 
 def _ts():
@@ -56,7 +74,7 @@ def _ts():
 def _fmt_user(user):
     if not user:
         return "—"
-    parts = [f"شناسه={user.id}"]
+    parts = [_L("vip_log_user_fmt", user_id=user.id)]
     if user.username:
         parts.append(f"@{user.username}")
     if user.first_name:
@@ -74,11 +92,11 @@ async def _check_post_permission(bot, chat_id, chat_type):
     status = getattr(member, "status", "")
     if chat_type == "channel":
         if status != "administrator":
-            return False, "ربات ادمین کانال نیست"
+            return False, _L("admin_vip_not_admin")
         if hasattr(member, "can_post_messages") and not member.can_post_messages:
-            return False, "ربات اجازه ارسال پیام در کانال را ندارد"
+            return False, _L("admin_vip_no_post")
     elif status not in {"administrator", "member", "creator"}:
-        return False, f"ربات عضو چت نیست (وضعیت: {status})"
+        return False, _L("admin_vip_not_member", status=status)
     return True, None
 
 
@@ -115,27 +133,29 @@ async def send_test_message(bot):
     """Send a test log entry; returns (ok, detail)."""
     channel = _vip_channel_id()
     if not channel:
-        return False, "VIP_LOG_CHANNEL_ID در .env تنظیم نشده"
+        return False, _L("admin_vip_env_missing")
     chat_id = _parse_chat_id(channel)
     try:
         chat = await bot.get_chat(chat_id)
         ok, reason = await _check_post_permission(bot, chat.id, chat.type)
         if not ok:
             return False, reason
+        title = html.escape(getattr(chat, "title", str(chat.id)))
         text = (
-            f"<b>تست لاگ VIP</b> {_ts()}\n"
-            f"کانال: {html.escape(getattr(chat, 'title', str(chat.id)))}\n"
-            f"شناسه: {chat.id}"
+            f"<b>{html.escape(_L('admin_vip_test_title'))}</b> {_ts()}\n"
+            f"{html.escape(_L('admin_vip_test_channel', title=title))}\n"
+            f"{html.escape(_L('admin_vip_test_id', chat_id=chat.id))}"
         )
         sent = await _send(bot, text)
         if not sent:
-            return False, "ارسال پیام ناموفق بود — لاگ سرور را بررسی کن"
-        return True, f"پیام تست به {chat.title or chat.id} ارسال شد (id={chat.id})"
-    except (BadRequest, Forbidden) as e:
-        return False, (
-            f"{e}. ربات را ادمین کانال کن با اجازه ارسال پیام. "
-            "شناسه باید عددی باشد (مثلاً -1001234567890)."
+            return False, _L("admin_vip_send_failed")
+        return True, _L(
+            "admin_vip_test_ok",
+            title=getattr(chat, "title", None) or chat.id,
+            chat_id=chat.id,
         )
+    except (BadRequest, Forbidden) as e:
+        return False, _L("admin_vip_forbidden_hint", error=e)
     except Exception as e:
         return False, str(e)
 
@@ -157,20 +177,9 @@ async def notify_admin_vip_issue(bot, message, reply_markup=None):
 def vip_status_text():
     channel = _vip_channel_id()
     if not channel:
-        return (
-            "لاگ VIP غیرفعال است.\n\n"
-            "۱. ربات را ادمین کانال خصوصی کن (با اجازه ارسال پیام)\n"
-            "۲. در کانال /channelid@HiiTRadioBot بزن یا یک پست را فوروارد کن\n"
-            "۳. در .env بگذار:\nVIP_LOG_CHANNEL_ID=-100xxxxxxxxxx\n"
-            "۴. ربات را ری‌استارت کن\n\n"
-            "برای تست: /viplogtest"
-        )
+        return _L("admin_vip_status_disabled")
     parsed = _parse_chat_id(channel)
-    return (
-        f"VIP_LOG_CHANNEL_ID={channel}\n"
-        f"شناسه پردازش‌شده: {parsed}\n\n"
-        "برای تست ارسال: /viplogtest"
-    )
+    return _L("admin_vip_status_enabled", channel=channel, parsed=parsed)
 
 
 async def _send(bot, text):
@@ -211,24 +220,23 @@ async def _send(bot, text):
         return False
 
 
-async def log_vip(bot, event_type, user=None, **fields):
-    """Generic VIP log entry. All specialized loggers delegate here."""
+async def log_vip(bot, event_key, user=None, **fields):
+    """Generic VIP log entry. ``event_key`` is a locale key (vip_evt_*)."""
     if not _enabled():
         return
-    lines = [f"<b>{html.escape(event_type)}</b> {_ts()}"]
+    lines = [f"<b>{html.escape(_L(event_key))}</b> {_ts()}"]
     if user is not None:
-        lines.append(f"کاربر: {html.escape(_fmt_user(user))}")
+        lines.append(f"{html.escape(_vip_field_label('user'))}: {html.escape(_fmt_user(user))}")
     for key, value in fields.items():
         if value is None:
             continue
-        label = html.escape(str(key))
+        label = html.escape(_vip_field_label(key))
         text = html.escape(str(value)[:800])
         lines.append(f"{label}: {text}")
     await _send(bot, "\n".join(lines))
 
 
 def message_media_kind(msg):
-    """ptb Message has no content_type; infer from attachment attributes."""
     if not msg:
         return "unknown"
     for name in (
@@ -243,45 +251,45 @@ def message_media_kind(msg):
 
 def _describe_update(update):
     if update.callback_query:
-        return "دکمه", {"داده": update.callback_query.data or ""}
+        return "vip_evt_button", {"data": update.callback_query.data or ""}
     if update.inline_query:
-        return "اینلاین", {"جستجو": update.inline_query.query or ""}
+        return "vip_evt_inline", {"search": update.inline_query.query or ""}
     msg = update.effective_message
     if msg:
         text = msg.text or msg.caption or ""
         if text.startswith("/"):
-            return "دستور", {"متن": text[:500]}
+            return "vip_evt_command", {"text": text[:500]}
         if text:
-            return "پیام", {"متن": text[:500]}
-        return "پیام", {"نوع": message_media_kind(msg)}
+            return "vip_evt_message", {"text": text[:500]}
+        return "vip_evt_message", {"kind": message_media_kind(msg)}
     if update.channel_post:
         text = update.channel_post.text or ""
-        return "پست کانال", {"متن": text[:500]}
-    return "به‌روزرسانی", {"نوع": "other"}
+        return "vip_evt_channel_post", {"text": text[:500]}
+    return "vip_evt_update", {"kind": "other"}
 
 
 async def log_incoming_update(bot, update):
     if not _enabled() or not update:
         return
-    event_type, fields = _describe_update(update)
+    event_key, fields = _describe_update(update)
     chat = update.effective_chat
     if chat:
-        fields["چت"] = f"{chat.type}:{chat.id}"
-    await log_vip(bot, event_type, user=update.effective_user, **fields)
+        fields["chat"] = f"{chat.type}:{chat.id}"
+    await log_vip(bot, event_key, user=update.effective_user, **fields)
 
 
 async def log_startup(bot, gate_ok, vip_ok, yt_ok):
     await log_vip(
         bot,
-        "راه‌اندازی ربات",
-        gate="OK" if gate_ok else "FAIL",
-        vip_log="OK" if vip_ok else "FAIL",
-        youtube="OK" if yt_ok else "FAIL",
+        "vip_evt_startup",
+        gate=_L("vip_val_healthy") if gate_ok else _L("vip_val_unhealthy"),
+        vip_log=_L("vip_val_healthy") if vip_ok else _L("vip_val_unhealthy"),
+        youtube=_L("vip_val_healthy") if yt_ok else _L("vip_val_unhealthy"),
     )
 
 
 async def log_shutdown(bot):
-    await log_vip(bot, "خاموش شدن ربات")
+    await log_vip(bot, "vip_evt_shutdown")
 
 
 async def log_system(bot, event, user=None, **fields):
@@ -289,59 +297,54 @@ async def log_system(bot, event, user=None, **fields):
 
 
 async def log_gate_denied(bot, user, channel):
-    await log_vip(bot, "مسدود — عضو کانال نیست", user=user, **{"کانال": channel})
+    await log_vip(bot, "vip_evt_gate_denied", user=user, channel=channel)
 
 
 async def log_rate_limit(bot, user, wait_minutes):
-    await log_vip(bot, "محدودیت نرخ", user=user, **{"انتظار": f"{wait_minutes} دقیقه"})
+    await log_vip(
+        bot, "vip_evt_rate_limit", user=user, wait=f"{wait_minutes} min",
+    )
 
 
 async def log_download_start(bot, user, title, artist, source):
-    await log_vip(bot, "شروع دانلود", user=user, **{
-        "آهنگ": title, "هنرمند": artist, "منبع": source,
-    })
+    await log_vip(bot, "vip_evt_dl_start", user=user, song=title, artist=artist, source=source)
 
 
 async def log_cache_hit(bot, user, title, artist, source):
-    await log_vip(bot, "برخورد کش", user=user, **{
-        "آهنگ": title, "هنرمند": artist, "منبع": source,
-    })
+    await log_vip(bot, "vip_evt_cache_hit", user=user, song=title, artist=artist, source=source)
 
 
 async def log_request(bot, update, query_text):
     await log_vip(
-        bot, "درخواست", user=update.effective_user if update else None,
-        **{"متن": query_text[:500]},
+        bot, "vip_evt_request", user=update.effective_user if update else None,
+        text=query_text[:500],
     )
 
 
 async def log_download(bot, user, title, artist, platform, cached=False, playlist_info=None):
     fields = {
-        "آهنگ": title or "?",
-        "هنرمند": artist or "?",
-        "پلتفرم": platform or "?",
-        "کش": "بله" if cached else "خیر",
+        "song": title or "?",
+        "artist": artist or "?",
+        "platform": platform or "?",
+        "cached": _L("vip_val_yes") if cached else _L("vip_val_no"),
     }
     if playlist_info:
-        fields["پلی‌لیست"] = playlist_info
-    await log_vip(bot, "دانلود موفق", user=user, **fields)
+        fields["playlist"] = playlist_info
+    await log_vip(bot, "vip_evt_dl_ok", user=user, **fields)
 
 
 async def log_download_fail(bot, user, title, artist, source, reason=None):
-    await log_vip(bot, "دانلود ناموفق", user=user, **{
-        "آهنگ": title, "هنرمند": artist, "منبع": source, "دلیل": reason or "—",
-    })
+    await log_vip(bot, "vip_evt_dl_fail", user=user, song=title, artist=artist, source=source, reason=reason or "—")
 
 
 async def log_error(bot, user, message, detail=None):
-    fields = {"پیام": message}
+    fields = {"message": message}
     if detail:
-        fields["جزئیات"] = str(detail)[:400]
-    await log_vip(bot, "خطا", user=user, **fields)
+        fields["detail"] = str(detail)[:400]
+    await log_vip(bot, "vip_evt_error", user=user, **fields)
 
 
 async def log_user_report(bot, user, report_row):
-    """Notify admin when a user submits an error report."""
     import error_report
     import support_chat
 
@@ -350,58 +353,46 @@ async def log_user_report(bot, user, report_row):
     keyboard = support_chat.build_admin_report_keyboard(report_id)
     await log_vip(
         bot,
-        "گزارش خطا — کاربر",
+        "vip_evt_user_report",
         user=user,
-        **{
-            "نوع": report_row.get("error_kind") or "?",
-            "کد": report_row.get("error_code") or "—",
-            "جزئیات": summary[:3500],
-        },
+        error_kind=report_row.get("error_kind") or "?",
+        error_code=report_row.get("error_code") or "—",
+        detail=summary[:3500],
     )
     await notify_admin_vip_issue(bot, summary, reply_markup=keyboard)
 
 
 async def log_playlist_start(bot, user, name, track_count):
-    await log_vip(bot, "شروع پلی‌لیست", user=user, **{
-        "مجموعه": name or "?", "تعداد": track_count,
-    })
+    await log_vip(bot, "vip_evt_pl_start", user=user, collection=name or "?", count=track_count)
 
 
 async def log_playlist_track(bot, user, index, total, title, artist, status):
-    await log_vip(bot, "پلی‌لیست — آهنگ", user=user, **{
-        "پیشرفت": f"{index}/{total}",
-        "آهنگ": title,
-        "هنرمند": artist,
-        "وضعیت": status,
-    })
+    await log_vip(bot, "vip_evt_pl_track", user=user, progress=f"{index}/{total}", song=title, artist=artist, status=status)
 
 
 async def log_playlist_done(bot, user, name, sent, total, failed=0, reason=None):
     fields = {
-        "مجموعه": name or "?",
-        "ارسال‌شده": f"{sent}/{total}",
-        "ناموفق": failed,
+        "collection": name or "?",
+        "sent": f"{sent}/{total}",
+        "failed": failed,
     }
     if reason:
-        fields["دلیل توقف"] = reason
-    await log_vip(bot, "پایان پلی‌لیست", user=user, **fields)
+        fields["stop_reason"] = reason
+    await log_vip(bot, "vip_evt_pl_done", user=user, **fields)
 
 
 async def log_broadcast(bot, admin_user, sent, failed):
-    await log_vip(bot, "پیام همگانی", user=admin_user, **{
-        "ارسال": sent, "ناموفق": failed,
-    })
+    await log_vip(bot, "vip_evt_broadcast", user=admin_user, sent=sent, failed=failed)
 
 
 async def log_cookie_health(bot, healthy, detail=None):
-    fields = {"وضعیت": "سالم" if healthy else "ناسالم"}
+    fields = {"health": _L("vip_val_healthy") if healthy else _L("vip_val_unhealthy")}
     if detail:
-        fields["جزئیات"] = str(detail)[:400]
-    await log_vip(bot, "سلامت کوکی یوتیوب", **fields)
+        fields["detail"] = str(detail)[:400]
+    await log_vip(bot, "vip_evt_cookie_health", **fields)
 
 
 async def maybe_alert_cookie_issue(bot, detail=None, force=False):
-    """Rate-limited VIP alert when YouTube cookies look broken / bot-check hits."""
     import time
 
     global _last_cookie_alert_at
@@ -412,16 +403,12 @@ async def maybe_alert_cookie_issue(bot, detail=None, force=False):
     await log_cookie_health(
         bot,
         healthy=False,
-        detail=detail or (
-            "کوکی یوتیوب نامعتبر یا منقضی است. cookies.txt را با نشست لاگین‌شده تازه "
-            "اکسپورت کن (SID / __Secure-*PSID غیرخالی)."
-        ),
+        detail=detail or _L("vip_cookie_alert_detail"),
     )
     return True
 
 
 async def report_cookie_health_transition(bot, healthy, detail=None):
-    """VIP notify only when cookie health state changes (or first check)."""
     global _last_cookie_health
     if _last_cookie_health is healthy:
         return False

@@ -57,6 +57,36 @@ def _normalize_apple_artwork_url(url):
     )
 
 
+_FEAT_GROUP_RE = re.compile(
+    r"\s*[\(\[][^\)\]]*\b(?:feat\.?|ft\.?|featuring)\b[^\)\]]*[\)\]]",
+    re.IGNORECASE,
+)
+
+
+def strip_featured_credit(text, primary_artist=""):
+    """Remove featured-artist credits from text used for coverage scoring.
+
+    ``(feat. Lefty Gunplay)`` groups are dropped. An inline ``feat. …`` clause
+    is removed only when it sits immediately before ``primary_artist``, so a
+    catalog query like ``title feat. Guest Primary`` keeps the primary name.
+    """
+    if not text:
+        return ""
+    cleaned = _FEAT_GROUP_RE.sub(" ", text)
+    primary = (primary_artist or "").strip()
+    if primary:
+        cleaned = re.sub(
+            r"\b(?:feat\.?|ft\.?|featuring)\s+.*?(?=\s+"
+            + re.escape(primary)
+            + r"\b)",
+            " ",
+            cleaned,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def score_query_coverage(query, title, artist):
     """Symmetric coverage of query tokens in title+artist (0-100).
 
@@ -72,8 +102,35 @@ def score_query_coverage(query, title, artist):
     return 100.0 * hits / len(q_tokens)
 
 
+_SHAZAM_TRACK_RE = re.compile(
+    r"(?:shazam\.com|shz\.am)/(?:[a-z]{2}(?:-[a-z]{2})?/)?(?:track|song)/(\d+)",
+    re.IGNORECASE,
+)
+# A desktop browser UA is rejected with Fastly 405 ("Error 54113"). Shazam
+# still answers a legacy mobile client.
+_SHAZAM_HEADERS = {
+    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 6.0.1; SM-G920F Build/MMB29K)",
+    "X-Shazam-Platform": "IPHONE",
+    "X-Shazam-AppVersion": "14.1.0",
+    "Accept": "*/*",
+    "Accept-Language": "en-US",
+}
+
+
+def is_shazam_url(text):
+    """True if text looks like a Shazam track or short link."""
+    t = (text or "").lower()
+    return "shazam.com" in t or "shz.am" in t
+
+
+def shazam_track_id(url):
+    """Numeric Shazam track id from a /track/ or /song/ URL, else None."""
+    match = _SHAZAM_TRACK_RE.search(url or "")
+    return match.group(1) if match else None
+
+
 def is_music_url(text):
-    """True if text looks like a Spotify/Apple/Deezer/YouTube/SoundCloud link."""
+    """True if text looks like a Spotify/Apple/Deezer/Shazam/YouTube/SoundCloud link."""
     t = (text or "").strip()
     if not t:
         return False
@@ -81,7 +138,7 @@ def is_music_url(text):
     if catalog.is_deezer_url(t) or catalog.is_direct_media_url(t):
         return True
     tl = t.lower()
-    return "spotify.com" in tl or "music.apple.com" in tl
+    return "spotify.com" in tl or "music.apple.com" in tl or is_shazam_url(t)
 
 
 def looks_like_music_query(text):
@@ -102,16 +159,108 @@ def looks_like_music_query(text):
     return True
 
 
-def guess_title_artist(query):
-    """Split free-text into (title, artist) without trusting a single orientation.
+# Trailing words that describe a *version* of a song, never its artist.
+_VERSION_DESCRIPTOR_WORDS = (
+    r"remix(?:es|ed)?|live|cover|acoustic|instrumental|karaoke|nightcore|"
+    r"slowed|reverb|reverbed|sped\s*up|speed\s*up|extended(?:\s+mix)?|"
+    r"club\s*mix|radio\s*edit|edit|version|remaster(?:ed)?|lo-?fi|8d(?:\s*audio)?|"
+    r"bass\s*boosted|mashup|bootleg|rework|vip"
+)
+_TRAILING_DESCRIPTOR_RE = re.compile(
+    r"(?:\s+|^)(?:"
+    r"[\(\[]\s*[^\)\]]*\b(?:" + _VERSION_DESCRIPTOR_WORDS + r")\b[^\)\]]*[\)\]]"
+    r"|(?:" + _VERSION_DESCRIPTOR_WORDS + r")"
+    r")\s*$",
+    re.I,
+)
+_DESCRIPTOR_JOINERS_RE = re.compile(r"(?:\s+|^)(?:[+&,/-]|and|with|n)\s*$", re.I)
 
-    Patterns:
-    - "Oscar and the Wolf Breathe" → title=Breathe, artist=Oscar and the Wolf
-    - "dont wanna be here naits" → title=dont wanna be here, artist=naits
+_GENRE_DESCRIPTOR_WORDS = frozenset({
+    "afrohouse", "house", "techno", "trance", "dnb", "drumandbass", "dubstep",
+    "trap", "lofi", "lo-fi", "edm", "electro", "garage", "jungle", "hardstyle",
+    "phonk", "hyperpop", "ambient", "chillout", "deephouse", "progressive",
+})
+
+_TYPE_BEAT_PHRASE_RE = re.compile(
+    r"\btype\s+beats?\b|\binstrumental\s+beats?\b|\boriginally\s+performed\s+by\b",
+    re.IGNORECASE,
+)
+_INSTRUMENTAL_GROUP_RE = re.compile(
+    r"[\(\[]\s*instrumental(?:\s+version)?\s*[\)\]]",
+    re.IGNORECASE,
+)
+_GENRE_SPAM_WORDS = _GENRE_DESCRIPTOR_WORDS | frozenset({
+    "westcoast", "trap", "drill", "hip", "hop", "hiphop", "rap", "beat",
+    "beats", "type", "lofi", "phonk", "rnb", "freestyle", "boom", "bap",
+    "afro", "rage", "plugg", "jersey", "club", "amapiano", "dancehall",
+})
+
+
+def looks_like_type_beat(title):
+    """True for type-beat and karaoke titles that are not the chart recording.
+
+    iTunes indexes these under famous-artist keywords. They rarely exist on
+    YouTube or SoundCloud, so nearby suggestions should not offer them.
     """
+    text = title or ""
+    if _TYPE_BEAT_PHRASE_RE.search(text) or _INSTRUMENTAL_GROUP_RE.search(text):
+        return True
+    for match in re.finditer(r"[\(\[]([^\)\]]+)[\)\]]", text):
+        words = re.findall(r"[a-z0-9]+", match.group(1).lower())
+        if "beat" not in words and "beats" not in words and "instrumental" not in words:
+            continue
+        if len(words) < 4:
+            continue
+        genreish = sum(1 for word in words if word in _GENRE_SPAM_WORDS)
+        if genreish >= 3:
+            return True
+    return False
+
+
+def split_version_descriptor(query):
+    """Split trailing version words off a free-text query → (core, descriptor)."""
+    q = (query or "").strip()
+    core = q
+    while True:
+        m = _TRAILING_DESCRIPTOR_RE.search(core)
+        if not m:
+            break
+        candidate = core[:m.start()].rstrip()
+        j = _DESCRIPTOR_JOINERS_RE.search(candidate)
+        if j and j.start() > 0:
+            candidate = candidate[:j.start()].rstrip()
+        candidate = candidate.rstrip(" -–,")
+        if not candidate:
+            break
+        core = candidate
+    if core == q:
+        return q, ""
+    descriptor = q[len(core):].strip(" -–,")
+    return core, descriptor
+
+
+def _with_descriptor(title, descriptor):
+    if not descriptor:
+        return title
+    d = descriptor.strip()
+    if not (d.startswith("(") or d.startswith("[")):
+        d = f"({d})"
+    return f"{title} {d}".strip() if title else d
+
+
+def guess_title_artist(query):
+    """Split free-text into (title, artist) without trusting a single orientation."""
     q = (query or "").strip()
     if not q:
         return "", ""
+    core, descriptor = split_version_descriptor(q)
+    if descriptor:
+        title, artist = _guess_title_artist_core(core)
+        return _with_descriptor(title, descriptor), artist
+    return _guess_title_artist_core(q)
+
+
+def _guess_title_artist_core(q):
     if re.search(r'\s+by\s+', q, re.I):
         parts = re.split(r'\s+by\s+', q, maxsplit=1, flags=re.I)
         if len(parts) == 2:
@@ -124,18 +273,18 @@ def guess_title_artist(query):
     if len(words) < 2:
         return q, ""
     if len(words) == 2:
-        # Ambiguous — prefer Title Artist (song then artist)
         return words[0], words[1]
 
     last = words[-1]
     rest = words[:-1]
     rest_l = " ".join(rest).lower()
 
-    # Band-name cue: "X and the Y Title" → last word is the song title
+    if last.lower() in _GENRE_DESCRIPTOR_WORDS:
+        return q, ""
+
     if re.search(r'\band\s+the\b', rest_l) or re.search(r'\b&\b', rest_l):
         return last, " ".join(rest)
 
-    # Default chat pattern: "song title words … artist"
     return " ".join(rest), last
 
 
@@ -594,6 +743,335 @@ class SpotifyMetadata:
             return False
 
 
+def _shazam_actions(data):
+    hub = (data or {}).get("hub") or {}
+    for action in hub.get("actions") or []:
+        if isinstance(action, dict):
+            yield action
+    for option in hub.get("options") or []:
+        if not isinstance(option, dict):
+            continue
+        for action in option.get("actions") or []:
+            if isinstance(action, dict):
+                yield action
+
+
+def _shazam_album(data):
+    for section in (data or {}).get("sections") or []:
+        if (section.get("type") or "").upper() != "SONG":
+            continue
+        for item in section.get("metadata") or []:
+            if (item.get("title") or "").strip().lower() == "album":
+                return (item.get("text") or "").strip() or None
+    return None
+
+
+def _shazam_preview(data):
+    for action in _shazam_actions(data):
+        uri = (action.get("uri") or "").strip()
+        if not uri.startswith("http"):
+            continue
+        low = uri.lower()
+        if "audio" in low or "preview" in low or low.endswith(".m4a"):
+            return uri
+    return None
+
+
+def _iso_duration_seconds(value):
+    """Parse a schema.org duration such as PT4M2S into seconds."""
+    match = re.fullmatch(
+        r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?",
+        (value or "").strip(),
+        flags=re.IGNORECASE,
+    )
+    if not match or not any(match.groups()):
+        return None
+    hours = int(match.group(1) or 0)
+    minutes = int(match.group(2) or 0)
+    seconds = float(match.group(3) or 0)
+    total = hours * 3600 + minutes * 60 + seconds
+    return total or None
+
+
+def _has_class_prefix(value, prefix):
+    if not value:
+        return False
+    classes = value.split() if isinstance(value, str) else value
+    return any(str(item).startswith(prefix) for item in classes)
+
+
+def _shazam_person_name(value):
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        return (value.get("name") or "").strip() or None
+    if isinstance(value, list):
+        for item in value:
+            name = _shazam_person_name(item)
+            if name:
+                return name
+    return None
+
+
+def _shazam_apple_id(data):
+    for action in _shazam_actions(data):
+        kind = (action.get("type") or "").lower()
+        if "apple" in kind:
+            apple_id = str(action.get("id") or "").strip()
+            if apple_id.isdigit():
+                return apple_id
+        uri = action.get("uri") or ""
+        match = re.search(r"[?&]i=(\d+)", uri)
+        if match:
+            return match.group(1)
+    apple = ((data or {}).get("share") or {}).get("apple") or ""
+    match = re.search(r"[?&]i=(\d+)", apple)
+    return match.group(1) if match else None
+
+
+class ShazamMetadata:
+    """Turn a Shazam track URL into title, artist, artwork, and duration."""
+
+    def __init__(self, url):
+        self.url = url
+        self.title = None
+        self.artist = None
+        self.album = None
+        self.artwork_url = None
+        self.preview_url = None
+        self.duration = None
+        self.type = "song"
+        self.id = None
+
+    async def fetch(self):
+        if not self.url:
+            return False
+        try:
+            timeout = aiohttp.ClientTimeout(total=25, connect=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                page_url = self.url
+                track_id = shazam_track_id(page_url)
+                if not track_id:
+                    page_url = await self._final_url(session, self.url)
+                    track_id = shazam_track_id(page_url or "")
+                if not track_id:
+                    logger.error("Shazam URL has no track id: %s", self.url)
+                    return False
+                self.id = track_id
+                data = await self._fetch_json(session, track_id)
+                if data and self._apply_json(data):
+                    await self._fill_duration(session, data)
+                elif not await self._fetch_og(
+                    session,
+                    page_url if shazam_track_id(page_url or "") else (
+                        f"https://www.shazam.com/track/{track_id}"
+                    ),
+                ):
+                    return False
+            logger.info(
+                "Fetched Shazam meta: %s by %s", self.title, self.artist,
+            )
+            return bool(self.title)
+        except Exception as e:
+            logger.error("Error fetching Shazam meta: %s", e, exc_info=True)
+            return False
+
+    async def _final_url(self, session, url):
+        async with session.get(url, headers=_SHAZAM_HEADERS, allow_redirects=True) as resp:
+            return str(resp.url)
+
+    async def _fetch_json(self, session, track_id):
+        url = (
+            "https://www.shazam.com/discovery/v5/en-US/US/web/-/track/"
+            f"{track_id}?shazamapiversion=v3&video=v3"
+        )
+        async with session.get(url, headers=_SHAZAM_HEADERS) as resp:
+            if resp.status != 200:
+                logger.warning("Shazam track JSON %s for %s", resp.status, track_id)
+                return None
+            return await resp.json(content_type=None)
+
+    def _apply_json(self, data):
+        title = (data.get("title") or "").strip()
+        if not title:
+            return False
+        self.title = title
+        self.artist = (data.get("subtitle") or "").strip() or None
+        images = data.get("images") or {}
+        self.artwork_url = images.get("coverarthq") or images.get("coverart")
+        self.album = _shazam_album(data)
+        self.preview_url = _shazam_preview(data)
+        self.type = "song"
+        return True
+
+    async def _fill_duration(self, session, data):
+        apple_id = _shazam_apple_id(data)
+        if not apple_id:
+            return
+        url = f"https://itunes.apple.com/lookup?id={apple_id}"
+        try:
+            async with session.get(url, headers=_SHAZAM_HEADERS) as resp:
+                if resp.status != 200:
+                    return
+                payload = await resp.json(content_type=None)
+        except Exception as e:
+            logger.warning("Shazam iTunes duration lookup failed: %s", e)
+            return
+        for result in payload.get("results") or []:
+            if result.get("wrapperType") == "track" and result.get("kind") == "song":
+                ms = result.get("trackTimeMillis")
+                if ms:
+                    self.duration = float(ms) / 1000.0
+                if not self.preview_url and result.get("previewUrl"):
+                    self.preview_url = result["previewUrl"]
+                if not self.album and result.get("collectionName"):
+                    self.album = result["collectionName"]
+                break
+
+    async def _fetch_og(self, session, page_url):
+        headers = dict(_SHAZAM_HEADERS)
+        headers["Accept"] = "text/html,application/xhtml+xml"
+        async with session.get(page_url, headers=headers) as resp:
+            if resp.status != 200:
+                logger.warning("Shazam page %s for %s", resp.status, page_url)
+                return False
+            html = await resp.text()
+        soup = BeautifulSoup(html, "html.parser")
+        if (
+            not self._apply_jsonld(soup)
+            and not self._apply_og_title(soup)
+            and not self._apply_page_header(soup)
+            and not self._apply_fragment()
+        ):
+            return False
+        self._apply_og_image(soup)
+        self._apply_track_length()
+        self.type = "song"
+        return bool(self.title)
+
+    def _apply_jsonld(self, soup):
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.get_text() or "")
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(data, dict) or data.get("@type") != "MusicRecording":
+                continue
+            title = (data.get("name") or "").strip()
+            if not title:
+                continue
+            self.title = title
+            self.artist = _shazam_person_name(data.get("byArtist"))
+            album = data.get("inAlbum") or {}
+            if isinstance(album, dict) and album.get("name"):
+                self.album = album["name"].strip() or None
+            duration = _iso_duration_seconds(data.get("duration"))
+            if duration:
+                self.duration = duration
+            thumb = data.get("thumbnailUrl") or data.get("thumbnail")
+            if isinstance(thumb, str) and thumb.startswith("http"):
+                self.artwork_url = thumb
+            return True
+        return False
+
+    def _apply_og_title(self, soup):
+        og_title = soup.find("meta", property="og:title")
+        if not og_title or not og_title.get("content"):
+            return False
+        text = og_title["content"]
+        text = re.sub(
+            r"\s*[|–-]\s*Shazam.*$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(r":\s*Song Lyrics.*$", "", text, flags=re.IGNORECASE).strip()
+        by_parts = re.split(r"\s+by\s+", text, maxsplit=1, flags=re.IGNORECASE)
+        if len(by_parts) == 2:
+            self.title = by_parts[0].strip()
+            self.artist = by_parts[1].strip() or None
+        else:
+            parts = text.rsplit(" - ", 1)
+            self.title = parts[0].strip()
+            if len(parts) > 1:
+                self.artist = parts[1].strip() or None
+        return bool(self.title) and self.title.lower() != "shazam"
+
+    def _apply_page_header(self, soup):
+        """Title and artist from the track header when share tags are missing."""
+        title_el = soup.find(
+            class_=lambda value: _has_class_prefix(value, "NewTrackPageHeader_trackTitle"),
+        )
+        title = title_el.get_text(" ", strip=True) if title_el else ""
+        if not title or title.lower() == "shazam":
+            return False
+        artist_el = soup.find(
+            class_=lambda value: _has_class_prefix(
+                value, "TrackPageArtistLink_artistNameText",
+            ),
+        )
+        self.title = title
+        if artist_el:
+            self.artist = artist_el.get_text(" ", strip=True) or None
+        if not self.artwork_url:
+            cover = soup.find(
+                class_=lambda value: _has_class_prefix(
+                    value, "NewTrackPageHeader_trackCover",
+                ),
+            )
+            img = cover.find("img") if cover else None
+            src = ""
+            if img:
+                src = (img.get("src") or "").strip()
+                if not src.startswith("http"):
+                    srcset = (img.get("srcset") or "").strip()
+                    src = srcset.split()[0] if srcset else ""
+            if src.startswith("http"):
+                self.artwork_url = src
+        return True
+
+    def _apply_fragment(self):
+        """Shazam module links put title and artist in the URL hash."""
+        fragment = urllib.parse.urlparse(self.url or "").fragment
+        if not fragment:
+            return False
+        try:
+            data = json.loads(urllib.parse.unquote(fragment))
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        title = (data.get("title") or "").strip()
+        if not title or title.lower() == "shazam":
+            return False
+        self.title = title
+        artist = (data.get("artist") or "").strip()
+        if artist:
+            self.artist = artist
+        return True
+
+    def _apply_track_length(self):
+        if self.duration:
+            return
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.url or "").query)
+        raw = (query.get("trackLength") or [None])[0]
+        if not raw:
+            return
+        try:
+            millis = float(raw)
+        except (TypeError, ValueError):
+            return
+        if millis > 1000:
+            self.duration = millis / 1000.0
+
+    def _apply_og_image(self, soup):
+        if self.artwork_url:
+            return
+        og_image = soup.find("meta", property="og:image")
+        if og_image and og_image.get("content"):
+            self.artwork_url = og_image["content"]
+
+
 class AppleMusicMetadata:
     """Handle Apple Music metadata extraction and iTunes search."""
     def __init__(self, url):
@@ -867,6 +1345,8 @@ class AppleMusicMetadata:
                 tid = track.get("trackId")
                 title = track.get("trackName", "") or ""
                 artist = track.get("artistName", "") or ""
+                if looks_like_type_beat(title):
+                    continue
                 key = (title.strip().lower(), artist.strip().lower())
                 if tid is not None:
                     if tid in seen_ids:
@@ -1141,8 +1621,8 @@ class SpotifyCollection:
 
 
 class TrackMetadata:
-    """Unified entry point for turning any user input (Spotify link, Apple Music
-    link, or a plain search query) into normalised track metadata.
+    """Unified entry point for turning any user input (Spotify, Apple Music,
+    Shazam, or a plain search query) into normalised track metadata.
 
     Always returns a TrackMetadata instance. On failure the instance has
     ``title = None`` so callers can simply check ``if not metadata.title``.
@@ -1215,6 +1695,15 @@ class TrackMetadata:
                 logger.error("Apple Music metadata extraction failed")
             return meta
 
+        # SHAZAM LINK
+        if is_shazam_url(text):
+            source = ShazamMetadata(text)
+            if await source.fetch():
+                meta._copy_from(source, url=text)
+            else:
+                logger.error("Shazam metadata extraction failed")
+            return meta
+
         # PLAIN TEXT SEARCH QUERY
         query = text
         if len(query) < 3:
@@ -1229,19 +1718,25 @@ class TrackMetadata:
 
         # Smart title/artist guess, then retry iTunes with both orientations.
         title, artist = guess_title_artist(query)
-        for variant in (
+        core_query, descriptor = split_version_descriptor(query)
+        core_title, core_artist = guess_title_artist(core_query)
+        for variant in dict.fromkeys((
             f"{title} {artist}".strip(),
             f"{artist} {title}".strip(),
             query,
-        ):
+            f"{core_title} {core_artist}".strip(),
+            core_query,
+        )):
             if not variant:
                 continue
             source = await AppleMusicMetadata.search_by_query(variant)
             if source:
-                # Keep only if still relevant to the *original* query.
                 if score_query_coverage(query, source.title, source.artist) >= 55:
                     meta._copy_from(source, url=None)
                     meta.search_query = query
+                    if descriptor and not split_version_descriptor(meta.title or "")[1]:
+                        meta.title = _with_descriptor(meta.title, descriptor)
+                        meta.id = f"{meta.id or ''}-{abs(hash(descriptor.lower()))}"
                     return meta
 
         meta.title = title or query

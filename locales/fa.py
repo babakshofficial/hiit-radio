@@ -10,7 +10,9 @@ STRINGS = {
     "platform_youtube": "یوتیوب",
     "platform_soundcloud": "ساندکلاود",
     "platform_deezer": "دیزر",
+    "platform_shazam": "شازم",
     "platform_cache": "کش",
+    "platform_community": "جامعه",
 
     # --- download buttons ---
     "btn_redownload": "🔄 دانلود مجدد: {label}",
@@ -23,14 +25,48 @@ STRINGS = {
         "سلام {name}! 🎶\n\n"
         "به HiiT Radio خوش اومدی — ربات دانلود موزیک بدون محدودیت!\n\n"
         "فقط کافیه لینک آهنگ، آلبوم یا پلی‌لیست رو بفرستی "
-        "(اسپاتیفای · اپل موزیک · دیزر · یوتیوب · ساندکلاود) "
+        "(اسپاتیفای · اپل موزیک · دیزر · شازم · یوتیوب · ساندکلاود) "
         "یا اسم آهنگ رو بنویسی — بقیه‌اش با من.\n\n"
         "از دکمه‌های زیر شروع کن 👇"
     ),
+    # --- slash command menu (Telegram Menu button) ---
+    "cmd_start": "باز کردن منوی اصلی",
+    "cmd_search": "جستجوی آهنگ",
+    "cmd_artist": "مرور هنرمند",
+    "cmd_follow": "دنبال کردن هنرمند",
+    "cmd_following": "هنرمندان دنبال‌شده",
+    "cmd_history": "تاریخچه دانلود",
+    "cmd_liked": "علاقه‌مندی‌ها",
+    "cmd_top": "محبوب‌ترین‌ها",
+    "cmd_discover": "پیشنهاد شخصی",
+    "cmd_quality": "کیفیت صدا",
+    "cmd_premium": "وضعیت پریمیوم",
+    "cmd_invite": "دعوت دوست",
+    "cmd_submit": "ارسال آهنگ خودت",
+    "cmd_uploads": "آهنگ‌های ارسالی تو",
+    "cmd_support": "پشتیبانی",
+    "cmd_lang": "تغییر زبان",
+    "cmd_help": "راهنمای ربات",
+    "cmd_aboutme": "درباره HiiT Radio",
+    "cmd_stop": "لغو دانلود جاری",
+    "cmd_admin": "پنل مدیریت",
+    "cmd_stats": "آمار ربات",
+    "cmd_report": "داشبورد",
+    "cmd_reports": "گزارش‌های کاربران",
+    "cmd_users": "لیست کاربران",
+    "cmd_user": "جزئیات کاربر",
+    "cmd_export": "خروجی پایگاه داده",
+    "cmd_cookies": "وضعیت کوکی یوتیوب",
+    "cmd_creds": "وضعیت اعتبارنامه‌ها",
+    "cmd_broadcast": "پیام همگانی",
+    "cmd_grant": "گرنت پریمیوم",
+    "cmd_topup": "شارژ سهمیه دانلود",
+    "cmd_supportend": "پایان گفتگوی پشتیبانی",
+
     "help_text": (
         "چطور استفاده کنم؟\n\n"
         "۱. لینک آهنگ، آلبوم یا پلی‌لیست بفرست\n"
-        "   (اسپاتیفای · اپل موزیک · دیزر · یوتیوب · ساندکلاود)\n"
+        "   (اسپاتیفای · اپل موزیک · دیزر · شازم · یوتیوب · ساندکلاود)\n"
         "۲. یا اسم آهنگ و هنرمند رو بنویس\n"
         "۳. از دکمه‌های زیر برای جستجو، هنرمند، کیفیت و بقیه استفاده کن\n"
         "۴. یا اینلاین: {bot_inline} نام آهنگ — توی هر چتی\n\n"
@@ -45,7 +81,7 @@ STRINGS = {
         "📻 کانال: {channel}{developer_line}\n"
         "\n"
         "چی کار می‌کنه؟\n"
-        "• لینک اسپاتیفای / اپل / دیزر / یوتیوب / ساندکلاود\n"
+        "• لینک اسپاتیفای / اپل / دیزر / شازم / یوتیوب / ساندکلاود\n"
         "• جستجو و مرور هنرمند از دکمه‌های منو\n"
         "• تنظیم کیفیت صدا از منو\n"
         "• پیشنهاد شخصی از دکمه پیشنهاد\n"
@@ -158,6 +194,10 @@ STRINGS = {
     ),
     "send_failed": "ارسال آهنگ ممکن نشد — لطفاً دوباره تلاش کن 🙏",
     "download_not_found": "نسخه کامل پیدا نشد — شاید با اسم دیگه‌ای جستجو کنی بهتر بشه.",
+    "download_not_available": (
+        "این آهنگ هنوز در منابع ما نیست. اگر لینک یوتیوب یا ساندکلود داری، مستقیم بفرست."
+    ),
+    "download_fail_network": "مشکل اتصال — لطفاً یک دقیقه دیگر دوباره امتحان کن.",
     "download_fail_bot_check": (
         "الان دانلود ممکن نشد — یه کم دیگه دوباره امتحان کن یا اسم دیگه‌ای بفرست."
     ),
@@ -437,6 +477,9 @@ STRINGS = {
     "admin_channelid": "🆔 شناسه کانال",
     "admin_grant": "➕ گرنت",
     "admin_topup": "💰 شارژ سهمیه",
+    "admin_user_music": "🎵 موسیقی کاربران",
+    "menu_submit_music": "📤 ارسال آهنگ",
+    "menu_my_submissions": "📋 آپلودهای من",
     "admin_broadcast_usage": "نحوه استفاده: /broadcast <پیام>",
     "admin_grant_usage": "نحوه استفاده: /grant <user_id> <premium|unlimited> <days>",
     "admin_topup_usage": "نحوه استفاده: /topup <user_id> [amount]",
@@ -531,6 +574,20 @@ STRINGS = {
     "changelog_busy": "همین الان یک ارسال تغییر‌لاگ در حال اجراست.",
     "changelog_forbidden": "فقط ادمین می‌تواند از این استفاده کند.",
     "changelog_btn_manual_new": "✍️ تغییر‌لاگ جدید",
+    "changelog_btn_skipped_list": "⏭ تغییرلاگ‌های ردشده ({count})",
+    "changelog_skipped_header": "تغییرلاگ‌های ردشده ({count}) — صفحه {page}/{pages}",
+    "changelog_skipped_empty": "تغییرلاگ ردشده‌ای وجود ندارد.",
+    "changelog_skipped_line": "#{id} · {date} · {langs} · {preview}",
+    "changelog_skipped_detail": "تغییرلاگ ردشده #{id}\nتاریخ: {date}\nوضعیت: {status}\nزبان‌ها: {langs}\n\n{notes}",
+    "changelog_btn_skipped_send": "📣 ارسال",
+    "changelog_btn_skipped_delete": "🗑 حذف",
+    "changelog_btn_skipped_back": "⬅️ بازگشت",
+    "changelog_skipped_deleted": "تغییرلاگ ردشده حذف شد.",
+    "changelog_skipped_not_found": "تغییرلاگ ردشده پیدا نشد.",
+    "changelog_skipped_langs_all": "همه زبان‌ها",
+    "changelog_skipped_status_skipped": "ردشده",
+    "changelog_skipped_status_partial": "ارسال نیمه‌کاره",
+    "changelog_skipped_reminder": "📌 {count} تغییرلاگ ردشده دارید. برای ارسال، از مدیریت ← تغییرلاگ استفاده کنید.",
     "changelog_manual_intro": (
         "یادداشتی در CHANGELOG_PENDING.md نیست.\n"
         "«تغییر‌لاگ جدید» را بزن، یا در فایل repo یادداشت بگذار و ری‌استارت کن."
@@ -543,6 +600,68 @@ STRINGS = {
     "changelog_manual_empty": "پیام خالی بود — متن تغییر‌لاگ را بفرست.",
     "changelog_pending_admin_header": "تغییر‌لاگ در صف (از CHANGELOG_PENDING.md):",
 
+    # --- user music submissions ---
+    "usub_prompt_audio": "فایل صوتی یا MP3 را بفرست.",
+    "usub_prompt_title": "نام آهنگ؟",
+    "usub_prompt_artist": "نام هنرمند؟",
+    "usub_prompt_genre": "ژانر را انتخاب کن:",
+    "usub_prompt_genre_other": "ژانر را بنویس:",
+    "usub_prompt_artwork": "کاور (عکس یا فایل تصویر) را بفرست.",
+    "usub_submitted": "✅ برای بررسی ثبت شد: {title} — {artist}",
+    "usub_quota_max_pending": "۳ آهنگ در صف بررسی داری. یکی را لغو کن یا منتظر ادمین بمان.",
+    "usub_quota_daily": "روزی حداکثر ۳ ارسال. فردا دوباره امتحان کن.",
+    "usub_bad_audio": "این فایل قابل استفاده نبود. MP3 یا فرمت صوتی دیگر بفرست.",
+    "usub_audio_too_large": "فایل خیلی بزرگ است (حداکثر {max_mb} مگابایت).",
+    "usub_bad_artwork": "عکس کاور بفرست.",
+    "usub_title_invalid": "نام آهنگ باید ۱ تا ۲۰۰ کاراکتر باشد.",
+    "usub_artist_invalid": "نام هنرمند باید ۱ تا ۲۰۰ کاراکتر باشد.",
+    "usub_genre_invalid": "ژانر باید ۱ تا ۸۰ کاراکتر باشد.",
+    "usub_session_expired": "زمان آپلود تمام شد — از منو دوباره شروع کن.",
+    "usub_not_found": "ثبت پیدا نشد.",
+    "usub_withdrawn": "لغو شد — بررسی نمی‌شود.",
+    "usub_no_artwork": "کاوری ذخیره نشده.",
+    "usub_my_header": "📋 آهنگ‌های ارسالی تو",
+    "usub_my_empty": "هنوز چیزی نیست.",
+    "usub_my_line": "• {title} — {artist} ({status})",
+    "usub_detail": "🎵 {title}\n👤 {artist}\n🎼 {genre}\n📌 {status}",
+    "usub_btn_submit": "📤 ارسال دیگر",
+    "usub_btn_my_list": "📋 آپلودهای من",
+    "usub_btn_withdraw": "🗑 لغو",
+    "usub_status_pending": "در انتظار بررسی",
+    "usub_status_approved": "تأیید شده",
+    "usub_status_rejected": "رد شده",
+    "usub_status_withdrawn": "لغو شده",
+    "usub_genre_pop": "پاپ",
+    "usub_genre_rock": "راک",
+    "usub_genre_hiphop": "هیپ‌هاپ",
+    "usub_genre_electronic": "الکترونیک",
+    "usub_genre_classical": "کلاسیک",
+    "usub_genre_jazz": "جاز",
+    "usub_genre_folk": "فولک",
+    "usub_genre_metal": "متال",
+    "usub_genre_rnb": "آراندبی",
+    "usub_genre_other": "دیگر",
+    "usub_admin_new": "🎵 ارسال جدید #{id}\n{title} — {artist}\nاز {user_id} {username}",
+    "usub_admin_review": "بررسی",
+    "usub_admin_queue_header": "موسیقی در انتظار ({count})",
+    "usub_admin_queue_empty": "صف خالی است.",
+    "usub_admin_queue_line": "#{id} {title} — {artist} ({user})",
+    "usub_admin_detail": "ارسال #{id}\n{title} — {artist}\nژانر: {genre}\nوضعیت: {status}\nکاربر: {user_id} ({username})",
+    "usub_admin_listen": "▶️ پخش",
+    "usub_admin_artwork": "🖼 کاور",
+    "usub_admin_approve": "✅ تأیید",
+    "usub_admin_reject": "❌ رد",
+    "usub_admin_back_queue": "📋 صف",
+    "usub_admin_approved_ok": "تأیید شد #{id} — در جستجو فعال است.",
+    "usub_admin_reject_prompt": "دلیل را انتخاب کن یا پیام کوتاه بفرست:",
+    "usub_admin_rejected_ok": "رد شد #{id}.",
+    "usub_reject_low_quality": "کیفیت پایین",
+    "usub_reject_rights": "حقوق / کپی‌رایت",
+    "usub_reject_metadata": "اطلاعات اشتباه",
+    "usub_approved_user": "✅ آهنگ «{title}» تأیید شد — همه می‌توانند جستجو و دانلود کنند.",
+    "usub_approved_user_bonus": "✅ آهنگ «{title}» تأیید شد.\n+{bonus} دانلود اضافه برای امروز ({used}/{limit}).",
+    "usub_rejected_user": "ارسال «{title}» تأیید نشد.\nدلیل: {reason}",
+
     # --- language selection ---
     "lang_choose": "🌐 زبان ربات را انتخاب کن:",
     "lang_set": "✅ زبان روی {lang_name} تنظیم شد.",
@@ -552,4 +671,141 @@ STRINGS = {
     "lang_name_es": "Español",
     "lang_name_ru": "Русский",
     "lang_name_it": "Italiano",
+
+    # --- admin ops ---
+    "creds_header": "وضعیت اعتبارنامه‌ها:",
+    "creds_yt_section": "▶ یوتیوب (دانلود صدا — همه لینک‌ها)",
+    "creds_yt_browser": "  ✓ مرورگر: YTDLP_COOKIES_FROM_BROWSER={browser}",
+    "creds_yt_live_ok": "  ✓ تست زنده: {detail}",
+    "creds_yt_live_fail": "  ✗ تست زنده: {detail}",
+    "creds_yt_browser_hint": "    → در Chrome وارد youtube.com شو؛ secretstorage نصب باشد",
+    "creds_yt_cookies_path": "  ✓ cookies.txt: {path}",
+    "creds_yt_expired_hint": "    → کوکی منقضی شده — از PC export کن یا /cookies بفرست",
+    "creds_yt_cookies_incomplete": "  ✗ cookies.txt هست ولی نشست یوتیوب کامل نیست",
+    "creds_yt_cookies_incomplete_hint": (
+        "    → در مرورگر وارد youtube.com شو و کوکی را دوباره export کن\n"
+        "    → یا YTDLP_COOKIES_FROM_BROWSER=chrome و YTDLP_AUTO_REFRESH_COOKIES=1"
+    ),
+    "creds_yt_cookies_missing": "  ✗ cookies.txt پیدا نشد: {path}",
+    "creds_yt_cookies_missing_hint": "    → فایل را از PC کپی کن یا در مرورگر export کن",
+    "creds_spotify_section": "▶ اسپاتیفای API (فقط متادیتا — دانلود از یوتیوب)",
+    "creds_spotify_ok": "  ✓ SPOTIFY_CLIENT_ID / SECRET در .env هستند",
+    "creds_spotify_embed_note": "  (در صورت خطای ۴۰۳، از embed برای ترک/آلبوم/پلی‌لیست استفاده می‌شود)",
+    "creds_spotify_missing": "  ✗ CLIENT_ID/SECRET ناقص — برای لینک اسپاتیفای از embed استفاده می‌شود",
+    "creds_result_ok": "نتیجه: یوتیوب آمادهٔ دانلود است.",
+    "creds_result_fail": "نتیجه: یوتیوب هنوز آماده نیست — cookies.txt را تنظیم کن.",
+    "admin_stats_users": "کاربران: {count}",
+    "admin_stats_downloads": "دانلودها: {count}",
+    "admin_stats_cache_rate": "نرخ برخورد کش: {pct} ({cached}/{total})",
+    "admin_stats_top_artists": "پربازدیدترین هنرمندان:",
+    "admin_stats_top_songs": "پربازدیدترین آهنگ‌ها:",
+    "admin_stats_platforms": "پلتفرم‌ها:",
+    "admin_stats_skipped_changelog": "تغییرلاگ‌های ردشده (DB): {count}",
+    "admin_stats_error_reports": "گزارش‌های کاربر (ثبت‌شده): {count}",
+    "admin_stats_footer": "گزارش کامل: /report  ·  گزارش کاربران: /reports",
+    "admin_channelid_in_channel": "شناسه چت: `{chat_id}`\n\nدر .env:\nVIP_LOG_CHANNEL_ID={chat_id}",
+    "admin_channelid_chat_id": "شناسه چت: `{chat_id}`",
+    "admin_channelid_type": "نوع: {chat_type}",
+    "admin_channelid_title": "عنوان: {title}",
+    "admin_channelid_username": "یوزرنیم: @{username}",
+    "admin_channelid_env_hint": "\nدر .env قرار بده:\nVIP_LOG_CHANNEL_ID={chat_id}",
+    "admin_vip_startup_broken": (
+        "⚠️ لاگ VIP کار نمی‌کند.\n"
+        "ربات را ادمین کانال خصوصی کن، VIP_LOG_CHANNEL_ID را در .env بگذار، "
+        "و /viplogtest را بزن."
+    ),
+    "admin_vip_env_missing": "VIP_LOG_CHANNEL_ID در .env تنظیم نشده",
+    "admin_vip_not_admin": "ربات ادمین کانال نیست",
+    "admin_vip_no_post": "ربات اجازه ارسال پیام در کانال را ندارد",
+    "admin_vip_not_member": "ربات عضو چت نیست (وضعیت: {status})",
+    "admin_vip_test_title": "تست لاگ VIP",
+    "admin_vip_test_channel": "کانال: {title}",
+    "admin_vip_test_id": "شناسه: {chat_id}",
+    "admin_vip_send_failed": "ارسال پیام ناموفق بود — لاگ سرور را بررسی کن",
+    "admin_vip_test_ok": "پیام تست به {title} ارسال شد (id={chat_id})",
+    "admin_vip_forbidden_hint": (
+        "{error}. ربات را ادمین کانال کن با اجازه ارسال پیام. "
+        "شناسه باید عددی باشد (مثلاً -1001234567890)."
+    ),
+    "admin_vip_status_disabled": (
+        "لاگ VIP غیرفعال است.\n\n"
+        "۱. ربات را ادمین کانال خصوصی کن (با اجازه ارسال پیام)\n"
+        "۲. در کانال /channelid@HiiTRadioBot بزن یا یک پست را فوروارد کن\n"
+        "۳. در .env بگذار:\nVIP_LOG_CHANNEL_ID=-100xxxxxxxxxx\n"
+        "۴. ربات را ری‌استارت کن\n\n"
+        "برای تست: /viplogtest"
+    ),
+    "admin_vip_status_enabled": (
+        "VIP_LOG_CHANNEL_ID={channel}\n"
+        "شناسه پردازش‌شده: {parsed}\n\n"
+        "برای تست ارسال: /viplogtest"
+    ),
+    "vip_log_user_fmt": "شناسه={user_id}",
+    "vip_evt_startup": "راه‌اندازی ربات",
+    "vip_evt_shutdown": "خاموش شدن ربات",
+    "vip_evt_gate_denied": "مسدود — عضو کانال نیست",
+    "vip_evt_rate_limit": "محدودیت نرخ",
+    "vip_evt_dl_start": "شروع دانلود",
+    "vip_evt_cache_hit": "برخورد کش",
+    "vip_evt_request": "درخواست",
+    "vip_evt_dl_ok": "دانلود موفق",
+    "vip_evt_dl_fail": "دانلود ناموفق",
+    "vip_evt_error": "خطا",
+    "vip_evt_user_report": "گزارش خطا — کاربر",
+    "vip_evt_pl_start": "شروع پلی‌لیست",
+    "vip_evt_pl_track": "پلی‌لیست — آهنگ",
+    "vip_evt_pl_done": "پایان پلی‌لیست",
+    "vip_evt_broadcast": "پیام همگانی",
+    "vip_evt_cookie_health": "سلامت کوکی یوتیوب",
+    "vip_evt_button": "دکمه",
+    "vip_evt_inline": "اینلاین",
+    "vip_evt_command": "دستور",
+    "vip_evt_message": "پیام",
+    "vip_evt_channel_post": "پست کانال",
+    "vip_evt_update": "به‌روزرسانی",
+    "vip_fld_user": "کاربر",
+    "vip_fld_chat": "چت",
+    "vip_fld_data": "داده",
+    "vip_fld_search": "جستجو",
+    "vip_fld_text": "متن",
+    "vip_fld_kind": "نوع",
+    "vip_fld_gate": "گیت",
+    "vip_fld_vip_log": "لاگ VIP",
+    "vip_fld_youtube": "یوتیوب",
+    "vip_fld_wait": "انتظار",
+    "vip_fld_song": "آهنگ",
+    "vip_fld_artist": "هنرمند",
+    "vip_fld_source": "منبع",
+    "vip_fld_platform": "پلتفرم",
+    "vip_fld_cached": "کش",
+    "vip_fld_playlist": "پلی‌لیست",
+    "vip_fld_reason": "دلیل",
+    "vip_fld_message": "پیام",
+    "vip_fld_detail": "جزئیات",
+    "vip_fld_error_kind": "نوع",
+    "vip_fld_error_code": "کد",
+    "vip_fld_collection": "مجموعه",
+    "vip_fld_count": "تعداد",
+    "vip_fld_progress": "پیشرفت",
+    "vip_fld_status": "وضعیت",
+    "vip_fld_sent": "ارسال‌شده",
+    "vip_fld_failed": "ناموفق",
+    "vip_fld_stop_reason": "دلیل توقف",
+    "vip_fld_health": "وضعیت",
+    "vip_fld_channel": "کانال",
+    "vip_val_yes": "بله",
+    "vip_val_no": "خیر",
+    "vip_val_healthy": "سالم",
+    "vip_val_unhealthy": "ناسالم",
+    "vip_cookie_alert_detail": (
+        "کوکی یوتیوب نامعتبر یا منقضی است. cookies.txt را با نشست لاگین‌شده تازه "
+        "اکسپورت کن (SID / __Secure-*PSID غیرخالی)."
+    ),
+    "vip_fld_removed": "حذف‌شده",
+    "vip_evt_job_cancel": "لغو کار کاربر",
+    "vip_evt_cache_sweep": "پاکسازی کش",
+    "vip_evt_cache_sweep_fallback": "پاکسازی کش (fallback)",
+    "vip_evt_cache_sweep_startup": "پاکسازی کش (startup)",
+    "vip_evt_progress": "وضعیت",
+    "vip_fld_label": "برچسب",
 }

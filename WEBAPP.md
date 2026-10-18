@@ -13,10 +13,14 @@ Persian RTL web app and Telegram Mini App sharing the bot’s users, quotas, and
 Set in root `.env`:
 
 - `WEBAPP_URL` — URL of the Next.js app (Mini App URL). Local dev: `http://127.0.0.1:3000`
+- `MENU_BUTTON_MODE` — `commands` (default slash menu) or `webapp` (Mini App button; needs HTTPS `WEBAPP_URL`)
+- `DATABASE_PATH` — SQLite file (default `hiit_radio.db`); shared by bot and API
 - `API_PUBLIC_URL` — public URL of FastAPI for signed MP3 links. Leave empty for same-origin `/backend`
-- `JWT_SECRET` — dedicated secret in production
+- `JWT_SECRET` — dedicated secret in production (`API_STRICT_SECRETS=1` enforces length)
 - `CORS_ORIGINS` — include your web origin
 - `BOT_USERNAME` — without `@` (Login Widget + invite links)
+
+Community uploads (`/submit`, `/uploads`) are bot-only; search hits approved tracks in the same DB.
 
 Frontend: copy `web/.env.local.example` → `web/.env.local`. Default `NEXT_PUBLIC_API_URL=/backend` (Next.js rewrites that path to FastAPI on port 8000).
 
@@ -56,8 +60,8 @@ Restart the bot/API after changing `.env`.
 
 ## BotFather / Telegram setup
 
-1. **Mini App:** BotFather → Bot Settings → Menu Button / Configure Mini App → URL = `WEBAPP_URL`
-2. On bot startup, if `WEBAPP_URL` is set, the bot also calls `setChatMenuButton` automatically
+1. **Menu button (default):** `MENU_BUTTON_MODE=commands` — the bot registers localized slash commands on startup (`setMyCommands` + Menu button = commands list). Use `/lang` to refresh descriptions in your chosen language.
+2. **Mini App menu button:** set `MENU_BUTTON_MODE=webapp` and a public HTTPS `WEBAPP_URL`. BotFather → Bot Settings → Menu Button / Configure Mini App → URL = `WEBAPP_URL`. On startup the bot calls `setChatMenuButton` for the web app (replaces the commands menu button; commands still work via `/`).
 3. **Login Widget (browser):** BotFather → Bot Settings → Domain → add your web domain (hostname only, no `https://`)
 4. Stars checkout works inside the Mini App via `openInvoice`; on the standalone web app, premium deep-links into the bot
 
