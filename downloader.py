@@ -319,11 +319,12 @@ def _coverage_query(query, artist):
 
 def _token_title_similarity(expected, actual):
     """Fraction of significant title words found in the candidate (0-100)."""
-    words = [w for w in re.findall(r'\w+', (expected or "").lower()) if len(w) > 3]
+    expected_norm = re.sub(r'["\'’‘`´ʻʼ“”]', '', (expected or "")).lower()
+    words = [w for w in re.findall(r'\w+', expected_norm) if len(w) > 3]
     if not words:
         return 0.0
-    actual_lower = (actual or "").lower()
-    matched = sum(1 for w in words if w in actual_lower)
+    actual_norm = re.sub(r'["\'’‘`´ʻʼ“”]', '', (actual or "")).lower()
+    matched = sum(1 for w in words if w in actual_norm)
     return (matched / len(words)) * 100.0
 
 
@@ -400,8 +401,9 @@ def _significant_title_tokens(title):
         "the", "a", "an", "and", "of", "or", "to", "feat", "ft", "featuring",
         "with", "vs", "official", "audio", "video", "lyrics", "music",
     }
+    cleaned = re.sub(r'["\'’‘`´ʻʼ“”]', '', (title or "")).lower()
     return [
-        w for w in re.findall(r"[a-z0-9]+", (title or "").lower())
+        w for w in re.findall(r"[a-z0-9]+", cleaned)
         if len(w) >= 2 and w not in stop
     ]
 
@@ -411,11 +413,12 @@ def _title_tokens_present(expected_title, haystack, min_ratio=0.7):
     tokens = _significant_title_tokens(expected_title)
     if not tokens:
         return True
-    hay = (haystack or "").lower()
+    hay = re.sub(r'["\'’‘`´ʻʼ“”]', '', (haystack or "")).lower()
     # Short titles (Echo, Stay): require whole-word presence.
     if len(tokens) == 1 and len(tokens[0]) <= 5:
         return bool(re.search(rf"\b{re.escape(tokens[0])}\b", hay))
-    hits = sum(1 for t in tokens if t in hay)
+    hay_tokens = set(re.findall(r"[a-z0-9]+", hay))
+    hits = sum(1 for t in tokens if t in hay_tokens or t in hay)
     return (hits / len(tokens)) >= min_ratio
 
 
@@ -426,12 +429,14 @@ def _uploader_artist_match(expected_artist, uploader):
     up = (uploader or "").lower()
     if not up:
         return 0.0
+    _norm = lambda s: re.sub(r'["\'’‘`´ʻʼ“”]', '', (s or "")).lower()
+    up_norm = _norm(up)
     scores = [
-        difflib.SequenceMatcher(None, up, expected_artist.lower()).ratio() * 100,
+        difflib.SequenceMatcher(None, up_norm, _norm(expected_artist)).ratio() * 100,
     ]
     for name in (_primary_artist(expected_artist), _lead_artist(expected_artist)):
         if name:
-            scores.append(difflib.SequenceMatcher(None, up, name.lower()).ratio() * 100)
+            scores.append(difflib.SequenceMatcher(None, up_norm, _norm(name)).ratio() * 100)
     return max(scores)
 
 
@@ -443,19 +448,21 @@ def _title_artist_credit(raw_title, expected_artist):
     """
     if not (raw_title or "").strip() or not (expected_artist or "").strip():
         return 0.0
-    parts = re.split(r"\s*[-–]\s*", raw_title, maxsplit=1)
+    parts = re.split(r"\s*[-–—]\s*", raw_title, maxsplit=1)
     if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
         return 0.0
     left = parts[0].strip()
     expected = expected_artist.strip()
+    _norm = lambda s: re.sub(r'["\'’‘`´ʻʼ“”]', '', (s or "")).lower()
+    left_norm = _norm(left)
     scores = [
-        difflib.SequenceMatcher(None, left.lower(), expected.lower()).ratio() * 100,
+        difflib.SequenceMatcher(None, left_norm, _norm(expected)).ratio() * 100,
     ]
     lead = _lead_artist(expected)
     if lead:
-        scores.append(difflib.SequenceMatcher(None, left.lower(), lead.lower()).ratio() * 100)
+        scores.append(difflib.SequenceMatcher(None, left_norm, _norm(lead)).ratio() * 100)
         scores.append(
-            difflib.SequenceMatcher(None, _lead_artist(left).lower(), lead.lower()).ratio() * 100
+            difflib.SequenceMatcher(None, _norm(_lead_artist(left)), _norm(lead)).ratio() * 100
         )
     return max(scores)
 
@@ -1307,7 +1314,7 @@ class MusicDownloader:
             title = re.sub(r'\s*\([^)]*(?:from|feat\.?|ft\.?)[^)]*\)', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\[[^]]*(?:from|feat\.?|ft\.?)[^]]*\]', '', title, flags=re.IGNORECASE)
             title = re.sub(r'\s*\|.*$', '', title)
-            title = title.replace('"', '').replace("'", '')
+            title = re.sub(r'["\'’‘`´ʻʼ“”]', '', title)
             primary = _primary_artist(artist) if artist else ""
             # YouTube style: "Artist - Song" → keep the song side when left looks like artist.
             parts = re.split(r'\s*[-–]\s*', title, maxsplit=1)
@@ -1354,8 +1361,9 @@ class MusicDownloader:
             raw = video.get("title") or ""
             uploader = clean_artist(video.get("uploader") or video.get("channel") or "")
             scores = [score_query_coverage(coverage_query, raw, uploader)]
-            if " - " in raw:
-                left, right = raw.split(" - ", 1)
+            parts = re.split(r'\s*[-–—]\s*', raw, maxsplit=1)
+            if len(parts) == 2:
+                left, right = parts[0], parts[1]
                 scores.append(score_query_coverage(coverage_query, left, right))
                 scores.append(score_query_coverage(coverage_query, right, left))
             scores.append(
@@ -1501,7 +1509,7 @@ class MusicDownloader:
             )
 
         q_title = search_title(metadata.title)
-        q_artist = (metadata.artist or "").replace('"', '').strip()
+        q_artist = re.sub(r'["\'’‘`´ʻʼ“”]', '', (metadata.artist or "")).strip()
         q_primary = _primary_artist(q_artist) or q_artist
 
         # Prefer Topic / official audio first for catalog tracks — higher chance
