@@ -30,6 +30,8 @@ def main():
         _coverage_query,
         _uploader_artist_match,
         _title_artist_credit,
+        _title_tokens_present,
+        _significant_title_tokens,
     )
     from bot_commands import build_commands
     from locales import SUPPORTED
@@ -95,6 +97,14 @@ def main():
         "Center of the Universe",
         "Deradoorian",
     ) < 80
+    # KI-15: contractions and curly quotes in titles (e.g. "Can't Go Back" / "Can’t Go Back").
+    assert _title_tokens_present("Cant Go Back", "Astrality & James French - Can’t Go Back")
+    assert _title_tokens_present("Can't Go Back", "Astrality & James French - Can’t Go Back")
+    assert _title_tokens_present("Can’t Go Back", "Astrality & James French - Can't Go Back")
+    assert _title_tokens_present("Don't Stop", "Journey - Don't Stop")
+    assert _title_tokens_present("Don’t Stop", "Journey - Dont Stop")
+    assert _significant_title_tokens("Can't Go Back") == ["cant", "go", "back"]
+    assert _significant_title_tokens("Can’t Go Back") == ["cant", "go", "back"]
 
     # KI-12: type-beat spam stays out of nearby suggestions.
     assert looks_like_type_beat(
