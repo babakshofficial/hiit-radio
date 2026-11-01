@@ -42,12 +42,15 @@ def within_rate_limit(user_id, now=None):
 
 async def _extract_clip(source, dest):
     """Write the first seconds of audio as mono WAV; False when there is no audio."""
-    proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-nostdin", "-v", "error", "-y", "-i", source,
-        "-t", str(CLIP_SECONDS), "-vn", "-ac", "1", "-ar", "16000", dest,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-nostdin", "-v", "error", "-y", "-i", source,
+            "-t", str(CLIP_SECONDS), "-vn", "-ac", "1", "-ar", "16000", dest,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except FileNotFoundError as exc:
+        raise RecognitionUnavailable("ffmpeg is not installed") from exc
     try:
         code = await asyncio.wait_for(proc.wait(), timeout=60)
     except asyncio.TimeoutError:

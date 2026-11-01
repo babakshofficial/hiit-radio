@@ -220,6 +220,17 @@ def check_recognition_handles_junk_and_missing_library():
 
     assert asyncio.run(run()) is False
 
+    path = os.environ["PATH"]
+    os.environ["PATH"] = str(Path(WORK) / "empty")
+    try:
+        asyncio.run(run())
+    except song_recognition.RecognitionUnavailable:
+        pass
+    else:
+        raise AssertionError("a missing ffmpeg must report recognition as unavailable")
+    finally:
+        os.environ["PATH"] = path
+
 
 def check_mix_is_opt_in():
     db = fresh_db()
