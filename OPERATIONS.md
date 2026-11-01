@@ -30,6 +30,18 @@
 
 - Secrets (`.env`, `cookies.txt`, `credentials.json`, `hiit_radio.db*`) should be mode 600, and the checkout closed to other users (`chmod -R g-w,o-rwx .`).
 
+## Payments
+
+- A Stars charge and what it delivers are saved in one database transaction.
+- `reconcile_star_transactions` runs hourly and at startup. It compares the last 3 days of Telegram's transaction list with `payments`, and applies anything missed.
+- `/payments` lists charges and `/refund <number>` refunds one. Refunding a gift returns the money to the buyer and removes the gift from whoever redeemed it.
+- `/terms` and `/paysupport` are always available, even to users who haven't joined the required channel.
+
+## Song recognition
+
+- It uses `shazamio`, an unofficial client. If Shazam changes its API, users see "not available" and the rest of the bot keeps working.
+- Clips go to Shazam and aren't kept. Audio files still start the `/submit` flow, so they aren't recognized.
+
 ## YouTube access
 
 - Downloads run without cookies. A configured jar or browser is tried only after YouTube refuses a cookieless attempt (bot check, age or members-only, or no formats).

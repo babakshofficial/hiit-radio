@@ -1,9 +1,11 @@
 import asyncio
+import hashlib
 import fcntl
 import json
 import logging
 import os
 import re
+import tempfile
 import shutil
 import sys
 import time
@@ -70,6 +72,7 @@ from recommendations import (
     recommendation_keyboard,
     resolve_lyrics_ref,
     resolve_track_ref,
+    remember_track_ref,
     resolve_track_ref_full,
 )
 from lyrics_service import fetch_lyrics
@@ -90,6 +93,8 @@ import entitlements
 import jobs
 import messages as msg
 import payments
+import song_recognition
+import weekly_mix
 import referrals
 import reporting as rpt
 import error_report
@@ -192,8 +197,13 @@ def _track_keyboard(user_id, title, artist, *, metadata=None, platform=None, que
     url = None
     album = None
     search_query = None
+    matched_url = None
     if metadata is not None:
         url = getattr(metadata, "url", None) or getattr(metadata, "source_url", None)
+        matched_url = (
+            getattr(metadata, "matched_source_url", None)
+            or getattr(metadata, "source_url", None)
+        )
         album = getattr(metadata, "album", None)
         search_query = getattr(metadata, "search_query", None)
         if query is None:
@@ -207,6 +217,7 @@ def _track_keyboard(user_id, title, artist, *, metadata=None, platform=None, que
         platform=platform,
         album=album,
         search_query=search_query,
+        matched_url=matched_url,
     )
 
 
@@ -559,6 +570,7 @@ _AWAIT_PROMPT_KINDS = {
     "artist": "prompt_artist",
     "follow": "prompt_follow",
     "support": "prompt_support",
+    "paysupport": "prompt_paysupport",
 }
 
 
@@ -626,6 +638,8 @@ async def consume_await_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await follow_command(update, context)
     elif kind == "support":
         await support_command(update, context)
+    elif kind == "paysupport":
+        await _submit_payment_support(update, context, text)
     elif kind == "changelog_edit":
         await changelog.handle_edit_text(update, context)
     elif kind == "changelog_lang_edit":
@@ -656,6 +670,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user and not REQUIRED_CHANNEL:
         referrals.maybe_credit_on_membership(user_manager.database, user.id)
     args = context.args or []
+    if user and args and str(args[0]).startswith("gift_"):
+        if await ensure_access(update, context):
+            text = await payments.redeem_gift(
+                context.bot, user_manager.database, str(args[0])[5:], user.id,
+            )
+            await update.message.reply_text(
+                text, reply_markup=_start_menu_keyboard(user.id),
+            )
+        return
     if args and str(args[0]).lower().startswith("premium"):
         if await ensure_access(update, context):
             snap = entitlements.status_snapshot(
@@ -707,6 +730,10 @@ def _start_menu_keyboard(user_id=None):
             [
                 InlineKeyboardButton(msg.t("menu_premium"), callback_data="menu:premium"),
                 InlineKeyboardButton(msg.t("menu_support"), callback_data="menu:support"),
+            ],
+            [
+                InlineKeyboardButton(msg.t("menu_mix"), callback_data="menu:mix"),
+                InlineKeyboardButton(msg.t("menu_gift"), callback_data="menu:gift"),
             ],
             [
                 InlineKeyboardButton(msg.t("menu_submit_music"), callback_data="menu:submit_music"),
@@ -928,6 +955,273 @@ async def lang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg.start_text(first_name),
             reply_markup=_start_menu_keyboard(user.id),
         )
+
+
+async def gift_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    await _touch_user(update)
+    await update.effective_message.reply_text(
+        msg.t("gift_intro"), reply_markup=_with_back(payments.gift_keyboard()),
+    )
+
+
+async def terms_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Stays reachable before joining the channel: buyers must be able to read it.
+    await _touch_user(update)
+    await update.effective_message.reply_text(
+        msg.t("terms_text"), reply_markup=_back_button(),
+    )
+
+
+def _payment_lines(rows):
+    return "\n".join(
+        f"#{r['id']} · {r['kind']} · {r['amount']}⭐ · {r['status']} · "
+        f"{time.strftime('%Y-%m-%d', time.gmtime(r['created_at']))}"
+        for r in rows
+    )
+
+
+async def _submit_payment_support(update, context, body):
+    user = update.effective_user
+    db = user_manager.database
+    rows = db.list_star_payments(user.id, limit=5)
+    rid = error_report.create_context(
+        db, user,
+        kind="payment", code="paysupport",
+        user_message=body[:1000],
+        detail=_payment_lines(rows) or "no Stars payments on record",
+    )
+    status, _row = await error_report.submit_and_notify(context.bot, db, rid, user)
+    if status == "rate_limited":
+        text = msg.error_report_rate_limited()
+    elif status in ("forbidden", "not_found"):
+        text = msg.payment_failed()
+    else:
+        text = msg.t("paysupport_sent")
+    await update.effective_message.reply_text(text, reply_markup=_back_button())
+
+
+async def paysupport_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Not gated: someone with a payment problem must always be able to reach support.
+    await _touch_user(update)
+    body = " ".join(context.args or []).strip()
+    if body:
+        clear_await_input(context)
+        await _submit_payment_support(update, context, body)
+        return
+    rows = user_manager.database.list_star_payments(update.effective_user.id, limit=5)
+    set_await_input(context, "paysupport")
+    await update.effective_message.reply_text(
+        msg.t("paysupport_intro", payments=_payment_lines(rows) or msg.t("paysupport_none")),
+        reply_markup=_back_button(),
+    )
+
+
+async def payments_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    target = context.args[0] if context.args else None
+    rows = user_manager.database.list_star_payments(target, limit=20)
+    if not rows:
+        await update.message.reply_text("No Telegram Stars payments.")
+        return
+    lines = [
+        f"#{r['id']} · user {r['user_id']} · {r['kind']} · {r['amount']}⭐ · {r['status']} · "
+        f"{time.strftime('%Y-%m-%d', time.gmtime(r['created_at']))}"
+        for r in rows
+    ]
+    await update.message.reply_text(
+        "\n".join(lines) + "\n\nRefund one with /refund <number>."
+    )
+
+
+async def refund_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    arg = context.args[0].lstrip("#") if context.args else ""
+    if not arg.isdigit():
+        await update.message.reply_text("Usage: /refund <payment number>. See /payments.")
+        return
+    payment = user_manager.database.get_payment(int(arg))
+    if not payment or payment["provider"] != "stars":
+        await update.message.reply_text("No Telegram Stars payment with that number.")
+        return
+    if payment["status"] == "refunded":
+        await update.message.reply_text("That payment was already refunded.")
+        return
+    await update.message.reply_text(
+        f"Refund #{payment['id']}: {payment['amount']} Stars to user {payment['user_id']} "
+        f"and remove {payment['kind']}? This can't be undone.",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("Refund", callback_data=f"refund:confirm:{payment['id']}"),
+        ]]),
+    )
+
+
+def _mix_status(user_id):
+    enabled = user_manager.database.get_weekly_mix_enabled(user_id)
+    button = InlineKeyboardButton(
+        msg.t("btn_mix_off" if enabled else "btn_mix_on"),
+        callback_data="mix:off" if enabled else "mix:on",
+    )
+    return (
+        msg.t("mix_status_on" if enabled else "mix_status_off"),
+        _with_back(InlineKeyboardMarkup([[button]])),
+    )
+
+
+async def mix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await ensure_access(update, context):
+        return
+    await _touch_user(update)
+    text, keyboard = _mix_status(update.effective_user.id)
+    await update.effective_message.reply_text(text, reply_markup=keyboard)
+
+
+async def _weekly_mix_job(context: ContextTypes.DEFAULT_TYPE):
+    await weekly_mix.run_due(context.bot, user_manager.database)
+
+
+async def _reconcile_payments_job(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        applied, refunded = await payments.reconcile_star_transactions(
+            context.bot, user_manager.database,
+        )
+    except Exception:
+        logger.exception("Stars reconciliation failed")
+        return
+    if applied or refunded:
+        await log_system(
+            context.bot, "vip_evt_payments_reconciled", applied=applied, refunded=refunded,
+        )
+
+
+def _track_from_names(title, artist):
+    meta = TrackMetadata()
+    meta.title = title
+    meta.artist = artist
+    meta.id = hashlib.sha256(f"{title}|{artist}".encode()).hexdigest()[:16]
+    meta.type = "track"
+    return meta
+
+
+async def _download_named_track(message, user, context, title, artist):
+    """Download a song we only know by name, preferring catalog details if found."""
+    meta = await TrackMetadata.create(f"{artist} {title}".strip(), _ydl_opts_factory)
+    if not meta.title:
+        meta = _track_from_names(title, artist)
+    await _download_and_send(message, user, meta, context)
+
+
+def _alternative_label(number, item):
+    minutes = ""
+    if item.get("duration"):
+        minutes = f" · {item['duration'] // 60}:{item['duration'] % 60:02d}"
+    return f"{number}. {item['title']}{minutes}"[:60]
+
+
+async def _show_alternatives(query, context, token):
+    full = resolve_track_ref_full(token)
+    if not full or not full.get("title"):
+        await query.message.reply_text(msg.pick_expired_short(), reply_markup=_back_button())
+        return
+    status = await query.message.reply_text(msg.t("alt_searching"))
+    found = await asyncio.to_thread(
+        downloader.search_alternatives,
+        full["title"], full.get("artist"), full.get("matched_url"),
+    )
+    if not found:
+        await status.edit_text(msg.t("alt_none"), reply_markup=_back_button())
+        return
+    alts = context.user_data.setdefault("alt_cache", {})
+    while len(alts) >= 5:
+        alts.pop(next(iter(alts)))
+    alts[token] = {"track": full, "items": found, "free": True}
+    lines = [msg.t("alt_header", title=full["title"])]
+    buttons = []
+    for number, item in enumerate(found, 1):
+        who = f" — {item['uploader']}" if item["uploader"] else ""
+        lines.append(f"{number}. {item['title']}{who} ({item['source']})")
+        buttons.append([InlineKeyboardButton(
+            _alternative_label(number, item),
+            callback_data=f"alt:pick:{token}:{number - 1}",
+        )])
+    await status.edit_text("\n".join(lines), reply_markup=_with_back(InlineKeyboardMarkup(buttons)))
+
+
+async def _pick_alternative(query, context, token, index):
+    entry = context.user_data.get("alt_cache", {}).get(token)
+    if not entry or not 0 <= index < len(entry["items"]):
+        await query.message.reply_text(msg.pick_expired_short(), reply_markup=_back_button())
+        return
+    item, track = entry["items"][index], entry["track"]
+    meta = _track_from_names(track.get("title"), track.get("artist"))
+    meta.album = track.get("album")
+    meta.source_url = item["url"]
+    meta.url = item["url"]
+    meta.id = hashlib.sha256(item["url"].encode()).hexdigest()[:16]
+    meta.is_replacement = True
+    meta.alt_entry = entry
+    user_manager.database.log_event(
+        "alt_pick", user_id=query.from_user.id,
+        payload={
+            "title": track.get("title"),
+            "artist": track.get("artist"),
+            "from_url": track.get("matched_url"),
+            "to_url": item["url"],
+        },
+    )
+    await _download_and_send(query.message, query.from_user, meta, context)
+
+
+async def recognize_media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Identify the song in a voice note, video note or video."""
+    message = update.message
+    if not message or not await ensure_access(update, context):
+        return
+    # A wizard or prompt owns the next message; don't hijack it.
+    if peek_await_input(context):
+        return
+    await _touch_user(update)
+    media = message.voice or message.video_note or message.video
+    if not media:
+        return
+    if (media.file_size or 0) > song_recognition.MAX_FILE_BYTES:
+        await message.reply_text(msg.t("recog_too_large"), reply_markup=_back_button())
+        return
+    user = update.effective_user
+    if not song_recognition.within_rate_limit(user.id):
+        await message.reply_text(msg.t("recog_rate_limited"), reply_markup=_back_button())
+        return
+    status = await message.reply_text(msg.t("recog_working"))
+    try:
+        with tempfile.TemporaryDirectory(prefix="hiit_media_") as tmp:
+            source = os.path.join(tmp, "input")
+            telegram_file = await media.get_file()
+            await telegram_file.download_to_drive(source)
+            found = await song_recognition.recognize_file(source)
+    except song_recognition.RecognitionUnavailable as exc:
+        logger.warning("Song recognition unavailable: %s", exc)
+        await status.edit_text(msg.t("recog_unavailable"), reply_markup=_back_button())
+        return
+    except Exception:
+        logger.exception("Song recognition failed")
+        await status.edit_text(msg.t("recog_unavailable"), reply_markup=_back_button())
+        return
+    user_manager.database.log_event(
+        "song_recognized" if found else "song_not_recognized", user_id=user.id,
+    )
+    if not found:
+        await status.edit_text(msg.t("recog_not_found"), reply_markup=_back_button())
+        return
+    token = remember_track_ref(found["title"], found["artist"])
+    await status.edit_text(
+        msg.t("recog_found", title=found["title"], artist=_unknown_artist(found["artist"])),
+        reply_markup=_with_back(InlineKeyboardMarkup([[
+            InlineKeyboardButton(msg.t("btn_recog_download"), callback_data=f"recog:{token}"),
+        ]])),
+    )
 
 
 async def premium_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2125,6 +2419,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id, msg.t("prompt_support"), reply_markup=_back_button(),
             )
+        elif action == "mix":
+            text, keyboard = _mix_status(user.id)
+            await context.bot.send_message(chat_id, text, reply_markup=keyboard)
+        elif action == "gift":
+            await context.bot.send_message(
+                chat_id, msg.t("gift_intro"),
+                reply_markup=_with_back(payments.gift_keyboard()),
+            )
         elif action == "submit_music":
             target = _ChatReply(context.bot, chat_id)
             await user_submissions.start_submit(target, context)
@@ -2290,6 +2592,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg.invite_status(prog), reply_markup=_back_button(),
             )
             return
+        if action == "gift":
+            await query.message.reply_text(
+                msg.t("gift_intro"), reply_markup=_with_back(payments.gift_keyboard()),
+            )
+            return
         try:
             await payments.send_stars_invoice(
                 context.bot,
@@ -2303,6 +2610,60 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 query.message, update.effective_user,
                 msg.payment_failed(), kind="payment", code="invoice_failed",
             )
+        return
+
+    if data.startswith("refund:confirm:"):
+        if not _is_admin(update.effective_user.id):
+            return
+        _ok, detail = await payments.refund_payment(
+            context.bot, user_manager.database, int(data.rsplit(":", 1)[1]),
+        )
+        await query.edit_message_text(detail)
+        return
+
+    if data.startswith("alt:list:"):
+        await _show_alternatives(query, context, data.split(":", 2)[2])
+        return
+
+    if data.startswith("alt:pick:"):
+        _, _, token, index = data.split(":", 3)
+        await _pick_alternative(query, context, token, int(index))
+        return
+
+    if data.startswith("recog:"):
+        found = resolve_track_ref_full(data.split(":", 1)[1])
+        if not found:
+            await query.message.reply_text(msg.pick_expired_short(), reply_markup=_back_button())
+            return
+        await _download_named_track(
+            query.message, update.effective_user, context,
+            found.get("title"), found.get("artist"),
+        )
+        return
+
+    if data in ("mix:on", "mix:off"):
+        db = user_manager.database
+        uid = update.effective_user.id
+        enable = data == "mix:on"
+        db.set_weekly_mix(uid, enable)
+        await query.message.reply_text(
+            msg.t("mix_enabled" if enable else "mix_disabled"), reply_markup=_back_button(),
+        )
+        if enable:
+            # claim_weekly_mix keeps toggling from producing more than one a week.
+            context.application.create_task(weekly_mix.send_mix(context.bot, db, uid))
+        return
+
+    if data.startswith("mixpick:"):
+        item = user_manager.database.get_weekly_mix_item(
+            int(data.split(":", 1)[1]), update.effective_user.id,
+        )
+        if not item:
+            await query.message.reply_text(msg.pick_expired_short(), reply_markup=_back_button())
+            return
+        await _download_named_track(
+            query.message, update.effective_user, context, item["title"], item["artist"] or "",
+        )
         return
 
     if data.startswith("redownload:"):
@@ -3018,7 +3379,9 @@ async def _offer_nearby_tracks(message, context, metadata, query=None):
 
 
 async def _download_and_send(message, user, metadata, context):
-    if await _deny_quota(message, context.bot, user):
+    alt_entry = getattr(metadata, "alt_entry", None)
+    free_replacement = bool(alt_entry and alt_entry.get("free"))
+    if not free_replacement and await _deny_quota(message, context.bot, user):
         return
 
     if await _reject_if_busy(message, context):
@@ -3112,11 +3475,17 @@ async def _download_and_send_job(message, user, metadata, context, job):
         sent = await _send_track_audio(
             message, metadata, file_path, platform, reply_markup=kb,
         )
-        _store_audio_file_id(metadata, platform, sent)
+        alt_entry = getattr(metadata, "alt_entry", None)
+        if not getattr(metadata, "is_replacement", False):
+            _store_audio_file_id(metadata, platform, sent)
+        # Fixing a wrong match is free once per track, so it can't become free downloads.
         user_manager.record_download(
             user_id, metadata.title, metadata.artist, platform,
             metadata.url, metadata.album, cached=cached,
+            count_quota=not (alt_entry and alt_entry.get("free")),
         )
+        if alt_entry:
+            alt_entry["free"] = False
         await log_download(context.bot, user, metadata.title, metadata.artist, platform, cached=cached)
         await status.delete()
     except Exception as e:
@@ -3626,6 +3995,8 @@ async def _on_startup(application):
         application.job_queue.run_repeating(_cache_sweep_job, interval=3600, first=60)
         application.job_queue.run_repeating(_cookie_health_job, interval=3600, first=120)
         application.job_queue.run_repeating(_release_check_job, interval=6 * 3600, first=300)
+        application.job_queue.run_repeating(_weekly_mix_job, interval=3600, first=600)
+        application.job_queue.run_repeating(_reconcile_payments_job, interval=3600, first=30)
     else:
         logger.warning(
             "JobQueue unavailable; using asyncio fallback for cache sweep. "
@@ -4495,6 +4866,12 @@ def main():
     application.add_handler(CommandHandler("unfollow", unfollow_command))
     application.add_handler(CommandHandler("following", following_command))
     application.add_handler(CommandHandler("premium", premium_command))
+    application.add_handler(CommandHandler("gift", gift_command))
+    application.add_handler(CommandHandler("mix", mix_command))
+    application.add_handler(CommandHandler("terms", terms_command))
+    application.add_handler(CommandHandler("paysupport", paysupport_command))
+    application.add_handler(CommandHandler("payments", payments_command))
+    application.add_handler(CommandHandler("refund", refund_command))
     application.add_handler(CommandHandler("invite", invite_command))
     application.add_handler(CommandHandler("grant", grant_command))
     application.add_handler(CommandHandler("syncmenus", syncmenus_command))
@@ -4558,6 +4935,16 @@ def main():
             & ~filters.COMMAND
             & (filters.PHOTO | filters.Document.IMAGE),
             user_submission_photo_handler,
+            block=False,
+        ),
+        group=1,
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE
+            & ~filters.COMMAND
+            & (filters.VOICE | filters.VIDEO_NOTE | filters.VIDEO),
+            recognize_media_handler,
             block=False,
         ),
         group=1,

@@ -17,4 +17,6 @@ jobs:
       - run: python scripts/check_smoke.py
       - run: python scripts/check_locales.py
       - run: python scripts/check_security.py
+      - run: python scripts/check_payments.py
+      - run: python scripts/check_features.py
       - run: pip-audit -r requirements.txt

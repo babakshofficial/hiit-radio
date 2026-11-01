@@ -46,8 +46,10 @@ class UserManager:
         return self.db.check_rate_limit(user_id, limit, period)
 
     def record_download(self, user_id, title=None, artist=None, platform=None,
-                        source_url=None, album=None, file_hash=None, cached=False):
-        self.db.record_rate_event(user_id)
+                        source_url=None, album=None, file_hash=None, cached=False,
+                        count_quota=True):
+        if count_quota:
+            self.db.record_rate_event(user_id)
         if title:
             return self.db.log_download(
                 user_id, title, artist, platform, source_url, album, file_hash, cached

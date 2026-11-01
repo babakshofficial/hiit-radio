@@ -129,7 +129,13 @@ class DownloadOrchestrator:
             })
             return send_copy, cache_source, False, None
 
-        cached_path = self.cache.get(metadata.title, metadata.artist, cache_source)
+        # A chosen version belongs to this user: it must not read or replace the
+        # shared cache that other people's requests for this song use.
+        is_replacement = bool(getattr(metadata, "is_replacement", False))
+        cached_path = (
+            None if is_replacement
+            else self.cache.get(metadata.title, metadata.artist, cache_source)
+        )
         if cached_path:
             # Fast path: if Telegram already has this audio, skip re-upload entirely.
             file_id = self.cache.get_telegram_file_id(
@@ -274,9 +280,10 @@ class DownloadOrchestrator:
 
         # Store under enriched tags AND under the original query guess so the
         # next identical search hits this watermarked file.
-        self.cache.put(metadata.title, metadata.artist, cache_source, file_path)
+        if not is_replacement:
+            self.cache.put(metadata.title, metadata.artist, cache_source, file_path)
         search_q = getattr(metadata, "search_query", None)
-        if search_q:
+        if search_q and not is_replacement:
             from metadata import guess_title_artist
             guess_title, guess_artist = guess_title_artist(search_q)
             if guess_title and (

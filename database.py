@@ -190,6 +190,27 @@ CREATE TABLE IF NOT EXISTS referrals (
 CREATE INDEX IF NOT EXISTS idx_referrals_inviter
     ON referrals(inviter_id, credited);
 
+CREATE TABLE IF NOT EXISTS gift_codes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL UNIQUE,
+    buyer_id TEXT NOT NULL,
+    tier TEXT NOT NULL,
+    days INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    redeemed_by TEXT,
+    redeemed_at REAL,
+    subscription_id INTEGER,
+    revoked_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS weekly_mix_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    artist TEXT,
+    created_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS followed_artists (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT NOT NULL,
@@ -354,12 +375,19 @@ class Database:
                 )
             except sqlite3.OperationalError:
                 pass
-            try:
-                conn.execute(
-                    "ALTER TABLE users ADD COLUMN commands_lang TEXT"
-                )
-            except sqlite3.OperationalError:
-                pass
+            for statement in (
+                "ALTER TABLE users ADD COLUMN commands_lang TEXT",
+                "ALTER TABLE users ADD COLUMN weekly_mix_enabled INTEGER DEFAULT 0",
+                "ALTER TABLE users ADD COLUMN weekly_mix_last_sent REAL",
+                "ALTER TABLE payments ADD COLUMN grant_type TEXT",
+                "ALTER TABLE payments ADD COLUMN grant_ref INTEGER",
+                "ALTER TABLE payments ADD COLUMN grant_days INTEGER",
+                "ALTER TABLE payments ADD COLUMN refunded_at REAL",
+            ):
+                try:
+                    conn.execute(statement)
+                except sqlite3.OperationalError:
+                    pass
 
     # --- Users ---
 
@@ -1475,29 +1503,60 @@ class Database:
         days = max(int(days), 1)
         now = time.time() if now is None else float(now)
         with self._conn() as conn:
-            row = conn.execute(
-                """SELECT expires_at FROM subscriptions
-                   WHERE user_id=? AND tier=? AND expires_at > ?
-                   ORDER BY expires_at DESC LIMIT 1""",
-                (user_id, tier, now),
-            ).fetchone()
-            base = float(row["expires_at"]) if row else now
-            starts_at = now
-            expires_at = base + days * 86400
-            cur = conn.execute(
-                """INSERT INTO subscriptions
-                   (user_id, tier, starts_at, expires_at, source, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (user_id, tier, starts_at, expires_at, source, now),
+            return self._insert_subscription(conn, user_id, tier, days, source, now)
+
+    @staticmethod
+    def _insert_subscription(conn, user_id, tier, days, source, now):
+        row = conn.execute(
+            """SELECT expires_at FROM subscriptions
+               WHERE user_id=? AND tier=? AND expires_at > ?
+               ORDER BY expires_at DESC LIMIT 1""",
+            (user_id, tier, now),
+        ).fetchone()
+        base = float(row["expires_at"]) if row else now
+        expires_at = base + days * 86400
+        cur = conn.execute(
+            """INSERT INTO subscriptions
+               (user_id, tier, starts_at, expires_at, source, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (user_id, tier, now, expires_at, source, now),
+        )
+        return {
+            "id": cur.lastrowid,
+            "user_id": user_id,
+            "tier": tier,
+            "starts_at": now,
+            "expires_at": expires_at,
+            "source": source,
+        }
+
+    @staticmethod
+    def _revoke_subscription(conn, subscription_id, days):
+        """Remove ``days`` from a grant and from later grants stacked on top of it."""
+        row = conn.execute(
+            "SELECT * FROM subscriptions WHERE id=?", (subscription_id,),
+        ).fetchone()
+        if not row:
+            return
+        seconds = int(days) * 86400
+        chain_end = float(row["expires_at"])
+        conn.execute(
+            "UPDATE subscriptions SET expires_at=expires_at-? WHERE id=?",
+            (seconds, subscription_id),
+        )
+        later = conn.execute(
+            """SELECT id, starts_at, expires_at FROM subscriptions
+               WHERE user_id=? AND tier=? AND id>? ORDER BY id""",
+            (row["user_id"], row["tier"], subscription_id),
+        ).fetchall()
+        for grant in later:
+            if float(grant["starts_at"]) >= chain_end:
+                break  # Bought after the refunded period ended: not stacked on it.
+            chain_end = max(chain_end, float(grant["expires_at"]))
+            conn.execute(
+                "UPDATE subscriptions SET expires_at=expires_at-? WHERE id=?",
+                (seconds, grant["id"]),
             )
-            return {
-                "id": cur.lastrowid,
-                "user_id": user_id,
-                "tier": tier,
-                "starts_at": starts_at,
-                "expires_at": expires_at,
-                "source": source,
-            }
 
     def add_quota_bonus(self, user_id, day, amount, source="manual"):
         user_id = str(user_id)
@@ -1559,6 +1618,269 @@ class Database:
                 "SELECT * FROM payments WHERE id=?", (cur.lastrowid,)
             ).fetchone()
             return dict(row), True
+
+    def apply_star_purchase(
+        self, user_id, kind, amount, currency, charge_id, grant, now=None,
+    ):
+        """Record a paid charge and deliver it in one transaction.
+
+        Either both happen or neither does, so a crash can't leave a user charged
+        with nothing delivered. ``grant`` is one of:
+        ``{"type": "bonus", "amount", "day"}``, ``{"type": "subscription", "tier",
+        "days"}``, ``{"type": "gift", "tier", "days", "code"}``.
+        Returns ``(payment_row, created, result)``; ``created`` is False for a charge
+        that was already applied.
+        """
+        if not charge_id:
+            raise ValueError("charge_id is required")
+        user_id = str(user_id)
+        now = time.time() if now is None else float(now)
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM payments WHERE telegram_charge_id=?", (charge_id,),
+            ).fetchone()
+            if existing:
+                return dict(existing), False, None
+
+            grant_type = grant["type"]
+            if grant_type == "bonus":
+                cur = conn.execute(
+                    """INSERT INTO quota_bonuses (user_id, day, amount, source, created_at)
+                       VALUES (?, ?, ?, 'stars', ?)""",
+                    (user_id, grant["day"], int(grant["amount"]), now),
+                )
+                grant_ref, grant_days = cur.lastrowid, None
+                result = {"type": "bonus", "amount": int(grant["amount"]), "day": grant["day"]}
+            elif grant_type == "subscription":
+                sub = self._insert_subscription(
+                    conn, user_id, grant["tier"], int(grant["days"]), "stars", now,
+                )
+                grant_ref, grant_days = sub["id"], int(grant["days"])
+                result = {
+                    "type": "subscription",
+                    "tier": sub["tier"],
+                    "expires_at": sub["expires_at"],
+                }
+            elif grant_type == "gift":
+                cur = conn.execute(
+                    """INSERT INTO gift_codes (code, buyer_id, tier, days, created_at)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (grant["code"], user_id, grant["tier"], int(grant["days"]), now),
+                )
+                grant_ref, grant_days = cur.lastrowid, int(grant["days"])
+                result = {"type": "gift", "code": grant["code"], "days": grant_days}
+            else:
+                raise ValueError(f"unknown grant type: {grant_type}")
+
+            cur = conn.execute(
+                """INSERT INTO payments
+                   (user_id, provider, kind, amount, currency, telegram_charge_id, status,
+                    created_at, grant_type, grant_ref, grant_days)
+                   VALUES (?, 'stars', ?, ?, ?, ?, 'paid', ?, ?, ?, ?)""",
+                (
+                    user_id, kind, int(amount or 0), currency, charge_id,
+                    now, grant_type, grant_ref, grant_days,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM payments WHERE id=?", (cur.lastrowid,),
+            ).fetchone()
+            return dict(row), True, result
+
+    def get_payment(self, payment_id):
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM payments WHERE id=?", (int(payment_id),),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_payment_by_charge(self, charge_id):
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM payments WHERE telegram_charge_id=?", (charge_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_star_payments(self, user_id=None, limit=20):
+        where, params = "provider='stars'", []
+        if user_id is not None:
+            where += " AND user_id=?"
+            params.append(str(user_id))
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM payments WHERE {where} ORDER BY id DESC LIMIT ?",
+                (*params, int(limit)),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def revoke_star_purchase(self, charge_id, now=None):
+        """Mark a charge refunded and take back what it delivered, in one transaction.
+
+        Returns ``(payment_row, changed, gift_recipient_id)``. ``changed`` is False
+        when the charge is unknown or was already refunded.
+        """
+        now = time.time() if now is None else float(now)
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM payments WHERE telegram_charge_id=?", (charge_id,),
+            ).fetchone()
+            if not row:
+                return None, False, None
+            if row["status"] == "refunded":
+                return dict(row), False, None
+
+            grant_type, grant_ref = row["grant_type"], row["grant_ref"]
+            recipient = None
+            if grant_type == "bonus":
+                conn.execute("DELETE FROM quota_bonuses WHERE id=?", (grant_ref,))
+            elif grant_type == "subscription":
+                self._revoke_subscription(conn, grant_ref, row["grant_days"])
+            elif grant_type == "gift":
+                gift = conn.execute(
+                    "SELECT * FROM gift_codes WHERE id=?", (grant_ref,),
+                ).fetchone()
+                if gift:
+                    conn.execute(
+                        "UPDATE gift_codes SET revoked_at=? WHERE id=?", (now, grant_ref),
+                    )
+                    if gift["subscription_id"]:
+                        self._revoke_subscription(conn, gift["subscription_id"], gift["days"])
+                        recipient = gift["redeemed_by"]
+            conn.execute(
+                "UPDATE payments SET status='refunded', refunded_at=? WHERE id=?",
+                (now, row["id"]),
+            )
+            updated = conn.execute(
+                "SELECT * FROM payments WHERE id=?", (row["id"],),
+            ).fetchone()
+            return dict(updated), True, recipient
+
+    def redeem_gift_code(self, code, user_id, now=None):
+        """Return ``(status, gift_row, subscription)``.
+
+        ``status`` is ``ok``, ``invalid`` (unknown or refunded) or ``used``.
+        """
+        user_id = str(user_id)
+        now = time.time() if now is None else float(now)
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            gift = conn.execute(
+                "SELECT * FROM gift_codes WHERE code=?", (code,),
+            ).fetchone()
+            if not gift or gift["revoked_at"]:
+                return "invalid", None, None
+            if gift["redeemed_by"]:
+                return "used", dict(gift), None
+            sub = self._insert_subscription(
+                conn, user_id, gift["tier"], int(gift["days"]), f"gift:{gift['id']}", now,
+            )
+            conn.execute(
+                """UPDATE gift_codes SET redeemed_by=?, redeemed_at=?, subscription_id=?
+                   WHERE id=?""",
+                (user_id, now, sub["id"], gift["id"]),
+            )
+            return "ok", dict(gift), sub
+
+    # --- Weekly mix ---
+
+    def get_weekly_mix_enabled(self, user_id):
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT weekly_mix_enabled FROM users WHERE user_id=?", (str(user_id),),
+            ).fetchone()
+            return bool(row and row["weekly_mix_enabled"])
+
+    def set_weekly_mix(self, user_id, enabled):
+        user_id = str(user_id)
+        self.touch_user(user_id)
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE users SET weekly_mix_enabled=? WHERE user_id=?",
+                (1 if enabled else 0, user_id),
+            )
+
+    def list_weekly_mix_due(self, now, interval):
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT user_id FROM users
+                   WHERE weekly_mix_enabled=1 AND is_blocked=0
+                     AND (weekly_mix_last_sent IS NULL OR weekly_mix_last_sent<=?)""",
+                (float(now) - interval,),
+            ).fetchall()
+            return [r["user_id"] for r in rows]
+
+    def claim_weekly_mix(self, user_id, now, interval):
+        """Atomically claim this week's send.
+
+        Returns the previous send time (None if never sent), or False when the user
+        opted out or a mix was already sent inside the interval.
+        """
+        user_id = str(user_id)
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT weekly_mix_enabled, weekly_mix_last_sent FROM users WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+            if not row or not row["weekly_mix_enabled"]:
+                return False
+            previous = row["weekly_mix_last_sent"]
+            if previous is not None and float(previous) > float(now) - interval:
+                return False
+            conn.execute(
+                "UPDATE users SET weekly_mix_last_sent=? WHERE user_id=?",
+                (float(now), user_id),
+            )
+            return previous
+
+    def release_weekly_mix(self, user_id, previous):
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE users SET weekly_mix_last_sent=? WHERE user_id=?",
+                (previous, str(user_id)),
+            )
+
+    def save_weekly_mix_items(self, user_id, picks, now=None):
+        user_id = str(user_id)
+        now = time.time() if now is None else float(now)
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM weekly_mix_items WHERE user_id=? AND created_at<?",
+                (user_id, now - 60 * 86400),
+            )
+            return [
+                conn.execute(
+                    """INSERT INTO weekly_mix_items (user_id, title, artist, created_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (user_id, p["title"], p.get("artist"), now),
+                ).lastrowid
+                for p in picks
+            ]
+
+    def get_weekly_mix_item(self, item_id, user_id):
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM weekly_mix_items WHERE id=? AND user_id=?",
+                (int(item_id), str(user_id)),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def recent_releases_for_user(self, user_id, days=14, limit=5, now=None):
+        """Followed artists' albums by actual release date, so baselines don't count."""
+        now = time.time() if now is None else float(now)
+        since = time.strftime("%Y-%m-%d", time.gmtime(now - days * 86400))
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT f.artist_name, r.title, r.release_date
+                   FROM followed_artists f
+                   JOIN artist_releases r ON r.deezer_artist_id=f.deezer_artist_id
+                   WHERE f.user_id=? AND r.release_date>=?
+                   ORDER BY r.release_date DESC LIMIT ?""",
+                (str(user_id), since, int(limit)),
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def create_referral(self, inviter_id, invited_id):
         """Insert a pending referral. Returns True if created, False if rejected."""

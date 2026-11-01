@@ -23,7 +23,7 @@ def remember_track_ref(title, artist, **extra):
         "title": (title or "").strip(),
         "artist": (artist or "").strip(),
     }
-    for key in ("url", "query", "platform", "album", "search_query"):
+    for key in ("url", "query", "platform", "album", "search_query", "matched_url"):
         val = extra.get(key)
         if val is not None and val != "":
             payload[key] = val
@@ -68,6 +68,7 @@ def recommendation_keyboard(
     platform=None,
     album=None,
     search_query=None,
+    matched_url=None,
 ):
     if not artist and not track_title:
         return None
@@ -80,6 +81,7 @@ def recommendation_keyboard(
         platform=platform,
         album=album,
         search_query=search_query,
+        matched_url=matched_url,
     )
     buttons = []
 
@@ -131,6 +133,10 @@ def recommendation_keyboard(
             InlineKeyboardButton(
                 msg.t("btn_report_track"),
                 callback_data=f"trkrep:{token}",
+            ),
+            InlineKeyboardButton(
+                msg.t("btn_wrong_version"),
+                callback_data=f"alt:list:{token}",
             ),
         ])
 

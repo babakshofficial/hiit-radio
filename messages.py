@@ -132,7 +132,7 @@ def help_text():
         "help_text",
         bot_inline=BOT_INLINE,
         premium_daily_limit=os.getenv("PREMIUM_DAILY_LIMIT", "100"),
-    )
+    ) + "\n\n" + t("help_new_features")
 
 
 def aboutme_text():
@@ -275,6 +275,7 @@ def premium_status(snapshot):
             )
         )
     lines.append(t("premium_day", day=snapshot.get("day")))
+    lines.append(t("premium_policy_note"))
     lines.append("")
     lines.append(
         t(

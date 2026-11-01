@@ -22,6 +22,10 @@ The user interface is in **Persian (Farsi)**. Admin tooling and this documentati
 - Discovery — `/discover` personalized picks via LLM from your download history
 - Cancel — `/cancel` stops every background job the user has running (downloads, playlists, LLM calls)
 - Rate limiting — daily per-tier quotas (free 10, premium 100, unlimited)
+- Wrong version? — button under each track lists other versions; the first swap per track doesn't use quota
+- Song recognition — send a voice note, video note or video to identify the song
+- Weekly mix — `/mix` opt-in message with personal picks and new releases from followed artists
+- Gift Premium — `/gift` buys a one-time link for a friend with Telegram Stars
 - Instant preview — if the full download takes more than a few seconds, a 30s voice note plays while you wait
 - Artwork download — button under each track sends the watermarked cover as a JPEG file
 - Subscriptions — free 10/day, premium 100/day, unlimited for admins; buy with Telegram Stars or earn +10 via 3 invites
@@ -197,6 +201,8 @@ Send a track link, album/playlist URL, or plain song name as a normal message to
 | `/cookies` | Optional cookie fallback status; send a `cookies.txt` file to the bot to replace it |
 | `/channelid` | Resolve chat ID for VIP log channel setup |
 | `/viplogtest` | Test VIP log channel (admin) |
+| `/payments [user_id]` | List Telegram Stars payments |
+| `/refund <number>` | Refund a Stars payment and remove what it delivered (asks to confirm) |
 | `/grant <user_id> <premium\|unlimited> <days>` | Manually activate a subscription |
 | `/topup <user_id> [amount]` | Manually add today's download bonus |
 | `/broadcast <message>` | Send a message to all known users (confirmation step) |

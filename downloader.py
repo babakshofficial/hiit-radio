@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageChops
 import io
 
 from metadata import score_query_coverage, strip_featured_credit
-from url_safety import YTDLP_ALLOWED_EXTRACTORS, find_youtube_url
+from url_safety import YTDLP_ALLOWED_EXTRACTORS, find_direct_media_url, find_youtube_url
 import jobs
 import messages as msg
 
@@ -78,6 +78,8 @@ def _probe_urls():
 
 
 _YT_PROBE_URL = _DEFAULT_PROBE_URLS[-1]  # legacy single-URL callers
+_MAX_ALTERNATIVE_SECONDS = 20 * 60
+_ALTERNATIVE_SOUNDCLOUD_SLOTS = 2
 _PROBE_TTL_SEC = 600
 _PROBE_CACHE = {"monotonic": 0.0, "ok": False, "detail": ""}
 # Chrome cookie DB + keyring decrypt fails when multiple yt-dlp instances run at once.
@@ -1183,6 +1185,42 @@ class MusicDownloader:
                 break
         return False, last_detail
 
+    def search_alternatives(self, title, artist, exclude_url=None, limit=6):
+        """Other versions of a track, for the user to choose from. Blocking."""
+        query = f"{artist or ''} {title or ''}".strip()
+        opts = self._build_search_opts()
+        by_source = {"YouTube": [], "SoundCloud": []}
+        seen = {exclude_url} if exclude_url else set()
+        for prefix, count, label in (
+            ("ytsearch", limit + 2, "YouTube"), ("scsearch", 4, "SoundCloud"),
+        ):
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(f"{prefix}{count}:{query}", download=False)
+            except Exception as exc:
+                logger.warning("Alternative search failed on %s: %s", label, exc)
+                continue
+            for entry in (info or {}).get("entries") or []:
+                url = _candidate_url(entry or {}, label)
+                # Only links the direct-download path accepts can be offered.
+                url = find_direct_media_url(url) if url else None
+                if not url or url in seen:
+                    continue
+                duration = entry.get("duration")
+                if duration and duration > _MAX_ALTERNATIVE_SECONDS:
+                    continue
+                seen.add(url)
+                by_source[label].append({
+                    "url": url,
+                    "title": entry.get("title") or title or "",
+                    "uploader": entry.get("uploader") or entry.get("channel") or "",
+                    "duration": int(duration) if duration else None,
+                    "source": label,
+                })
+        # Keep room for SoundCloud: a wrong match often means YouTube has no good copy.
+        soundcloud = by_source["SoundCloud"][:_ALTERNATIVE_SOUNDCLOUD_SLOTS]
+        return (by_source["YouTube"][:limit - len(soundcloud)] + soundcloud)[:limit]
+
     def _build_search_opts(self):
         """Fast flat search — no sleep, list results only."""
         ydl_opts = {
@@ -2042,6 +2080,7 @@ class MusicDownloader:
                     return None, "cancelled", failure_trail
                 if file_path:
                     best_score = score
+                    metadata.matched_source_url = _candidate_url(best_video or _video)
                     break
                 last_err = dl_err
                 src = _source_label_for(_video)
