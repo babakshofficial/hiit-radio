@@ -16,4 +16,5 @@ jobs:
       - run: pip install -r requirements.txt pip-audit
       - run: python scripts/check_smoke.py
       - run: python scripts/check_locales.py
+      - run: python scripts/check_security.py
       - run: pip-audit -r requirements.txt
