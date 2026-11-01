@@ -10,11 +10,13 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Callable, Optional
 from urllib.error import URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
+import aiohttp
 import yt_dlp
 
+import url_safety
 from metadata import AppleMusicMetadata, TrackMetadata
 
 logger = logging.getLogger(__name__)
@@ -23,10 +25,6 @@ _DEEZER_API = "https://api.deezer.com"
 _DEEZER_URL_RE = re.compile(
     r"deezer\.com/(?:[a-z]{2}/)?(track|album|playlist)/(\d+)"
 )
-_YOUTUBE_RE = re.compile(
-    r"(?:music\.|www\.|m\.)?(?:youtube\.com/(?:watch\?|playlist\?)|youtu\.be/)"
-)
-_SOUNDCLOUD_RE = re.compile(r"(?:www\.|m\.|on\.)?soundcloud\.com/")
 
 _SOURCE_WEIGHT = {
     "deezer": 1.0,
@@ -57,11 +55,11 @@ def is_deezer_url(url: str) -> bool:
 
 
 def is_youtube_url(url: str) -> bool:
-    return bool(_YOUTUBE_RE.search(url or ""))
+    return url_safety.find_youtube_url(url) is not None
 
 
 def is_soundcloud_url(url: str) -> bool:
-    return bool(_SOUNDCLOUD_RE.search(url or ""))
+    return url_safety.find_soundcloud_url(url) is not None
 
 
 def is_direct_media_url(url: str) -> bool:
@@ -258,6 +256,7 @@ def _ytdlp_resolve_sync(url: str, ydl_opts: dict) -> tuple[Optional[str], list[T
         "skip_download": True,
         "quiet": True,
         "no_warnings": True,
+        "allowed_extractors": url_safety.YTDLP_ALLOWED_EXTRACTORS,
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -325,13 +324,32 @@ def _deezer_artist_sync(artist_id: str) -> dict:
     }
 
 
+async def _expand_soundcloud_short_link(url: str) -> str:
+    """Resolve on.soundcloud.com links, which yt-dlp only handles generically."""
+    if urlsplit(url).hostname != "on.soundcloud.com":
+        return url
+    timeout = aiohttp.ClientTimeout(total=15, connect=10)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            _status, final_url, _text = await url_safety.fetch_allowed(
+                session, url, url_safety.is_soundcloud_page,
+            )
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        raise CatalogError("SoundCloud short link could not be opened.") from exc
+    if urlsplit(final_url).hostname == "on.soundcloud.com":
+        raise CatalogError("SoundCloud short link could not be opened.")
+    return final_url
+
+
 async def resolve_url(url: str, ydl_opts_factory: Callable[[], dict]) -> tuple[Optional[str], list[TrackMetadata]]:
     text = (url or "").strip()
     if is_deezer_url(text):
         return await asyncio.to_thread(_deezer_resolve_sync, text)
-    if is_direct_media_url(text):
+    media_url = url_safety.find_direct_media_url(text)
+    if media_url:
+        media_url = await _expand_soundcloud_short_link(media_url)
         opts = ydl_opts_factory()
-        return await asyncio.to_thread(_ytdlp_resolve_sync, text, opts)
+        return await asyncio.to_thread(_ytdlp_resolve_sync, media_url, opts)
     return None, []
 
 

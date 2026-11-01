@@ -10,6 +10,8 @@ import time
 import os
 from dotenv import load_dotenv
 
+import url_safety
+
 load_dotenv()
 logger = logging.getLogger(__name__)
 
@@ -119,8 +121,7 @@ _SHAZAM_HEADERS = {
 
 def is_shazam_url(text):
     """True if text looks like a Shazam track or short link."""
-    t = (text or "").lower()
-    return "shazam.com" in t or "shz.am" in t
+    return url_safety.find_shazam_url(text) is not None
 
 
 def shazam_track_id(url):
@@ -138,7 +139,11 @@ def is_music_url(text):
     if catalog.is_deezer_url(t) or catalog.is_direct_media_url(t):
         return True
     tl = t.lower()
-    return "spotify.com" in tl or "music.apple.com" in tl or is_shazam_url(t)
+    return (
+        "spotify.com" in tl
+        or url_safety.find_apple_music_url(t) is not None
+        or is_shazam_url(t)
+    )
 
 
 def looks_like_music_query(text):
@@ -844,6 +849,7 @@ class ShazamMetadata:
         self.id = None
 
     async def fetch(self):
+        self.url = url_safety.find_shazam_url(self.url)
         if not self.url:
             return False
         try:
@@ -877,8 +883,10 @@ class ShazamMetadata:
             return False
 
     async def _final_url(self, session, url):
-        async with session.get(url, headers=_SHAZAM_HEADERS, allow_redirects=True) as resp:
-            return str(resp.url)
+        _status, final_url, _text = await url_safety.fetch_allowed(
+            session, url, url_safety.is_shazam_page, headers=_SHAZAM_HEADERS,
+        )
+        return final_url
 
     async def _fetch_json(self, session, track_id):
         url = (
@@ -931,11 +939,12 @@ class ShazamMetadata:
     async def _fetch_og(self, session, page_url):
         headers = dict(_SHAZAM_HEADERS)
         headers["Accept"] = "text/html,application/xhtml+xml"
-        async with session.get(page_url, headers=headers) as resp:
-            if resp.status != 200:
-                logger.warning("Shazam page %s for %s", resp.status, page_url)
-                return False
-            html = await resp.text()
+        status, _final_url, html = await url_safety.fetch_allowed(
+            session, page_url, url_safety.is_shazam_page, headers=headers,
+        )
+        if status != 200:
+            logger.warning("Shazam page %s for %s", status, page_url)
+            return False
         soup = BeautifulSoup(html, "html.parser")
         if (
             not self._apply_jsonld(soup)
@@ -1086,118 +1095,121 @@ class AppleMusicMetadata:
         self.id = None
 
     async def fetch(self):
+        self.url = url_safety.find_apple_music_url(self.url)
         if not self.url:
             return False
         try:
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
-            async with aiohttp.ClientSession() as session:
-                async with session.get(self.url, headers=headers) as response:
-                    if response.status != 200:
-                        logger.error(f"Failed to fetch URL: {self.url}, status: {response.status}")
-                        return False
-                    
-                    html = await response.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    
-                    og_title = soup.find('meta', property='og:title')
-                    og_image = soup.find('meta', property='og:image')
-                    og_audio = soup.find('meta', property='og:audio')
+            timeout = aiohttp.ClientTimeout(total=25, connect=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                status, _final_url, html = await url_safety.fetch_allowed(
+                    session, self.url, url_safety.is_apple_music_page, headers=headers,
+                )
+                if status != 200:
+                    logger.error(f"Failed to fetch URL: {self.url}, status: {status}")
+                    return False
 
-                    if og_title:
-                        self.title = og_title['content']
-                    
-                    if og_image:
-                        image_url = og_image['content']
-                        # Apple og:image is often a wide 1200x630wp banner with the
-                        # cover already inset — rewrite to square album art.
-                        image_url = _normalize_apple_artwork_url(image_url)
-                        self.artwork_url = image_url
+                soup = BeautifulSoup(html, 'html.parser')
+                
+                og_title = soup.find('meta', property='og:title')
+                og_image = soup.find('meta', property='og:image')
+                og_audio = soup.find('meta', property='og:audio')
 
-                    if og_audio:
-                        self.preview_url = og_audio['content']
+                if og_title:
+                    self.title = og_title['content']
+                
+                if og_image:
+                    image_url = og_image['content']
+                    # Apple og:image is often a wide 1200x630wp banner with the
+                    # cover already inset — rewrite to square album art.
+                    image_url = _normalize_apple_artwork_url(image_url)
+                    self.artwork_url = image_url
 
-                    parsed_url = urllib.parse.urlparse(self.url)
-                    path_parts = parsed_url.path.split('/')
-                    
-                    if '/album/' in self.url:
-                        if '?i=' in self.url:
-                            self.type = 'song'
-                            query_params = urllib.parse.parse_qs(parsed_url.query)
-                            song_ids = query_params.get('i', [])
-                            if song_ids:
-                                self.id = song_ids[0]
-                            else:
-                                self.id = self.url.split('?i=')[1].split('&')[0] if '?i=' in self.url else path_parts[-1]
+                if og_audio:
+                    self.preview_url = og_audio['content']
+
+                parsed_url = urllib.parse.urlparse(self.url)
+                path_parts = parsed_url.path.split('/')
+                
+                if '/album/' in self.url:
+                    if '?i=' in self.url:
+                        self.type = 'song'
+                        query_params = urllib.parse.parse_qs(parsed_url.query)
+                        song_ids = query_params.get('i', [])
+                        if song_ids:
+                            self.id = song_ids[0]
                         else:
-                            self.type = 'album'
-                            album_idx = path_parts.index('album') if 'album' in path_parts else -1
-                            if album_idx != -1 and album_idx + 2 < len(path_parts):
-                                self.id = path_parts[album_idx + 2]
-                            else:
-                                self.id = path_parts[-1]
-                    elif '/playlist/' in self.url:
-                        self.type = 'playlist'
-                        playlist_idx = path_parts.index('playlist') if 'playlist' in path_parts else -1
-                        if playlist_idx != -1 and playlist_idx + 2 < len(path_parts):
-                            self.id = path_parts[playlist_idx + 2]
+                            self.id = self.url.split('?i=')[1].split('&')[0] if '?i=' in self.url else path_parts[-1]
+                    else:
+                        self.type = 'album'
+                        album_idx = path_parts.index('album') if 'album' in path_parts else -1
+                        if album_idx != -1 and album_idx + 2 < len(path_parts):
+                            self.id = path_parts[album_idx + 2]
                         else:
                             self.id = path_parts[-1]
-                    
-                    if 'artist' in path_parts:
-                        artist_idx = path_parts.index('artist')
-                        if artist_idx + 1 < len(path_parts):
-                            if self.type == 'song' and not self.artist:
-                                artist_elem = soup.find('p', class_='songs-table__row__text__attribution')
-                                if not artist_elem:
-                                    artist_elem = soup.find(string=re.compile(r'by\s+.*', re.IGNORECASE))
-                                    if artist_elem and 'by' in artist_elem.lower():
-                                        self.artist = artist_elem.split('by')[1].strip() if 'by' in artist_elem.lower() else None
+                elif '/playlist/' in self.url:
+                    self.type = 'playlist'
+                    playlist_idx = path_parts.index('playlist') if 'playlist' in path_parts else -1
+                    if playlist_idx != -1 and playlist_idx + 2 < len(path_parts):
+                        self.id = path_parts[playlist_idx + 2]
                     else:
-                        # Helper to strip "on Apple Music" or "- Apple Music" regardless of hidden Unicode spaces
-                        def clean_apple_text(text):
-                            if not text: return ""
-                            text = re.sub(r'\s*on\s+Apple\s*Music.*$', '', text, flags=re.IGNORECASE)
-                            text = re.sub(r'\s*[-–]\s*Apple\s*Music.*$', '', text, flags=re.IGNORECASE)
-                            return text.strip()
+                        self.id = path_parts[-1]
+                
+                if 'artist' in path_parts:
+                    artist_idx = path_parts.index('artist')
+                    if artist_idx + 1 < len(path_parts):
+                        if self.type == 'song' and not self.artist:
+                            artist_elem = soup.find('p', class_='songs-table__row__text__attribution')
+                            if not artist_elem:
+                                artist_elem = soup.find(string=re.compile(r'by\s+.*', re.IGNORECASE))
+                                if artist_elem and 'by' in artist_elem.lower():
+                                    self.artist = artist_elem.split('by')[1].strip() if 'by' in artist_elem.lower() else None
+                else:
+                    # Helper to strip "on Apple Music" or "- Apple Music" regardless of hidden Unicode spaces
+                    def clean_apple_text(text):
+                        if not text: return ""
+                        text = re.sub(r'\s*on\s+Apple\s*Music.*$', '', text, flags=re.IGNORECASE)
+                        text = re.sub(r'\s*[-–]\s*Apple\s*Music.*$', '', text, flags=re.IGNORECASE)
+                        return text.strip()
 
-                        if self.title and ' by ' in self.title:
-                            parts = self.title.split(' by ')
-                            self.title = clean_apple_text(parts[0])
-                            self.artist = clean_apple_text(parts[1])
-                        elif self.title and ' - ' in self.title:
-                            parts = self.title.split(' - ', 1)
-                            if len(parts) == 2:
-                                self.artist = clean_apple_text(parts[0])
-                                self.title = clean_apple_text(parts[1])
+                    if self.title and ' by ' in self.title:
+                        parts = self.title.split(' by ')
+                        self.title = clean_apple_text(parts[0])
+                        self.artist = clean_apple_text(parts[1])
+                    elif self.title and ' - ' in self.title:
+                        parts = self.title.split(' - ', 1)
+                        if len(parts) == 2:
+                            self.artist = clean_apple_text(parts[0])
+                            self.title = clean_apple_text(parts[1])
 
-                    # Robust fallback for preview URL using iTunes Lookup API
-                    if not self.preview_url and self.id:
-                        try:
-                            clean_id = str(self.id).lstrip('-')
-                            if clean_id.isdigit():
-                                lookup_url = f"https://itunes.apple.com/lookup?id={clean_id}"
-                                async with aiohttp.ClientSession() as lookup_session:
-                                    async with lookup_session.get(lookup_url) as lookup_resp:
-                                        if lookup_resp.status == 200:
-                                            text = await lookup_resp.text()
-                                            data = json.loads(text)
-                                            if data.get('resultCount', 0) > 0:
-                                                for result in data['results']:
-                                                    if result.get('wrapperType') == 'track' and result.get('kind') == 'song':
-                                                        if result.get('previewUrl'):
-                                                            self.preview_url = result['previewUrl']
-                                                            logger.info("Got preview URL from iTunes Lookup API fallback")
-                                                        ms = result.get('trackTimeMillis')
-                                                        if ms:
-                                                            self.duration = float(ms) / 1000.0
-                                                        break
-                        except Exception as e:
-                            logger.warning(f"iTunes Lookup fallback failed: {e}")
+                # Robust fallback for preview URL using iTunes Lookup API
+                if not self.preview_url and self.id:
+                    try:
+                        clean_id = str(self.id).lstrip('-')
+                        if clean_id.isdigit():
+                            lookup_url = f"https://itunes.apple.com/lookup?id={clean_id}"
+                            async with aiohttp.ClientSession() as lookup_session:
+                                async with lookup_session.get(lookup_url) as lookup_resp:
+                                    if lookup_resp.status == 200:
+                                        text = await lookup_resp.text()
+                                        data = json.loads(text)
+                                        if data.get('resultCount', 0) > 0:
+                                            for result in data['results']:
+                                                if result.get('wrapperType') == 'track' and result.get('kind') == 'song':
+                                                    if result.get('previewUrl'):
+                                                        self.preview_url = result['previewUrl']
+                                                        logger.info("Got preview URL from iTunes Lookup API fallback")
+                                                    ms = result.get('trackTimeMillis')
+                                                    if ms:
+                                                        self.duration = float(ms) / 1000.0
+                                                    break
+                    except Exception as e:
+                        logger.warning(f"iTunes Lookup fallback failed: {e}")
 
-                    logger.info(f"Fetched meta: {self.title} by {self.artist}, artwork: {self.artwork_url}, preview: {self.preview_url}")
-                    return True
+                logger.info(f"Fetched meta: {self.title} by {self.artist}, artwork: {self.artwork_url}, preview: {self.preview_url}")
+                return True
         except Exception as e:
             logger.error(f"Error fetching meta: {e}", exc_info=True)
             return False
@@ -1687,7 +1699,7 @@ class TrackMetadata:
             return meta
 
         # APPLE MUSIC LINK
-        if "music.apple.com" in text:
+        if url_safety.find_apple_music_url(text):
             source = AppleMusicMetadata(text)
             if await source.fetch():
                 meta._copy_from(source, url=text)
@@ -1777,7 +1789,7 @@ class TrackMetadata:
             return name, tracks
 
         # Apple Music album/playlist
-        if "music.apple.com" in text:
+        if url_safety.find_apple_music_url(text):
             source = AppleMusicMetadata(text)
             if not await source.fetch():
                 return None, []
@@ -1817,7 +1829,7 @@ class TrackMetadata:
             return True
         if "spotify.com" in text and ("/album/" in text or "/playlist/" in text):
             return True
-        if "music.apple.com" in text and ("/album/" in text or "/playlist/" in text):
+        if url_safety.find_apple_music_url(text) and ("/album/" in text or "/playlist/" in text):
             if "?i=" in text:
                 return False  # single song on album page
             return True
