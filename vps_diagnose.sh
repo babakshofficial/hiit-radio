@@ -39,7 +39,7 @@ else
 fi
 echo
 
-echo "--- YouTube cookies ---"
+echo "--- YouTube cookies (optional fallback; FAIL is fine when running without cookies) ---"
 COOKIES="${YTDLP_COOKIES:-$(pwd)/cookies.txt}"
 if [[ -f "$COOKIES" ]]; then
   echo "OK: cookies file exists: $COOKIES ($(wc -c < "$COOKIES") bytes)"

@@ -231,7 +231,7 @@ class DownloadOrchestrator:
                 if code == "bot_check" or not yt_ok:
                     invalidate_youtube_auth_probe()
                     _, yt_ok = get_credentials_status()
-                    fail_reason = f"{code}; youtube cookies unavailable" if not yt_ok else code
+                    fail_reason = f"{code}; youtube unavailable" if not yt_ok else code
                     await admin_logger.maybe_alert_cookie_issue(
                         bot,
                         detail=f"download bot_check for {metadata.title!r}",

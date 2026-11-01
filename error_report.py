@@ -232,7 +232,7 @@ def format_admin_summary(row):
         lines.append(f"تلاش‌ها: {trail}")
 
     if "cookies_ok" in ctx:
-        cookie_line = "کوکی یوتیوب: " + ("سالم" if ctx.get("cookies_ok") else "ناسالم")
+        cookie_line = "دسترسی یوتیوب: " + ("سالم" if ctx.get("cookies_ok") else "ناسالم")
         if ctx.get("cookies_detail"):
             cookie_line += f" — {str(ctx['cookies_detail'])[:200]}"
         lines.append(cookie_line)

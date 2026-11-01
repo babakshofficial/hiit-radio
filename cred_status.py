@@ -17,38 +17,17 @@ def get_credentials_status(lang=None):
     lines = [L("creds_header"), ""]
 
     lines.append(L("creds_yt_section"))
+    lines.append(L("creds_yt_anon"))
+    if _cookies_look_authenticated(dl.cookies_path):
+        lines.append(L("creds_yt_fallback_file", path=dl.cookies_path))
     if dl.cookies_from_browser:
-        lines.append(L("creds_yt_browser", browser=dl.cookies_from_browser))
-        live_ok, live_detail = dl.probe_youtube_auth()
-        if live_ok:
-            lines.append(L("creds_yt_live_ok", detail=live_detail))
-            yt_ok = True
-        else:
-            lines.append(L("creds_yt_live_fail", detail=live_detail))
-            lines.append(L("creds_yt_browser_hint"))
-            yt_ok = False
+        lines.append(L("creds_yt_fallback_browser", browser=dl.cookies_from_browser))
+    yt_ok, live_detail = dl.probe_youtube_auth()
+    if yt_ok:
+        lines.append(L("creds_yt_live_ok", detail=live_detail))
     else:
-        has_auth_cookies = (
-            os.path.exists(dl.cookies_path) and _cookies_look_authenticated(dl.cookies_path)
-        )
-        if has_auth_cookies:
-            live_ok, live_detail = dl.probe_youtube_auth()
-            lines.append(L("creds_yt_cookies_path", path=dl.cookies_path))
-            if live_ok:
-                lines.append(L("creds_yt_live_ok", detail=live_detail))
-                yt_ok = True
-            else:
-                lines.append(L("creds_yt_live_fail", detail=live_detail))
-                lines.append(L("creds_yt_expired_hint"))
-                yt_ok = False
-        elif os.path.exists(dl.cookies_path):
-            lines.append(L("creds_yt_cookies_incomplete"))
-            lines.append(L("creds_yt_cookies_incomplete_hint"))
-            yt_ok = False
-        else:
-            lines.append(L("creds_yt_cookies_missing", path=dl.cookies_path))
-            lines.append(L("creds_yt_cookies_missing_hint"))
-            yt_ok = False
+        lines.append(L("creds_yt_live_fail", detail=live_detail))
+        lines.append(L("creds_yt_blocked_hint"))
 
     lines.append("")
     lines.append(L("creds_spotify_section"))

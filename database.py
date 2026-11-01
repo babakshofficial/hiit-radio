@@ -583,10 +583,11 @@ class Database:
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def get_history_by_id(self, history_id):
+    def get_history_by_id(self, history_id, user_id):
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT * FROM download_history WHERE id=?", (history_id,)
+                "SELECT * FROM download_history WHERE id=? AND user_id=?",
+                (history_id, str(user_id)),
             ).fetchone()
             return dict(row) if row else None
 

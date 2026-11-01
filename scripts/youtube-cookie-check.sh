@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Quick check: can yt-dlp read Chrome cookies the same way the bot does?
+# Quick check of the optional cookie fallback, plus the bot's live YouTube probe.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

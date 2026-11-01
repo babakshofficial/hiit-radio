@@ -3,6 +3,7 @@ import re
 import time
 import threading
 import subprocess
+import tempfile
 import sys
 import yt_dlp
 import logging
@@ -16,6 +17,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageChops
 import io
 
 from metadata import score_query_coverage, strip_featured_credit
+from url_safety import YTDLP_ALLOWED_EXTRACTORS, find_youtube_url
 import jobs
 import messages as msg
 
@@ -38,12 +40,19 @@ _YT_SESSION_COOKIE_NAMES = (
     "__Secure-1PSID",
     "__Secure-3PSID",
 )
+# Exports keep only these sites; a browser jar holds every other logged-in session too.
+_COOKIE_DOMAINS = (
+    "youtube.com", "youtu.be", "youtube-nocookie.com", "ytimg.com",
+    "google.com", "googlevideo.com", "soundcloud.com",
+)
 # Legacy tuple kept for messages that reference the old combined list.
 _YT_AUTH_HINT_NAMES = _YT_AUTH_COOKIE_NAMES
 
-# web_safari + ejs:github pass YouTube bot-checks in 2026; android skips cookie auth.
-# android/ios tend to expose downloadable progressive audio; web_safari alone often
-# yields HLS-only picks that fail with "Requested format is not available".
+# Clients for requests without cookies, the default. Measured in Nov 2026 through the
+# production proxy: android and mweb worked; ios, tv, web and web_safari mostly did not.
+_YT_ANON_CLIENTS = ["android", "mweb"]
+# Clients for the optional cookie fallback. android ignores cookies, so it only helps
+# for formats; web_safari + ejs:github handle the authenticated requests.
 _YT_PLAYER_CLIENTS = ["android", "ios", "web", "web_safari", "tv"]
 # Prefer short, widely available videos for live auth probes.
 _DEFAULT_PROBE_URLS = (
@@ -193,6 +202,31 @@ def _is_bot_check_error(exc):
     return "confirm you're not a bot" in err or "sign in to confirm" in err
 
 
+def _is_format_error(exc_or_text):
+    err = str(exc_or_text or "").lower()
+    return (
+        "format is not available" in err
+        or "no video formats" in err
+        or "probe_no_formats" in err
+    )
+
+
+def _anonymous_failure_may_need_cookies(exc_or_text):
+    """True when a cookieless attempt was refused in a way cookies could fix.
+
+    Network errors and removed videos are excluded: retrying them with cookies
+    would expose the account for nothing.
+    """
+    err = str(exc_or_text or "").lower()
+    return (
+        _is_bot_check_error(err)
+        or _is_format_error(err)
+        or "members-only" in err
+        or "members only" in err
+        or "join this channel" in err
+    )
+
+
 def _is_network_probe_error(exc_or_text):
     """SSL/proxy/transport failures — cookies are irrelevant; fail fast."""
     err = str(exc_or_text or "").lower()
@@ -277,6 +311,43 @@ def cookie_jar_status(text):
     if missing:
         return False, "missing or empty: " + ", ".join(missing)
     return True, f"{len(values_by_name)} cookies, YouTube session present"
+
+
+def filter_cookie_jar(text):
+    """Keep only cookies yt-dlp needs; drop every other site in a browser export."""
+    kept = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        is_cookie = bool(stripped) and (
+            not stripped.startswith("#") or stripped.startswith("#HttpOnly_")
+        )
+        if is_cookie:
+            domain = stripped.split("\t", 1)[0].removeprefix("#HttpOnly_").lstrip(".").lower()
+            if not any(
+                domain == allowed or domain.endswith(f".{allowed}")
+                for allowed in _COOKIE_DOMAINS
+            ):
+                continue
+        kept.append(line)
+    return "\n".join(kept) + "\n"
+
+
+def write_private_file(path, data):
+    """Atomically replace ``path`` with owner-only ``data`` (str or bytes)."""
+    payload = data.encode("utf-8") if isinstance(data, str) else data
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp_path = tempfile.mkstemp(prefix=".tmp-private-", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def _cookies_look_authenticated(cookies_path):
@@ -745,7 +816,9 @@ class MusicDownloader:
 
         try:
             with open(self.cookies_path, "r", encoding="utf-8", errors="ignore") as f:
-                jar_ok, jar_detail = cookie_jar_status(f.read())
+                filtered = filter_cookie_jar(f.read())
+            write_private_file(self.cookies_path, filtered)
+            jar_ok, jar_detail = cookie_jar_status(filtered)
             if jar_ok:
                 return True, f"exported cookies.txt — {jar_detail}"
         except OSError:
@@ -796,54 +869,22 @@ class MusicDownloader:
         err = (completed.stderr or completed.stdout or "").strip()
         return False, err[:500] or "cookie refresh worker failed"
 
-    def _apply_auth(self, ydl_opts, *, live_browser=False):
-        """Attach cookies to yt-dlp options.
+    def _apply_auth(self, ydl_opts, auth="none"):
+        """Attach the requested credentials to yt-dlp options.
 
-        ``live_browser=True`` reads Chrome's cookie DB (subprocess downloads only).
-        The long-lived bot must not touch Chrome during search — it locks the DB and
-        breaks subprocess auth.
+        Only the worker's fallback passes anything but ``none``. ``browser`` reads
+        Chrome's cookie DB, so it must stay out of the long-lived bot process.
         """
         ydl_opts.setdefault("remote_components", ["ejs:github"])
         ydl_opts.setdefault("js_runtimes", _deno_js_runtimes())
-        browser = self._browser_auth_tuple()
-        if browser and live_browser:
-            ydl_opts["cookiesfrombrowser"] = browser
-            logger.info(
-                f"Using YouTube cookies from browser: {self.cookies_from_browser}"
-            )
-            return ydl_opts
-
-        if browser and not live_browser:
-            # Search/hydrate in-process: use exported cookies.txt (never touch Chrome DB).
-            cookies_ok = (
-                os.path.exists(self.cookies_path)
-                and _cookies_look_authenticated(self.cookies_path)
-            )
-            if cookies_ok:
-                ydl_opts["cookiefile"] = self.cookies_path
-                logger.info(
-                    f"Using exported YouTube cookies from {self.cookies_path}"
-                )
-            return ydl_opts
-
-        cookies_ok = (
-            os.path.exists(self.cookies_path)
-            and _cookies_look_authenticated(self.cookies_path)
-        )
-        if cookies_ok:
+        if auth == "browser":
+            browser = self._browser_auth_tuple()
+            if browser:
+                ydl_opts["cookiesfrombrowser"] = browser
+                logger.info("Using YouTube cookies from browser: %s", self.cookies_from_browser)
+        elif auth == "cookiefile":
             ydl_opts["cookiefile"] = self.cookies_path
-            logger.info(f"Using authenticated YouTube cookies from {self.cookies_path}")
-        elif os.path.exists(self.cookies_path):
-            ydl_opts["cookiefile"] = self.cookies_path
-            logger.warning(
-                f"Using partial cookies.txt at {self.cookies_path} "
-                "(missing some auth names — export fresh cookies if bot-check persists)"
-            )
-        else:
-            logger.warning(
-                f"No cookies at {self.cookies_path}. YouTube may bot-block. "
-                "Set YTDLP_COOKIES_FROM_BROWSER=chrome or upload cookies.txt."
-            )
+            logger.info("Using YouTube cookies from %s", self.cookies_path)
         return ydl_opts
 
     def probe_youtube_auth(self, force=False):
@@ -852,67 +893,7 @@ class MusicDownloader:
         if not force and now - _PROBE_CACHE["monotonic"] < _PROBE_TTL_SEC:
             return _PROBE_CACHE["ok"], _PROBE_CACHE["detail"]
 
-        use_subprocess = bool(self.cookies_from_browser)
-        if use_subprocess:
-            ok, detail = self._probe_youtube_subprocess(thorough=force)
-            _PROBE_CACHE.update(monotonic=now, ok=ok, detail=detail)
-            return ok, detail
-
-        opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "ignore_no_formats_error": False,
-            "socket_timeout": 30,
-            "remote_components": ["ejs:github"],
-            "js_runtimes": _deno_js_runtimes(),
-            "extractor_args": {"youtube": {"player_client": list(_YT_PLAYER_CLIENTS)}},
-        }
-        self._apply_auth(opts, live_browser=True)
-        ytdlp_log = logging.getLogger("yt_dlp")
-        prev_level = ytdlp_log.level
-        ytdlp_log.setLevel(logging.CRITICAL)
-        try:
-            for probe_url in _probe_urls():
-                try:
-                    with self._with_ydl(opts) as ydl:
-                        info = ydl.extract_info(probe_url, download=False)
-                    if _info_has_formats(info):
-                        ok, detail = True, "live probe OK (formats available)"
-                        break
-                    ok, detail = False, "probe returned no formats — download would fail"
-                except Exception as exc:
-                    err = str(exc)
-                    if _is_bot_check_error(exc):
-                        ok, detail = (
-                            False,
-                            "bot_check on probe URL (other videos may still download)",
-                        )
-                        continue
-                    if "no video formats found" in err.lower() or "format is not available" in err.lower():
-                        ok, detail = False, "no formats — YouTube bot-check, stale cookies, or JS runtime"
-                    else:
-                        ok, detail = False, err[:200]
-                    break
-            else:
-                ok, detail = (
-                    False,
-                    "bot_check on probe URL (other videos may still download)",
-                )
-            if not ok:
-                try:
-                    from yt_dlp.utils._jsruntime import DenoJsRuntime
-                    deno_info = DenoJsRuntime(path=_deno_js_runtimes().get("deno", {}).get("path")).info
-                    logger.warning(
-                        "YouTube probe failed (%s); deno=%s",
-                        detail,
-                        deno_info,
-                    )
-                except Exception:
-                    pass
-        finally:
-            ytdlp_log.setLevel(prev_level)
-
+        ok, detail = self._probe_youtube_subprocess(thorough=force)
         _PROBE_CACHE.update(monotonic=now, ok=ok, detail=detail)
         return ok, detail
 
@@ -931,10 +912,12 @@ class MusicDownloader:
 
     def _build_ydl_opts(
         self, output_template, progress_hooks=None, quality=DEFAULT_QUALITY,
-        player_clients=None, live_browser=False,
+        player_clients=None, auth="none",
     ):
         """Build yt-dlp options for the final audio download."""
-        clients = player_clients or list(_YT_PLAYER_CLIENTS)
+        clients = player_clients or list(
+            _YT_ANON_CLIENTS if auth == "none" else _YT_PLAYER_CLIENTS
+        )
         ydl_opts = {
             # Prefer progressive audio; fall back broadly so android/ios clients work.
             'format': 'bestaudio/best/bestaudio*/best*',
@@ -954,6 +937,7 @@ class MusicDownloader:
             'sleep_interval': 0,
             'max_sleep_interval': 0,
             'noplaylist': True,
+            'allowed_extractors': YTDLP_ALLOWED_EXTRACTORS,
             'extractor_args': {
                 'youtube': {
                     'player_client': clients,
@@ -968,36 +952,28 @@ class MusicDownloader:
             }]
         if progress_hooks:
             ydl_opts['progress_hooks'] = list(progress_hooks)
-        return self._apply_auth(ydl_opts, live_browser=live_browser)
+        return self._apply_auth(ydl_opts, auth)
 
     def _youtube_subprocess_attempts(self):
-        """Auth modes for subprocess YouTube downloads (cookies.txt first when valid)."""
-        attempts = []
+        """Auth modes for YouTube downloads: no cookies, then any configured fallback."""
+        attempts = ["none"]
         if _cookies_look_authenticated(self.cookies_path):
             attempts.append("cookiefile")
-        if self.cookies_from_browser and "browser" not in attempts:
-            attempts.append("browser")
-        return attempts or ["browser"]
-
-    def _probe_auth_attempts(self, *, fast=True):
-        """Health probe auth order.
-
-        ``fast=True`` (default): cookies.txt only when present — skips slow Chrome DB.
-        """
-        if _cookies_look_authenticated(self.cookies_path):
-            return ["cookiefile"]
-        if not fast and self.cookies_from_browser:
-            return ["browser"]
         if self.cookies_from_browser:
-            return ["browser"]
-        return ["cookiefile"] if os.path.exists(self.cookies_path) else ["browser"]
+            attempts.append("browser")
+        return attempts
+
+    def _probe_auth_attempts(self):
+        """Health probe order. Reads Chrome only when no exported jar can stand in."""
+        attempts = self._youtube_subprocess_attempts()
+        return attempts[:2]
 
     def _probe_worker_timeout(self, auth):
         """Keep probes short — longer timeouts only make startup slower."""
         custom = os.getenv("YTDLP_PROBE_TIMEOUT", "").strip()
         if custom.isdigit():
             return max(8, min(int(custom), 45))
-        return 20 if auth == "cookiefile" else 25
+        return 25 if auth == "browser" else 20
 
     def _run_youtube_worker(
         self, url, *, probe=False, output_template="", quality=DEFAULT_QUALITY,
@@ -1083,6 +1059,8 @@ class MusicDownloader:
                     # Network/SSL: stop immediately — more auth modes won't help.
                     if probe and _is_network_probe_error(last_err):
                         return False, last_err
+                    if auth == "none" and not _anonymous_failure_may_need_cookies(last_err):
+                        return False, last_err
                     if auth == "browser" and _is_bot_check_error(last_err):
                         if _cookies_look_authenticated(self.cookies_path):
                             logger.info(
@@ -1119,14 +1097,8 @@ class MusicDownloader:
             return False, detail
 
         # If still under proxychains and format/bot_check failed, retry direct once.
-        err_l = (detail or "").lower()
-        format_fail = (
-            "format is not available" in err_l
-            or "no video formats" in err_l
-            or "probe_no_formats" in err_l
-        )
         if (
-            (format_fail or _is_bot_check_error(detail))
+            (_is_format_error(detail) or _is_bot_check_error(detail))
             and not force_direct
             and env.get("LD_PRELOAD")
             and os.getenv("YTDLP_INHERIT_PROXYCHAINS", "").strip().lower()
@@ -1137,13 +1109,8 @@ class MusicDownloader:
             for key in list(direct_env):
                 if key.upper().startswith("PROXYCHAINS"):
                     direct_env.pop(key, None)
-            # Probe: one cookiefile/direct try only — don't re-walk all auth modes.
-            direct_modes = auth_modes
-            if probe:
-                if _cookies_look_authenticated(self.cookies_path):
-                    direct_modes = ["cookiefile"]
-                elif auth_modes:
-                    direct_modes = [auth_modes[0]]
+            # Probe: one cookieless direct try only — don't re-walk all auth modes.
+            direct_modes = ["none"] if probe else auth_modes
             logger.info(
                 "YouTube worker failure under proxychains — retrying without LD_PRELOAD"
             )
@@ -1157,7 +1124,7 @@ class MusicDownloader:
         self, url, output_template, quality=DEFAULT_QUALITY, cancel_check=None,
         user_id=None,
     ):
-        """Download in a fresh worker subprocess (isolates Chrome cookie access)."""
+        """Download in a fresh worker subprocess, keeping any cookie use out of the bot."""
         logger.info("YouTube subprocess download: %s", url)
         ok, detail = self._run_youtube_worker(
             url, probe=False, output_template=output_template, quality=quality,
@@ -1187,13 +1154,14 @@ class MusicDownloader:
             ok, detail = self._run_youtube_worker(
                 url, probe=False, output_template=output_template, quality=quality,
                 cancel_check=cancel_check, user_id=user_id,
+                auth_modes=[m for m in self._youtube_subprocess_attempts() if m != "none"],
             )
         if ok:
             return True
         raise RuntimeError(detail)
 
     def _probe_youtube_subprocess(self, thorough=False):
-        """Fast health-check via subprocess (cookies.txt preferred)."""
+        """Fast health-check via subprocess, in the same order downloads use."""
         urls = []
         if _HEALTH_PROBE_URL:
             urls.append(_HEALTH_PROBE_URL)
@@ -1202,8 +1170,7 @@ class MusicDownloader:
                 if url not in urls:
                     urls.append(url)
         last_detail = "subprocess probe failed on all URLs"
-        # Default: cookiefile only. Thorough / no jar → allow browser.
-        probe_modes = self._probe_auth_attempts(fast=not thorough)
+        probe_modes = self._probe_auth_attempts()
         for url in urls:
             ok, detail = self._run_youtube_worker(
                 url, probe=True, auth_modes=probe_modes,
@@ -1225,6 +1192,7 @@ class MusicDownloader:
             'extract_flat': 'in_playlist',
             'skip_download': True,
             'noplaylist': True,
+            'allowed_extractors': YTDLP_ALLOWED_EXTRACTORS,
             'sleep_interval': 0,
             'max_sleep_interval': 0,
             'socket_timeout': 20,
@@ -1238,11 +1206,11 @@ class MusicDownloader:
             },
             'extractor_args': {
                 'youtube': {
-                    'player_client': list(_YT_PLAYER_CLIENTS),
+                    'player_client': list(_YT_ANON_CLIENTS),
                 }
             },
         }
-        return self._apply_auth(ydl_opts, live_browser=False)
+        return self._apply_auth(ydl_opts)
 
     async def download_song(self, metadata, progress_reporter=None, cancel_check=None,
                           quality=DEFAULT_QUALITY, user_id=None):
@@ -1597,6 +1565,11 @@ class MusicDownloader:
             )
             try:
                 def _do_direct():
+                    if find_youtube_url(source_url):
+                        return self._download_youtube_subprocess(
+                            source_url, output_template, quality,
+                            cancel_check=_is_cancelled, user_id=user_id,
+                        )
                     _ensure_youtube_session_env()
                     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                         return ydl.download([source_url])
@@ -1802,8 +1775,8 @@ class MusicDownloader:
             saw_search_error = saw_search_error or saw_error
             return ranked, cancelled
 
-        # Without usable cookies YouTube downloads hit the bot check anyway, so
-        # try SoundCloud first instead of burning every search strategy on it.
+        # When the probe says YouTube is refusing us, downloads would hit the same
+        # wall, so try SoundCloud first instead of burning every search strategy on it.
         yt_usable, auth_cancelled = await _await_interruptible(
             loop, self.youtube_auth_ok, _is_cancelled,
         )
@@ -1813,7 +1786,7 @@ class MusicDownloader:
         source_order = ("YouTube", "SoundCloud") if yt_usable else ("SoundCloud", "YouTube")
         if not yt_usable:
             logger.warning(
-                "YouTube cookies are not usable — searching SoundCloud first "
+                "YouTube probe failed — searching SoundCloud first "
                 "(YouTube search still runs for ranking; downloads skipped if probe fails)"
             )
 
@@ -1965,7 +1938,7 @@ class MusicDownloader:
                     await _report(pct, detail)
                     await asyncio.sleep(3)
 
-            # Fresh subprocess for YouTube — isolates live Chrome cookie reads from search.
+            # Fresh subprocess for YouTube — it owns the auth order and cookie fallback.
             if source_label == "YouTube":
                 heartbeat = asyncio.create_task(_heartbeat())
                 try:
@@ -2129,9 +2102,9 @@ class MusicDownloader:
             "socket_timeout": 20,
             "retries": 2,
             "remote_components": ["ejs:github"],
-            "extractor_args": {"youtube": {"player_client": list(_YT_PLAYER_CLIENTS)}},
+            "extractor_args": {"youtube": {"player_client": list(_YT_ANON_CLIENTS)}},
         }
-        self._apply_auth(opts, live_browser=False)
+        self._apply_auth(opts)
         try:
             def _extract_full():
                 _ensure_youtube_session_env()

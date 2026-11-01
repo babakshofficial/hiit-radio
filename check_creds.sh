@@ -8,6 +8,6 @@ echo "========== credential status =========="
 .venv/bin/python -c "from cred_status import get_credentials_status; print(get_credentials_status()[0])"
 echo
 echo "========== next steps =========="
-echo "YouTube: see SETUP_CREDENTIALS.md §1 (export cookies or YTDLP_COOKIES_FROM_BROWSER=chrome)"
+echo "YouTube: no cookies needed; see SETUP_CREDENTIALS.md §1 if YouTube blocks this IP"
 echo
 echo "After changes: sudo systemctl restart hiit-radio.service"

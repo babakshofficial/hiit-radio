@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fresh-process YouTube download worker for the bot.
 
-Isolates live Chrome cookie reads from the long-lived bot process.
+Runs without cookies by default; the cookie fallback stays out of the bot process.
 Invoked by MusicDownloader._run_youtube_worker.
 """
 from __future__ import annotations
@@ -18,8 +18,8 @@ def main() -> int:
     parser.add_argument("--quality", default="128")
     parser.add_argument(
         "--auth",
-        choices=("browser", "cookiefile"),
-        default="browser",
+        choices=("none", "browser", "cookiefile"),
+        default="none",
         help="YouTube cookie source for this attempt",
     )
     parser.add_argument(
@@ -71,14 +71,8 @@ def main() -> int:
         print("url and outtmpl required unless --refresh-cookies", file=sys.stderr)
         return 2
 
-    live = args.auth == "browser"
-    opts = d._build_ydl_opts(args.outtmpl, quality=args.quality, live_browser=live)
+    opts = d._build_ydl_opts(args.outtmpl, quality=args.quality, auth=args.auth)
     opts["socket_timeout"] = 15
-    if args.auth == "cookiefile":
-        opts.pop("cookiesfrombrowser", None)
-        opts["cookiefile"] = d.cookies_path
-    else:
-        opts.pop("cookiefile", None)
 
     # Native yt-dlp proxy (set by parent after clearing proxychains LD_PRELOAD).
     proxy = (os.environ.get("YTDLP_PROXY") or "").strip()
@@ -98,7 +92,9 @@ def main() -> int:
         flush=True,
     )
 
-    from downloader import _info_has_formats, _YT_PLAYER_CLIENTS, _deno_js_runtimes
+    from downloader import (
+        _deno_js_runtimes, _info_has_formats, _YT_ANON_CLIENTS, _YT_PLAYER_CLIENTS,
+    )
 
     if args.probe:
         # Health check must NOT select a download format — restrictive
@@ -120,10 +116,10 @@ def main() -> int:
             base["cookiefile"] = opts["cookiefile"]
         # One client set for speed; second only if first returned no formats
         # (not on network/SSL — those fail immediately).
-        client_sets = [
-            ["android", "web"],
-            ["web"],
-        ]
+        if args.auth == "none":
+            client_sets = [list(_YT_ANON_CLIENTS), ["default"]]
+        else:
+            client_sets = [["android", "web"], ["web"]]
         last_err = None
         for clients in client_sets:
             attempt = dict(base)
@@ -179,13 +175,20 @@ def main() -> int:
         with d._with_ydl(attempt_opts) as ydl:
             ydl.download([args.url])
 
-    attempts = [
-        (list(_YT_PLAYER_CLIENTS), opts.get("format") or "bestaudio/best"),
-        (["android", "ios"], "bestaudio/best"),
-        (["android", "web"], "bestaudio/best/best"),
-        (["tv", "web"], "best"),
-        (["web"], "best/bestaudio"),
-    ]
+    if args.auth == "none":
+        attempts = [
+            (list(_YT_ANON_CLIENTS), opts.get("format") or "bestaudio/best"),
+            (["default"], "bestaudio/best"),
+            (["mweb"], "best/bestaudio"),
+        ]
+    else:
+        attempts = [
+            (list(_YT_PLAYER_CLIENTS), opts.get("format") or "bestaudio/best"),
+            (["android", "ios"], "bestaudio/best"),
+            (["android", "web"], "bestaudio/best/best"),
+            (["tv", "web"], "best"),
+            (["web"], "best/bestaudio"),
+        ]
     last_err = None
     for clients, fmt in attempts:
         try:

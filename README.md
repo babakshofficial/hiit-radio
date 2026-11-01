@@ -32,7 +32,7 @@ The user interface is in **Persian (Farsi)**. Admin tooling and this documentati
 - **VIP log channel** — every request, download event, startup/shutdown, and error logged to a private admin channel
 - **SQLite analytics** — users, downloads, cache stats, platform breakdown
 - **Admin broadcast** — `/broadcast` with optional confirmation token
-- **Cookie self-service** — send a fresh `cookies.txt` to the bot as a file; it is validated before replacing the old jar
+- **Optional cookie fallback** — send a `cookies.txt` to the bot as a file; it is validated before replacing the old jar
 
 ## Development checks
 
@@ -48,7 +48,7 @@ See [OPERATIONS.md](OPERATIONS.md) for backups, `/syncmenus`, and gate/API optio
 - Python 3.10+
 - [FFmpeg](https://ffmpeg.org/) on `PATH`
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
-- **YouTube login cookies** (required for all downloads) — see [SETUP_CREDENTIALS.md](SETUP_CREDENTIALS.md)
+- YouTube cookies are **optional**: downloads run without them. See [SETUP_CREDENTIALS.md](SETUP_CREDENTIALS.md) if YouTube blocks your IP
 
 Enable **inline mode** in BotFather if you want inline search.
 
@@ -90,8 +90,8 @@ All settings live in `.env`. See `.env.example` for the full list.
 | `TOPUP_AMOUNT` / `REFERRALS_PER_TOPUP` | Day-pass size and invites needed for a free top-up |
 | `STARS_DAYPASS` / `STARS_WEEKLY` / `STARS_MONTHLY` | Telegram Stars prices |
 | `TG_*_TIMEOUT` | Telegram API/upload timeouts for slow VPS links |
-| `YTDLP_COOKIES_FROM_BROWSER` | e.g. `chrome` — read live browser cookies |
-| `YTDLP_COOKIES` | Path to exported `cookies.txt` |
+| `YTDLP_COOKIES_FROM_BROWSER` | Optional fallback, e.g. `chrome` — read live browser cookies |
+| `YTDLP_COOKIES` | Optional fallback: path to exported `cookies.txt` |
 | `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | Spotify Web API (metadata only) |
 | `LLM_API_BASE` / `LLM_API_KEY` / `LLM_MODEL` | LLM for `/discover` recommendations |
 | `DEVELOPER_NAME` / `DEVELOPER_USERNAME` | Developer info shown by `/aboutme` |
@@ -99,7 +99,7 @@ All settings live in `.env`. See `.env.example` for the full list.
 
 ### Credentials
 
-Full-track downloads require **YouTube** logged-in cookies for yt-dlp.
+Downloads run without YouTube cookies. Age-restricted and members-only videos need a cookie fallback.
 
 `SPOTIFY_CLIENT_ID` / `SECRET` are optional and only improve metadata on Spotify links; they do not download audio.
 
@@ -194,7 +194,7 @@ Send a track link, album/playlist URL, or plain song name as a normal message to
 | `/user <id>` | User profile, downloads, requests, LLM usage |
 | `/export` | Download full database export as JSON |
 | `/creds` | YouTube credential readiness report |
-| `/cookies` | Cookie jar health; send a `cookies.txt` file to the bot to replace it |
+| `/cookies` | Optional cookie fallback status; send a `cookies.txt` file to the bot to replace it |
 | `/channelid` | Resolve chat ID for VIP log channel setup |
 | `/viplogtest` | Test VIP log channel (admin) |
 | `/grant <user_id> <premium\|unlimited> <days>` | Manually activate a subscription |
@@ -222,7 +222,7 @@ User message (link / search / playlist)
        miss
         │
         ▼
-  YouTube match (yt-dlp + cookies) ──► SoundCloud fallback
+  YouTube match (yt-dlp, no cookies) ──► SoundCloud fallback
         │
         ▼
   Embed lyrics, write cache, send MP3 + recommendation buttons

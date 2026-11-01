@@ -81,7 +81,10 @@ from llm_service import (
     set_cached_recommendations,
 )
 from cache_manager import content_key
-from downloader import cookie_jar_status, invalidate_youtube_auth_probe, downloads_in_progress
+from downloader import (
+    cookie_jar_status, downloads_in_progress, filter_cookie_jar,
+    invalidate_youtube_auth_probe, write_private_file,
+)
 from preview import PreviewSender
 import entitlements
 import jobs
@@ -859,6 +862,8 @@ def _stats_text(lang=None):
 def _cookies_status_text():
     _file_ok, file_detail, updated = _cookie_file_status()
     healthy, _detail = _youtube_auth_status()
+    if not os.path.exists(downloader.cookies_path):
+        file_detail = "no cookies.txt (optional — used only if YouTube refuses cookieless requests)"
     if downloader.cookies_from_browser:
         file_detail += f"\nپشتیبان مرورگر: {downloader.cookies_from_browser}"
     return msg.cookies_status(
@@ -2302,7 +2307,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("redownload:"):
         hist_id = int(data.split(":", 1)[1])
-        row = user_manager.get_history_by_id(hist_id)
+        row = user_manager.get_history_by_id(hist_id, update.effective_user.id)
         if not row:
             await query.message.reply_text(
                 msg.record_not_found(), reply_markup=_back_button(),
@@ -3369,7 +3374,7 @@ def _probe_is_inconclusive(detail):
         "temporary failure in name resolution",
         "proxyerror",
         "tunnel connection failed",
-        "cookies not proven bad",
+        "not proven blocked",
         "youtube/proxy was slow",
         "network/proxy",
     )
@@ -3377,56 +3382,21 @@ def _probe_is_inconclusive(detail):
 
 
 def _youtube_auth_status():
-    """Return ``(healthy, detail)`` for the credentials yt-dlp will actually use."""
+    """Return ``(healthy, detail)`` from a live probe in the order downloads use."""
     file_ok, file_detail, _updated = _cookie_file_status()
-    path = downloader.cookies_path
     live_ok, live_detail = downloader.probe_youtube_auth()
     if live_ok:
-        if downloader.cookies_from_browser:
-            return True, (
-                f"browser cookies OK — {live_detail} "
-                f"({downloader.cookies_from_browser})"
-            )
-        return True, f"cookies.txt OK — {live_detail} ({path})"
+        return True, f"YouTube OK — {live_detail}"
     detail = str(live_detail or "")
-    detail_l = detail.lower()
-    format_issue = (
-        "format is not available" in detail_l
-        or "no video formats" in detail_l
-        or "probe_no_formats" in detail_l
-    )
-    proxy_issue = "proxychains" in detail_l
     if _probe_is_inconclusive(detail):
         jar = "ok" if file_ok else (file_detail or "unverified")
         return False, (
             f"health probe network/proxy issue ({detail[:180]}). "
-            f"Cookies not proven bad (jar={jar})."
-        )
-    if downloader.cookies_from_browser:
-        if format_issue or proxy_issue:
-            return False, (
-                f"YouTube format/probe failed ({detail[:220]}). "
-                "Cookies may be fine — proxychains/format client issue. "
-                "Worker retries without LD_PRELOAD on format errors; "
-                "set YTDLP_CLEAR_PROXYCHAINS=1 to always skip proxychains for YouTube."
-            )
-        return False, (
-            f"browser cookies failed ({detail}); "
-            f"check {downloader.cookies_from_browser} is logged into YouTube"
-        )
-    if file_ok:
-        if format_issue or proxy_issue:
-            return False, (
-                f"YouTube format/probe failed ({detail[:220]}) with cookies at {path}. "
-                "Jar may still be valid — check proxychains / player clients."
-            )
-        return False, (
-            f"cookies.txt stale ({detail}) at {path}. "
-            "Send a fresh cookies.txt to the bot as a file to fix it — see /cookies."
+            f"YouTube not proven blocked (cookie jar={jar})."
         )
     return False, (
-        f"cookies.txt unusable ({file_detail}) at {path}. "
-        "Send a fresh cookies.txt to the bot as a file to fix it — see /cookies."
+        f"YouTube refused the probe ({detail[:220]}). See 'If YouTube starts blocking' "
+        "in SETUP_CREDENTIALS.md."
     )
 
 
@@ -3474,11 +3444,7 @@ async def cookies_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if os.path.exists(path):
             shutil.copy2(path, f"{path}.bak")
             backed_up = True
-        tmp_path = f"{path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(text)
-        os.replace(tmp_path, path)
-        os.chmod(path, 0o600)
+        write_private_file(path, filter_cookie_jar(text))
     except OSError as e:
         logger.error("Could not write cookies.txt: %s", e)
         await update.message.reply_text(
@@ -3528,7 +3494,7 @@ async def _check_and_report_cookie_health(bot):
     healthy, detail = await asyncio.to_thread(_youtube_auth_status)
     if _probe_is_inconclusive(detail):
         logger.warning(
-            "Skipping VIP cookie alert (probe timed out, cookies not proven bad): %s",
+            "Skipping VIP YouTube alert (probe inconclusive, not proven blocked): %s",
             detail,
         )
         return
@@ -3544,17 +3510,10 @@ async def _cache_sweep_fallback_loop(bot):
 
 
 async def _deferred_youtube_setup(bot):
-    """Refresh cookies then do one fast probe — never block the bot on Chrome."""
+    """Do one fast probe. Cookies are refreshed only after a real bot check."""
     from downloader import invalidate_youtube_auth_probe
 
     await asyncio.sleep(2)
-
-    if downloader.cookies_from_browser:
-        try:
-            ok, detail = await asyncio.to_thread(downloader.refresh_cookies_from_browser)
-            logger.info("YouTube cookie refresh (deferred): ok=%s detail=%s", ok, detail)
-        except Exception as exc:
-            logger.warning("YouTube cookie refresh failed: %s", exc)
 
     invalidate_youtube_auth_probe()
     # One probe only (get_credentials_status caches it for the health report).
@@ -3577,12 +3536,12 @@ async def _deferred_youtube_setup(bot):
         if _probe_is_inconclusive(auth_detail) or _probe_is_inconclusive(status_text):
             logger.info(
                 "YouTube startup probe inconclusive (network/proxy). "
-                "Cookies not proven bad — downloads will retry on bot_check."
+                "YouTube not proven blocked — downloads will still be tried."
             )
         else:
             logger.warning(
                 "YouTube live probe failed after deferred startup. "
-                "Downloads retry with backoff + cookie refresh on bot_check."
+                "Downloads fall back to SoundCloud and any configured cookies."
             )
     try:
         await _check_and_report_cookie_health(bot)

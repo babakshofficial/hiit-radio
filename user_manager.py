@@ -63,8 +63,8 @@ class UserManager:
     def get_user_history(self, user_id, limit=10):
         return self.db.get_user_history(user_id, limit)
 
-    def get_history_by_id(self, history_id):
-        return self.db.get_history_by_id(history_id)
+    def get_history_by_id(self, history_id, user_id):
+        return self.db.get_history_by_id(history_id, user_id)
 
     def add_favorite(self, user_id, title, artist=None, album=None, content_key=None):
         return self.db.add_favorite(user_id, title, artist, album, content_key)

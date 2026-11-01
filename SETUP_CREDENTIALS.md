@@ -4,7 +4,7 @@ All audio is downloaded via **YouTube** (with SoundCloud fallback). Spotify and 
 
 | Path | Used for | Credential |
 |------|----------|------------|
-| YouTube | All audio downloads | Logged-in `cookies.txt` **or** `YTDLP_COOKIES_FROM_BROWSER` |
+| YouTube | All audio downloads | None. Optional fallback: `cookies.txt` **or** `YTDLP_COOKIES_FROM_BROWSER` |
 | Spotify API | Title/artist/artwork on Spotify links (optional) | `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` |
 
 Check anytime with Telegram admin command:
@@ -21,9 +21,19 @@ Or in the project folder:
 
 ---
 
-## 1) YouTube (required for all downloads)
+## 1) YouTube
 
-### Option A — browser cookies (recommended on desktop)
+Downloads run without cookies, so there is nothing to set up. Age-restricted and members-only videos won't download this way.
+
+### If YouTube starts blocking
+
+If `/creds` or error reports show `bot_check`, try these in order:
+
+1. Add a PO token provider plugin for yt-dlp, such as `bgutil-ytdlp-pot-provider`.
+2. Change the proxy's exit IP. A home IP is usually treated better than a datacenter one.
+3. Add a cookie fallback using the options below, signed in to a **throwaway Google account, never your personal one**. Cookies are tried only after YouTube refuses a cookieless attempt.
+
+### Option A — browser cookies
 
 1. Open Chrome, go to https://www.youtube.com and **sign in**.
 2. Fully quit Chrome (cookies DB may be locked while Chrome runs).
