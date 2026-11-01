@@ -15,6 +15,7 @@
 
 - `scripts/check_smoke.py` — metadata, locales, DB init (no Telegram).
 - `scripts/check_locales.py` — all locale key sets match English.
+- `scripts/check_security.py` — URL allowlist, redirect, cookie and API auth checks.
 
 ## Channel gate
 
@@ -23,4 +24,14 @@
 
 ## API secrets
 
-- Set a dedicated `JWT_SECRET` (24+ chars). Use `API_STRICT_SECRETS=1` to refuse startup with a weak secret.
+- `JWT_SECRET` is required: 32+ characters, different from `BOT_TOKEN`. The API refuses to start otherwise. Generate one with `openssl rand -hex 32`. Changing it logs out web sessions.
+
+## File permissions
+
+- Secrets (`.env`, `cookies.txt`, `credentials.json`, `hiit_radio.db*`) should be mode 600, and the checkout closed to other users (`chmod -R g-w,o-rwx .`).
+
+## YouTube access
+
+- Downloads run without cookies. A configured jar or browser is tried only after YouTube refuses a cookieless attempt (bot check, age or members-only, or no formats).
+- If you do configure cookies, use a throwaway Google account, never a personal one.
+- Exports and uploads keep only YouTube, Google and SoundCloud cookies and are written with mode 600.

@@ -15,8 +15,8 @@ Environment=LANG=en_US.UTF-8
 # DBUS + deno/node paths are finalized in scripts/hiit-radio-stack.sh
 Environment=PATH=/home/babak/.deno/bin:/home/babak/.nvm/versions/node/v24.20.0/bin:/home/babak/Desktop/Projects/hiit-radio-bot/.venv/bin:/usr/local/bin:/usr/bin:/bin
 
-# Root: apt packages (ffmpeg, python3, curl, …). "+" = full privileges.
-ExecStartPre=+/home/babak/Desktop/Projects/hiit-radio-bot/scripts/install-deps.sh --system
+# Apt packages are installed once by scripts/install-systemd.sh, never at service start:
+# nothing in this user-writable checkout may run as root on every restart.
 # User: Deno, Node/nvm, venv+pip, web npm — then start bot/API/web.
 ExecStart=/home/babak/Desktop/Projects/hiit-radio-bot/scripts/hiit-radio-stack.sh
 
@@ -26,6 +26,8 @@ KillMode=control-group
 TimeoutStopSec=30
 Restart=on-failure
 RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
 
 StandardOutput=journal
 StandardError=journal

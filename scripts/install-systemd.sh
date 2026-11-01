@@ -24,14 +24,13 @@ sed \
   -e "s|^WorkingDirectory=.*|WorkingDirectory=${ROOT}|" \
   -e "s|^EnvironmentFile=.*|EnvironmentFile=-${ROOT}/.env|" \
   -e "s|^Environment=PATH=.*|Environment=PATH=${HOME_DIR}/.deno/bin:${HOME_DIR}/.nvm/versions/node/v24.20.0/bin:${ROOT}/.venv/bin:/usr/local/nvm/versions/node/v24.20.0/bin:/usr/local/bin:/usr/bin:/bin|" \
-  -e "s|^ExecStartPre=.*|ExecStartPre=+${ROOT}/scripts/install-deps.sh --system|" \
   -e "s|^ExecStart=.*|ExecStart=${ROOT}/scripts/hiit-radio-stack.sh|" \
   "$UNIT_SRC" >"$tmp"
 
 install -m 0644 "$tmp" "$UNIT_DST"
 rm -f "$tmp"
 
-# Install system packages immediately (also runs again on every service start).
+# Install system packages once, as root, at install time.
 "$ROOT/scripts/install-deps.sh" --system
 
 # User-level deps as the service account.
