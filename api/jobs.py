@@ -237,9 +237,9 @@ class JobManager:
                 platform=platform,
                 cached=bool(cached),
             )
-        except Exception as e:
+        except Exception:
             logger.exception("download job failed: %s", job_id)
-            self._update(job, status="error", error="exception", message=str(e)[:200])
+            self._update(job, status="error", error="exception", message="دانلود ناموفق بود")
         finally:
             self._release(job)
 
@@ -353,9 +353,9 @@ class JobManager:
                 track_results=results,
                 error=None if ok_count else "all_failed",
             )
-        except Exception as e:
+        except Exception:
             logger.exception("playlist job failed: %s", job_id)
-            self._update(job, status="error", error="exception", message=str(e)[:200])
+            self._update(job, status="error", error="exception", message="دانلود ناموفق بود")
         finally:
             self._release(job)
 

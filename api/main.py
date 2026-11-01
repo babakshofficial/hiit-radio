@@ -2,29 +2,44 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
 import os
-from typing import Any, Optional
+from typing import Literal, Optional
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from telegram.error import RetryAfter
 
 from api import auth, config
 from api.auth import get_current_user, require_admin
 from api.deps import get_bot, get_db, get_user_manager, ydl_opts_factory
 from api.jobs import jobs
+from downloader import (
+    cookie_jar_status,
+    filter_cookie_jar,
+    invalidate_youtube_auth_probe,
+    write_private_file,
+)
 from metadata import TrackMetadata
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="HIIT Radio API", version="1.0.0")
+_DOCS = config.API_DOCS_ENABLED
+app = FastAPI(
+    title="HIIT Radio API",
+    version="1.0.0",
+    docs_url="/docs" if _DOCS else None,
+    redoc_url="/redoc" if _DOCS else None,
+    openapi_url="/openapi.json" if _DOCS else None,
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=config.CORS_ORIGINS or ["*"],
+    allow_origins=config.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -54,10 +69,10 @@ class JobBody(BaseModel):
 
 
 class FavBody(BaseModel):
-    title: str
-    artist: Optional[str] = None
-    album: Optional[str] = None
-    content_key: Optional[str] = None
+    title: str = Field(min_length=1, max_length=500)
+    artist: Optional[str] = Field(default=None, max_length=500)
+    album: Optional[str] = Field(default=None, max_length=500)
+    content_key: Optional[str] = Field(default=None, max_length=128)
 
 
 class InvoiceBody(BaseModel):
@@ -65,14 +80,14 @@ class InvoiceBody(BaseModel):
 
 
 class AdminGrantBody(BaseModel):
-    user_id: str
-    tier: str = "premium"
-    days: int = 30
+    user_id: str = Field(pattern=r"^\d{1,20}$")
+    tier: Literal["premium", "unlimited"] = "premium"
+    days: int = Field(default=30, ge=1, le=3650)
 
 
 class AdminTopupBody(BaseModel):
-    user_id: str
-    amount: Optional[int] = None
+    user_id: str = Field(pattern=r"^\d{1,20}$")
+    amount: Optional[int] = Field(default=None, ge=1, le=10000)
 
 
 class AdminBroadcastBody(BaseModel):
@@ -83,6 +98,9 @@ class AgentReplyBody(BaseModel):
     message: str = Field(min_length=1, max_length=3500)
 
 
+_COOKIE_UPLOAD_MAX_BYTES = 2 * 1024 * 1024
+
+
 def require_agent_secret(
     x_agent_secret: Optional[str] = Header(default=None),
 ):
@@ -91,7 +109,7 @@ def require_agent_secret(
     if not expected:
         raise HTTPException(503, "Agent report API is not configured")
     provided = x_agent_secret or ""
-    if not hmac.compare_digest(provided, expected):
+    if not hmac.compare_digest(provided.encode(), expected.encode()):
         raise HTTPException(401, "Invalid agent secret")
     return True
 
@@ -284,14 +302,14 @@ async def cancel_job(job_id: str, user=Depends(get_current_user)):
 
 
 @app.get("/history")
-async def history(limit: int = 30, user=Depends(get_current_user)):
+async def history(limit: int = Query(default=30, ge=1), user=Depends(get_current_user)):
     _touch(user)
     rows = get_user_manager().get_user_history(user["id"], limit=min(limit, 100))
     return {"items": rows}
 
 
 @app.get("/liked")
-async def liked(limit: int = 50, user=Depends(get_current_user)):
+async def liked(limit: int = Query(default=50, ge=1), user=Depends(get_current_user)):
     _touch(user)
     rows = get_user_manager().list_favorites(user["id"], limit=min(limit, 100))
     return {"items": rows}
@@ -315,7 +333,7 @@ async def remove_liked(content_key: str, user=Depends(get_current_user)):
 
 
 @app.get("/top")
-async def top(period: str = "week", limit: int = 20, user=Depends(get_current_user)):
+async def top(period: str = "week", limit: int = Query(default=20, ge=1), user=Depends(get_current_user)):
     _touch(user)
     if period not in ("day", "week", "all"):
         period = "week"
@@ -335,7 +353,7 @@ async def discover(user=Depends(get_current_user)):
         recs, _usage = await llm_service.recommend_songs(history, user_id=user["id"])
     except Exception as e:
         logger.exception("discover failed")
-        raise HTTPException(500, str(e)[:200]) from e
+        raise HTTPException(500, "Discover failed") from e
     if not recs:
         raise HTTPException(502, "No recommendations")
     return {"items": recs}
@@ -396,7 +414,7 @@ async def premium_invoice(body: InvoiceBody, user=Depends(get_current_user)):
         )
     except Exception as e:
         logger.exception("create_invoice_link failed")
-        raise HTTPException(500, f"Invoice failed: {e}") from e
+        raise HTTPException(500, "Invoice failed") from e
     return {"invoice_url": link, "kind": body.kind, "stars": meta["stars"]}
 
 
@@ -425,7 +443,7 @@ async def admin_stats(_admin=Depends(require_admin)):
 
 
 @app.get("/admin/users")
-async def admin_users(limit: int = 50, _admin=Depends(require_admin)):
+async def admin_users(limit: int = Query(default=50, ge=1), _admin=Depends(require_admin)):
     db = get_db()
     with db._conn() as conn:
         rows = conn.execute(
@@ -492,10 +510,16 @@ async def admin_broadcast(body: AdminBroadcastBody, admin=Depends(require_admin)
     failed = 0
     for uid in ids:
         try:
-            await bot.send_message(chat_id=int(uid), text=body.message)
+            try:
+                await bot.send_message(chat_id=int(uid), text=body.message)
+            except RetryAfter as e:
+                wait = e.retry_after
+                await asyncio.sleep(getattr(wait, "total_seconds", lambda: wait)())
+                await bot.send_message(chat_id=int(uid), text=body.message)
             sent += 1
         except Exception:
             failed += 1
+        await asyncio.sleep(0.05)
     return {"ok": True, "sent": sent, "failed": failed, "total": len(ids)}
 
 
@@ -504,15 +528,16 @@ async def admin_cookies(file: UploadFile = File(...), _admin=Depends(require_adm
     dest = os.getenv("YTDLP_COOKIES", "").strip() or str(
         __import__("pathlib").Path(config.DATABASE_PATH).resolve().parent / "cookies.txt"
     )
-    content = await file.read()
-    text = content.decode("utf-8", errors="replace")
-    if "# Netscape HTTP Cookie File" not in text and "netscape" not in text.lower()[:200]:
-        # soft check — still allow if looks like cookies
-        if "youtube.com" not in text and ".youtube.com" not in text:
-            raise HTTPException(400, "File does not look like a Netscape cookies.txt")
-    with open(dest, "wb") as f:
-        f.write(content)
-    return {"ok": True, "path": dest, "bytes": len(content)}
+    content = await file.read(_COOKIE_UPLOAD_MAX_BYTES + 1)
+    if len(content) > _COOKIE_UPLOAD_MAX_BYTES:
+        raise HTTPException(413, "Cookie file is too large")
+    filtered = filter_cookie_jar(content.decode("utf-8", errors="replace"))
+    ok, detail = cookie_jar_status(filtered)
+    if not ok:
+        raise HTTPException(400, f"Cookie file rejected: {detail}")
+    write_private_file(dest, filtered)
+    invalidate_youtube_auth_probe()
+    return {"ok": True, "path": dest, "bytes": len(filtered.encode("utf-8"))}
 
 
 @app.get("/admin/creds")
@@ -522,8 +547,9 @@ async def admin_creds(_admin=Depends(require_admin)):
 
         text, ok = get_credentials_status()
         return {"ok": ok, "status": text}
-    except Exception as e:
-        return {"ok": False, "status": str(e)}
+    except Exception:
+        logger.exception("credential status failed")
+        return {"ok": False, "status": "Credential status failed"}
 
 
 @app.get("/admin/export")

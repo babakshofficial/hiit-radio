@@ -18,8 +18,16 @@ from api import config
 _bearer = HTTPBearer(auto_error=False)
 
 
-def _secret_key() -> bytes:
-    return hashlib.sha256(config.BOT_TOKEN.encode()).digest()
+def _require_fresh_auth_date(raw: Any, max_age_sec: int, expired_detail: str) -> None:
+    """``auth_date`` is signed by Telegram; a missing or malformed one is rejected."""
+    try:
+        auth_date = int(raw)
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid auth_date") from e
+    if auth_date <= 0:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid auth_date")
+    if time.time() - auth_date > max_age_sec:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, expired_detail)
 
 
 def validate_webapp_init_data(init_data: str, max_age_sec: int = 86400) -> dict[str, Any]:
@@ -37,12 +45,10 @@ def validate_webapp_init_data(init_data: str, max_age_sec: int = 86400) -> dict[
     data_check = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
     secret = hmac.new(b"WebAppData", config.BOT_TOKEN.encode(), hashlib.sha256).digest()
     calculated = hmac.new(secret, data_check.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(calculated, received_hash):
+    if not hmac.compare_digest(calculated.encode(), received_hash.encode()):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid initData signature")
 
-    auth_date = int(pairs.get("auth_date") or 0)
-    if auth_date and time.time() - auth_date > max_age_sec:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "initData expired")
+    _require_fresh_auth_date(pairs.get("auth_date"), max_age_sec, "initData expired")
 
     user_raw = pairs.get("user")
     if not user_raw:
@@ -51,7 +57,7 @@ def validate_webapp_init_data(init_data: str, max_age_sec: int = 86400) -> dict[
         user = json.loads(user_raw)
     except json.JSONDecodeError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid user JSON") from e
-    if not user.get("id"):
+    if not isinstance(user, dict) or not user.get("id"):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid user id")
     return {"user": user, "raw": pairs}
 
@@ -69,12 +75,10 @@ def validate_login_widget(payload: dict[str, Any], max_age_sec: int = 86400) -> 
     check_string = "\n".join(f"{k}={data[k]}" for k in sorted(data.keys()))
     secret = hashlib.sha256(config.BOT_TOKEN.encode()).digest()
     calculated = hmac.new(secret, check_string.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(calculated, str(received_hash)):
+    if not hmac.compare_digest(calculated.encode(), str(received_hash).encode()):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid login signature")
 
-    auth_date = int(data.get("auth_date") or 0)
-    if auth_date and time.time() - auth_date > max_age_sec:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Login data expired")
+    _require_fresh_auth_date(data.get("auth_date"), max_age_sec, "Login data expired")
 
     user_id = data.get("id")
     if not user_id:
@@ -107,7 +111,10 @@ def issue_token(user: dict[str, Any]) -> str:
 
 def decode_token(token: str) -> dict[str, Any]:
     try:
-        return jwt.decode(token, config.JWT_SECRET, algorithms=["HS256"])
+        return jwt.decode(
+            token, config.JWT_SECRET, algorithms=["HS256"],
+            options={"require": ["sub", "exp"]},
+        )
     except jwt.ExpiredSignatureError as e:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token expired") from e
     except jwt.InvalidTokenError as e:
@@ -128,7 +135,10 @@ def sign_file_token(path: str, user_id: str, kind: str = "audio") -> str:
 
 def decode_file_token(token: str) -> dict[str, Any]:
     try:
-        return jwt.decode(token, config.JWT_SECRET, algorithms=["HS256"])
+        return jwt.decode(
+            token, config.JWT_SECRET, algorithms=["HS256"],
+            options={"require": ["uid", "path", "exp"]},
+        )
     except jwt.InvalidTokenError as e:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired file link") from e
 
