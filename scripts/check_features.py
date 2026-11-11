@@ -354,6 +354,99 @@ def check_mix_release_window():
     assert [r["title"] for r in db.recent_releases_for_user(USER)] == ["Fresh Album"]
 
 
+DAY = 86400
+
+
+def _related_catalog(n=12):
+    """Stub Deezer: every seed artist has the same pool of related tracks."""
+    calls = []
+
+    async def related(artist, per_artist=3, related_limit=5):
+        calls.append(artist)
+        return [{"title": f"Related {i}", "artist": f"Other {i % 4}"} for i in range(n)]
+
+    real = weekly_mix.catalog.fetch_related_tracks
+    weekly_mix.catalog.fetch_related_tracks = related
+    return calls, real
+
+
+def check_mix_frequency_sets_the_interval():
+    db = fresh_db()
+    now = time.time()
+    db.set_weekly_mix(USER, True)
+    assert db.get_mix_frequency(USER) == "weekly", "existing opt-ins stay weekly"
+    db.claim_weekly_mix(USER, now)
+    assert db.list_weekly_mix_due(now + DAY + 1) == []
+    assert db.list_weekly_mix_due(now + WEEK + 1) == [USER]
+
+    db.set_mix_frequency(USER, "daily")
+    assert db.list_weekly_mix_due(now + 60) == []
+    assert db.list_weekly_mix_due(now + DAY + 1) == [USER]
+    assert db.claim_weekly_mix(USER, now + 60) is False, "one daily mix per day"
+    assert db.claim_weekly_mix(USER, now + DAY + 1) == now
+    try:
+        db.set_mix_frequency(USER, "hourly")
+        raise AssertionError("unknown frequency accepted")
+    except ValueError:
+        pass
+
+
+def check_daily_mix_uses_related_artists_without_repeats():
+    _no_catalog()
+    db = fresh_db()
+    seed_chart(db)
+    for i in range(3):
+        db.log_download(USER, f"Mine {i}", "Seed Artist", "youtube", None, None, None, False)
+    db.set_weekly_mix(USER, True)
+    db.set_mix_frequency(USER, "daily")
+    calls, real = _related_catalog()
+    real_llm = weekly_mix.llm_configured
+    weekly_mix.llm_configured = lambda: (_ for _ in ()).throw(AssertionError("daily must not call the LLM"))
+    try:
+        bot = FakeBot()
+        now = time.time()
+        assert asyncio.run(weekly_mix.send_mix(bot, db, USER, now=now)) is True
+        assert asyncio.run(weekly_mix.send_mix(bot, db, USER, now=now + 3600)) is False
+        assert asyncio.run(weekly_mix.send_mix(bot, db, USER, now=now + DAY + 1)) is True
+        assert "Seed Artist" in calls
+        day1, day2 = ({line for line in m.text.splitlines()[1:] if line} for m in bot.sent)
+        assert all("Related" in line for line in day1 | day2), "picks come from related artists"
+        assert len(day1) == len(day2) == weekly_mix.MIX_SIZE
+        assert not day1 & day2, "a daily pick is not repeated the next day"
+        labels = [b.callback_data for b in buttons(bot.sent[0].keyboard)]
+        assert "mix:weekly" in labels and "mix:off" in labels
+        assert any(c.startswith("mixfb:") and c.endswith(":-1") for c in labels)
+    finally:
+        weekly_mix.catalog.fetch_related_tracks = real
+        weekly_mix.llm_configured = real_llm
+
+
+def check_mix_feedback_shapes_later_picks():
+    _no_catalog()
+    db = fresh_db()
+    seed_chart(db)
+    ids = db.save_weekly_mix_items(USER, [
+        {"title": "Song 0", "artist": "Artist 0"},
+        {"title": "Song 1", "artist": "Artist 1"},
+        {"title": "Extra", "artist": "Artist 1"},
+    ], now=time.time() - 40 * DAY)  # Old enough to be outside the no-repeat window.
+    assert db.set_mix_feedback("other", ids[0], -1) is None, "only the owner can rate"
+    assert db.set_mix_feedback(USER, ids[0], -1)
+    db.set_mix_feedback(USER, ids[1], -1)
+    db.set_mix_feedback(USER, ids[2], 1)
+    db.set_mix_feedback(USER, ids[2], -1)  # Changing a rating replaces it.
+    summary = db.mix_feedback_summary(USER)
+    assert summary["disliked_artists"] == {"artist 1"}
+    assert not summary["liked"]
+
+    picks, _ = asyncio.run(weekly_mix.build_mix(db, USER))
+    titles = {p["title"] for p in picks}
+    artists = {p["artist"] for p in picks}
+    assert "Song 0" not in titles, "a disliked pick is not suggested again"
+    assert "Artist 1" not in artists, "an artist disliked twice is left out"
+    assert len(picks) == weekly_mix.MIX_SIZE
+
+
 def check_mix_respects_send_hours():
     db = fresh_db()
     # 2026-01-01 00:00 UTC is 03:30 in Tehran; 12:00 UTC is 15:30.
@@ -447,6 +540,24 @@ def check_buttons_route_to_their_features():
     context.tasks[0].close()
     _press("mix:off", context)
     assert not db.get_weekly_mix_enabled(USER)
+
+    # Daily and weekly switches, and feedback that belongs to its owner.
+    context = _context()
+    _press("mix:daily", context)
+    assert db.get_weekly_mix_enabled(USER) and db.get_mix_frequency(USER) == "daily"
+    for task in context.tasks:
+        task.close()
+    _press("mix:weekly", context)
+    assert db.get_mix_frequency(USER) == "weekly"
+    for task in context.tasks:
+        task.close()
+    item = db.save_weekly_mix_items(USER, [{"title": "Rated", "artist": "R"}])[0]
+    _press(f"mixfb:{item}:-1", _context(), uid="2002")
+    assert ("Rated", "R") not in db.mix_feedback_summary(USER)["disliked"]
+    message, _ = _press(f"mixfb:{item}:-1", _context())
+    assert ("Rated", "R") in db.mix_feedback_summary(USER)["disliked"]
+    assert not message.replies, "rating answers with a toast, not a message"
+    _press("mixfb:junk", _context())
 
     # Gift menu.
     message, _ = _press("pay:gift", _context())

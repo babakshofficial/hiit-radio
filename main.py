@@ -1060,14 +1060,22 @@ async def refund_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _mix_status(user_id):
-    enabled = user_manager.database.get_weekly_mix_enabled(user_id)
-    button = InlineKeyboardButton(
-        msg.t("btn_mix_off" if enabled else "btn_mix_on"),
-        callback_data="mix:off" if enabled else "mix:on",
-    )
+    db = user_manager.database
+    if not db.get_weekly_mix_enabled(user_id):
+        row = [
+            InlineKeyboardButton(msg.t("btn_mix_daily"), callback_data="mix:daily"),
+            InlineKeyboardButton(msg.t("btn_mix_weekly"), callback_data="mix:weekly"),
+        ]
+        return msg.t("mix_status_off"), _with_back(InlineKeyboardMarkup([row]))
+    frequency = db.get_mix_frequency(user_id)
+    other = "weekly" if frequency == "daily" else "daily"
+    row = [
+        InlineKeyboardButton(msg.t(f"btn_mix_{other}"), callback_data=f"mix:{other}"),
+        InlineKeyboardButton(msg.t("btn_mix_off"), callback_data="mix:off"),
+    ]
     return (
-        msg.t("mix_status_on" if enabled else "mix_status_off"),
-        _with_back(InlineKeyboardMarkup([[button]])),
+        msg.t("mix_status_daily" if frequency == "daily" else "mix_status_on"),
+        _with_back(InlineKeyboardMarkup([row])),
     )
 
 
@@ -2351,6 +2359,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer(msg.cancel_no_job(), show_alert=True)
         return
 
+    if data.startswith("mixfb:"):
+        # Answered with a toast so rating a pick doesn't add chat messages.
+        resolve_lang(update.effective_user)
+        try:
+            _, item_id, rating = data.split(":")
+            item = user_manager.database.set_mix_feedback(
+                update.effective_user.id, int(item_id), int(rating),
+            )
+        except ValueError:
+            item = None
+        if not item:
+            await query.answer(msg.pick_expired_short())
+        else:
+            await query.answer(msg.t(
+                "mix_feedback_like" if int(rating) > 0 else "mix_feedback_dislike",
+            ))
+        return
+
     await query.answer()
 
     if data.startswith("awiz:"):
@@ -2641,16 +2667,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if data in ("mix:on", "mix:off"):
+    if data in ("mix:on", "mix:off", "mix:daily", "mix:weekly"):
         db = user_manager.database
         uid = update.effective_user.id
-        enable = data == "mix:on"
+        action = data.split(":", 1)[1]
+        enable = action != "off"
+        if action in ("daily", "weekly"):
+            db.set_mix_frequency(uid, action)
+            text = msg.t(f"mix_set_{action}")
+        else:
+            text = msg.t("mix_enabled" if enable else "mix_disabled")
         db.set_weekly_mix(uid, enable)
-        await query.message.reply_text(
-            msg.t("mix_enabled" if enable else "mix_disabled"), reply_markup=_back_button(),
-        )
+        await query.message.reply_text(text, reply_markup=_back_button())
         if enable:
-            # claim_weekly_mix keeps toggling from producing more than one a week.
+            # claim_weekly_mix keeps toggling from producing more than one per period.
             context.application.create_task(weekly_mix.send_mix(context.bot, db, uid))
         return
 

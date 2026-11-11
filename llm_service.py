@@ -190,7 +190,7 @@ def set_cached_recommendations(user_id, recs):
     _discover_cache[str(user_id)] = {"ts": time.time(), "recs": recs}
 
 
-async def recommend_songs(history, user_id=None, limit=10):
+async def recommend_songs(history, user_id=None, limit=10, avoid=None):
     """Return (list of {title, artist} dicts, usage_meta) or (None, usage_meta) on failure."""
     model = os.getenv("LLM_MODEL", "gpt-4o-mini").strip()
     usage = {
@@ -222,10 +222,14 @@ async def recommend_songs(history, user_id=None, limit=10):
         '{"recommendations": [{"title": "Song Name", "artist": "Artist Name"}, ...]} '
         f"Include exactly {limit} recommendations."
     )
-    user_prompt = (
-        f"Download history (most recent first):\n{history_text}\n\n"
-        f"Recommend {limit} songs as JSON."
-    )
+    avoid_text = _format_history(avoid or [])
+    user_prompt = f"Download history (most recent first):\n{history_text}\n\n"
+    if avoid_text:
+        user_prompt += (
+            "The user disliked these suggestions; avoid them and similar songs:\n"
+            f"{avoid_text}\n\n"
+        )
+    user_prompt += f"Recommend {limit} songs as JSON."
 
     headers = {
         "Authorization": f"Bearer {api_key}",

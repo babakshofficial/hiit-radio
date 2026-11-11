@@ -8,6 +8,9 @@ from contextlib import contextmanager
 
 DEFAULT_DB_PATH = os.getenv("DATABASE_PATH", "hiit_radio.db")
 
+# Seconds between personal mixes, per user setting.
+MIX_INTERVALS = {"daily": 86400, "weekly": 7 * 86400}
+
 _SCHEMA = """
 PRAGMA journal_mode=WAL;
 
@@ -211,6 +214,17 @@ CREATE TABLE IF NOT EXISTS weekly_mix_items (
     created_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS mix_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    item_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    artist TEXT,
+    rating INTEGER NOT NULL,
+    created_at REAL NOT NULL,
+    UNIQUE(user_id, item_id)
+);
+
 CREATE TABLE IF NOT EXISTS followed_artists (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT NOT NULL,
@@ -379,6 +393,7 @@ class Database:
                 "ALTER TABLE users ADD COLUMN commands_lang TEXT",
                 "ALTER TABLE users ADD COLUMN weekly_mix_enabled INTEGER DEFAULT 0",
                 "ALTER TABLE users ADD COLUMN weekly_mix_last_sent REAL",
+                "ALTER TABLE users ADD COLUMN mix_frequency TEXT DEFAULT 'weekly'",
                 "ALTER TABLE payments ADD COLUMN grant_type TEXT",
                 "ALTER TABLE payments ADD COLUMN grant_ref INTEGER",
                 "ALTER TABLE payments ADD COLUMN grant_days INTEGER",
@@ -601,13 +616,14 @@ class Database:
                 )
             return cur.lastrowid
 
-    def get_user_history(self, user_id, limit=10):
+    def get_user_history(self, user_id, limit=10, since=None):
         user_id = str(user_id)
         with self._conn() as conn:
             rows = conn.execute(
                 """SELECT id, title, artist, album, platform, created_at
-                   FROM download_history WHERE user_id=? ORDER BY created_at DESC LIMIT ?""",
-                (user_id, limit),
+                   FROM download_history WHERE user_id=? AND created_at>=?
+                   ORDER BY created_at DESC LIMIT ?""",
+                (user_id, float(since or 0), limit),
             ).fetchall()
             return [dict(r) for r in rows]
 
@@ -1801,19 +1817,44 @@ class Database:
                 (1 if enabled else 0, user_id),
             )
 
-    def list_weekly_mix_due(self, now, interval):
+    def get_mix_frequency(self, user_id):
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT mix_frequency FROM users WHERE user_id=?", (str(user_id),),
+            ).fetchone()
+        freq = row["mix_frequency"] if row else None
+        return freq if freq in MIX_INTERVALS else "weekly"
+
+    def set_mix_frequency(self, user_id, frequency):
+        if frequency not in MIX_INTERVALS:
+            raise ValueError(f"unknown mix frequency: {frequency}")
+        user_id = str(user_id)
+        self.touch_user(user_id)
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE users SET mix_frequency=? WHERE user_id=?", (frequency, user_id),
+            )
+
+    def list_weekly_mix_due(self, now, interval=None):
+        """Users whose mix is due. ``interval`` overrides each user's frequency."""
+        if interval is not None:
+            cutoff, args = "?", (float(now) - interval,)
+        else:
+            cutoff = "? - CASE mix_frequency WHEN 'daily' THEN ? ELSE ? END"
+            args = (float(now), MIX_INTERVALS["daily"], MIX_INTERVALS["weekly"])
         with self._conn() as conn:
             rows = conn.execute(
-                """SELECT user_id FROM users
+                f"""SELECT user_id FROM users
                    WHERE weekly_mix_enabled=1 AND is_blocked=0
-                     AND (weekly_mix_last_sent IS NULL OR weekly_mix_last_sent<=?)""",
-                (float(now) - interval,),
+                     AND (weekly_mix_last_sent IS NULL OR weekly_mix_last_sent<={cutoff})""",
+                args,
             ).fetchall()
             return [r["user_id"] for r in rows]
 
-    def claim_weekly_mix(self, user_id, now, interval):
-        """Atomically claim this week's send.
+    def claim_weekly_mix(self, user_id, now, interval=None):
+        """Atomically claim this period's send.
 
+        ``interval`` defaults to the user's own frequency (daily or weekly).
         Returns the previous send time (None if never sent), or False when the user
         opted out or a mix was already sent inside the interval.
         """
@@ -1821,11 +1862,14 @@ class Database:
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT weekly_mix_enabled, weekly_mix_last_sent FROM users WHERE user_id=?",
+                """SELECT weekly_mix_enabled, weekly_mix_last_sent, mix_frequency
+                   FROM users WHERE user_id=?""",
                 (user_id,),
             ).fetchone()
             if not row or not row["weekly_mix_enabled"]:
                 return False
+            if interval is None:
+                interval = MIX_INTERVALS.get(row["mix_frequency"], MIX_INTERVALS["weekly"])
             previous = row["weekly_mix_last_sent"]
             if previous is not None and float(previous) > float(now) - interval:
                 return False
@@ -1866,6 +1910,53 @@ class Database:
                 (int(item_id), str(user_id)),
             ).fetchone()
             return dict(row) if row else None
+
+    def recent_mix_pairs(self, user_id, days=30, now=None):
+        """``(title, artist)`` pairs already sent in a mix inside the window."""
+        now = time.time() if now is None else float(now)
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT title, artist FROM weekly_mix_items
+                   WHERE user_id=? AND created_at>=?""",
+                (str(user_id), now - days * 86400),
+            ).fetchall()
+            return [(r["title"], r["artist"] or "") for r in rows]
+
+    def set_mix_feedback(self, user_id, item_id, rating):
+        """Rate one of the user's own mix picks. Returns the item, or None if not theirs."""
+        item = self.get_weekly_mix_item(item_id, user_id)
+        if not item:
+            return None
+        rating = 1 if int(rating) > 0 else -1
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO mix_feedback
+                   (user_id, item_id, title, artist, rating, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(user_id, item_id)
+                   DO UPDATE SET rating=excluded.rating, created_at=excluded.created_at""",
+                (str(user_id), int(item_id), item["title"], item["artist"], rating, time.time()),
+            )
+        return item
+
+    def mix_feedback_summary(self, user_id, limit=200):
+        """Liked and disliked pairs, plus artists disliked twice and never liked."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT title, artist, rating FROM mix_feedback
+                   WHERE user_id=? ORDER BY created_at DESC LIMIT ?""",
+                (str(user_id), limit),
+            ).fetchall()
+        liked, disliked, artist_score = [], [], {}
+        for r in rows:
+            pair = (r["title"], r["artist"] or "")
+            (liked if r["rating"] > 0 else disliked).append(pair)
+            key = (r["artist"] or "").strip().lower()
+            if key:
+                ups, downs = artist_score.get(key, (0, 0))
+                artist_score[key] = (ups + (r["rating"] > 0), downs + (r["rating"] < 0))
+        disliked_artists = {a for a, (ups, downs) in artist_score.items() if downs >= 2 and not ups}
+        return {"liked": liked, "disliked": disliked, "disliked_artists": disliked_artists}
 
     def recent_releases_for_user(self, user_id, days=14, limit=5, now=None):
         """Followed artists' albums by actual release date, so baselines don't count."""

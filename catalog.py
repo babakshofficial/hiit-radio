@@ -452,5 +452,36 @@ async def fetch_artist(artist_id: str) -> dict:
     return await asyncio.to_thread(_deezer_artist_sync, artist_id)
 
 
+def _deezer_related_top_sync(artist_name: str, per_artist: int = 3,
+                             related_limit: int = 5) -> list[dict]:
+    """Top tracks of artists Deezer lists as related to ``artist_name``."""
+    want = _squash(artist_name)
+    if not want:
+        return []
+    try:
+        hits = _deezer_get("/search/artist", q=artist_name, limit=5).get("data") or []
+        match = next((h for h in hits if _squash(h.get("name", "")) == want), None)
+        if not match:
+            return []
+        related = _deezer_get(f"/artist/{match['id']}/related", limit=related_limit)
+        tracks = []
+        for other in (related.get("data") or [])[:related_limit]:
+            top = _deezer_get(f"/artist/{other['id']}/top", limit=per_artist)
+            for item in top.get("data") or []:
+                meta = _deezer_track_meta(item)
+                if meta.title:
+                    tracks.append({"title": meta.title, "artist": meta.artist or ""})
+        return tracks
+    except (CatalogError, OSError, KeyError, TypeError, ValueError):
+        return []
+
+
+async def fetch_related_tracks(artist_name: str, per_artist: int = 3,
+                               related_limit: int = 5) -> list[dict]:
+    return await asyncio.to_thread(
+        _deezer_related_top_sync, artist_name, per_artist, related_limit,
+    )
+
+
 async def fetch_artist_latest_albums(artist_id: str, limit: int = 5) -> list[dict]:
     return await asyncio.to_thread(_deezer_artist_latest_albums, artist_id, limit)
