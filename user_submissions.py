@@ -80,14 +80,15 @@ def set_state(context, step, data=None):
 
 
 def clear(context):
-    context.user_data.pop("await_input", None)
     st = state(context)
-    tmp_audio = st.get("tmp_audio_path")
-    if tmp_audio and os.path.isfile(tmp_audio):
-        try:
-            os.remove(tmp_audio)
-        except OSError:
-            pass
+    context.user_data.pop("await_input", None)
+    for key in ("tmp_audio_path", "tmp_cover_path"):
+        path = st.get(key)
+        if path and os.path.isfile(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
 
 
 def state(context):
@@ -441,16 +442,100 @@ async def on_audio_message(update, context):
     except OSError:
         pass
 
-    set_state(
-        context,
-        "title",
-        {
-            "tmp_audio_path": mp3_path,
-            "telegram_audio_file_id": file_id,
-        },
-    )
+    data = {
+        "tmp_audio_path": mp3_path,
+        "telegram_audio_file_id": file_id,
+    }
+    title, artist, cover_raw = _extract_audio_metadata(message, mp3_path)
+    if cover_raw:
+        try:
+            processed = _downloader()._process_cover_artwork(cover_raw)
+        except Exception as e:
+            logger.debug("embedded cover processing failed: %s", e)
+            processed = None
+        if processed:
+            cover_path = str(tmp_dir / f"cover_draft_{int(time.time())}.jpg")
+            with open(cover_path, "wb") as f:
+                f.write(processed)
+            data["tmp_cover_path"] = cover_path
+
+    if title and artist:
+        data["title"] = title
+        data["artist"] = artist
+        set_state(context, "confirm_meta", data)
+        await message.reply_text(
+            msg.t("usub_meta_confirm", title=title, artist=artist),
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(msg.t("usub_btn_meta_ok"), callback_data="usub:meta:ok"),
+                    InlineKeyboardButton(msg.t("usub_btn_meta_edit"), callback_data="usub:meta:edit"),
+                ],
+                _cancel_row(),
+            ]),
+        )
+        return True
+    if title:
+        data["title"] = title
+        set_state(context, "artist", data)
+        await message.reply_text(msg.t("usub_prompt_artist"), reply_markup=InlineKeyboardMarkup([_cancel_row()]))
+        return True
+    set_state(context, "title", data)
     await message.reply_text(msg.t("usub_prompt_title"), reply_markup=InlineKeyboardMarkup([_cancel_row()]))
     return True
+
+
+def _clean_meta(value):
+    value = " ".join(str(value or "").split())
+    return value[:200]
+
+
+def _extract_audio_metadata(message, mp3_path):
+    """Return (title, artist, cover_bytes) from Telegram info and ID3 tags."""
+    title = artist = ""
+    cover = None
+    audio = message.audio
+    if audio:
+        title = _clean_meta(audio.title)
+        artist = _clean_meta(audio.performer)
+    try:
+        tags = MP3(mp3_path, ID3=ID3).tags
+    except Exception:
+        tags = None
+    if tags is not None:
+        if not title and tags.get("TIT2"):
+            title = _clean_meta(tags["TIT2"].text[0] if tags["TIT2"].text else "")
+        if not artist and tags.get("TPE1"):
+            artist = _clean_meta(tags["TPE1"].text[0] if tags["TPE1"].text else "")
+        apics = tags.getall("APIC")
+        if apics:
+            cover = apics[0].data
+    if not title:
+        name = (audio.file_name if audio else None) or (
+            message.document.file_name if message.document else None
+        )
+        if name:
+            title = _clean_meta(os.path.splitext(name)[0].replace("_", " "))
+    return title, artist, cover
+
+
+def _artwork_keyboard(st):
+    rows = []
+    cover = st.get("tmp_cover_path")
+    if cover and os.path.isfile(cover):
+        rows.append([InlineKeyboardButton(msg.t("usub_btn_use_file_cover"), callback_data="usub:art:file")])
+    rows.append(_cancel_row())
+    return InlineKeyboardMarkup(rows)
+
+
+async def start_from_audio(update, context):
+    """Start a submission directly from an audio message the user just sent."""
+    message = update.message
+    ok, reason = submission_quota_ok(_db(), _chat_id(message))
+    if not ok:
+        await message.reply_text(msg.t(reason), reply_markup=InlineKeyboardMarkup([_back_menu_row()]))
+        return
+    set_state(context, "audio", {})
+    await on_audio_message(update, context)
 
 
 async def on_photo_message(update, context):
@@ -479,7 +564,7 @@ async def on_photo_message(update, context):
         await message.reply_text(msg.t("usub_bad_artwork"), reply_markup=InlineKeyboardMarkup([_cancel_row()]))
         return True
 
-    await _finalize_submission(update, context, st, processed)
+    await _finalize_submission(message, update.effective_user, context, st, processed)
     return True
 
 
@@ -519,7 +604,7 @@ async def on_text(update, context, pending):
         set_state(context, "artwork", st)
         await message.reply_text(
             msg.t("usub_prompt_artwork"),
-            reply_markup=InlineKeyboardMarkup([_cancel_row()]),
+            reply_markup=_artwork_keyboard(st),
         )
         return
 
@@ -547,14 +632,12 @@ async def on_genre_callback(query, context, code):
     set_state(context, "artwork", st)
     await query.message.edit_text(
         msg.t("usub_prompt_artwork"),
-        reply_markup=InlineKeyboardMarkup([_cancel_row()]),
+        reply_markup=_artwork_keyboard(st),
     )
 
 
-async def _finalize_submission(update, context, st, artwork_jpeg):
-    message = update.message
+async def _finalize_submission(message, user, context, st, artwork_jpeg):
     user_id = message.chat.id
-    user = update.effective_user
     tmp_audio = st.get("tmp_audio_path")
     if not tmp_audio or not os.path.isfile(tmp_audio):
         clear(context)
@@ -590,6 +673,12 @@ async def _finalize_submission(update, context, st, artwork_jpeg):
         artwork_path=art_final,
     )
 
+    tmp_cover = st.get("tmp_cover_path")
+    if tmp_cover and os.path.isfile(tmp_cover):
+        try:
+            os.remove(tmp_cover)
+        except OSError:
+            pass
     clear(context)
     await message.reply_text(
         msg.t("usub_submitted", title=title, artist=artist),
@@ -832,6 +921,41 @@ async def on_callback(update, context):
     if data == "usub:cancel":
         clear(context)
         await query.message.edit_text(msg.t("awiz_cancelled"))
+        return
+
+    if data in ("usub:meta:ok", "usub:meta:edit"):
+        st = state(context)
+        if st.get("step") != "confirm_meta":
+            return
+        if data == "usub:meta:ok":
+            set_state(context, "genre", st)
+            await query.message.edit_text(msg.t("usub_prompt_genre"), reply_markup=_genre_keyboard())
+        else:
+            set_state(context, "title", st)
+            await query.message.edit_text(
+                msg.t("usub_prompt_title"),
+                reply_markup=InlineKeyboardMarkup([_cancel_row()]),
+            )
+        return
+
+    if data == "usub:art:file":
+        st = state(context)
+        if st.get("step") != "artwork":
+            return
+        cover = st.get("tmp_cover_path")
+        if not cover or not os.path.isfile(cover):
+            await query.message.reply_text(
+                msg.t("usub_session_expired"),
+                reply_markup=InlineKeyboardMarkup([_cancel_row()]),
+            )
+            return
+        with open(cover, "rb") as f:
+            artwork = f.read()
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await _finalize_submission(query.message, update.effective_user, context, st, artwork)
         return
 
     if len(parts) >= 3 and parts[0] == "usub" and parts[1] == "g":

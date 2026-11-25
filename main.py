@@ -45,6 +45,7 @@ from metadata import (
 )
 from downloader import MusicDownloader, QUALITIES, DEFAULT_QUALITY
 import catalog
+import button_styles
 from user_manager import UserManager
 from cred_status import get_credentials_status
 from gates import ensure_access, validate_channel_gate
@@ -4639,16 +4640,23 @@ async def user_submission_media_handler(update: Update, context: ContextTypes.DE
     if not await ensure_access(update, context):
         return
     await _touch_user(update)
-    if await user_submissions.on_audio_message(update, context):
+    message = update.message
+    if not message or not (message.audio or message.document):
         return
     pending = peek_await_input(context)
-    if not pending and update.message and (update.message.audio or update.message.document):
-        ok, _reason = user_submissions.submission_quota_ok(
-            user_manager.database, update.effective_user.id,
-        )
-        if ok:
-            await user_submissions.start_submit(update.message, context)
+    if admin_wizard.is_wizard(pending):
+        # The admin wizard's own non-text handler owns this message.
+        return
+    if user_submissions.is_wizard(pending):
+        if (pending.get("data") or {}).get("step") == "audio":
             await user_submissions.on_audio_message(update, context)
+            return
+        # A new audio file replaces the in-progress draft.
+        user_submissions.clear(context)
+    elif pending:
+        # Sending audio instead of answering a prompt: treat it as a library upload.
+        clear_await_input(context)
+    await user_submissions.start_from_audio(update, context)
 
 
 async def user_submission_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4809,6 +4817,7 @@ def main():
         sys.exit(1)
 
     _acquire_singleton_lock()
+    button_styles.install()
 
     application = (
         ApplicationBuilder()
@@ -4925,6 +4934,7 @@ def main():
         application.add_handler(
             MessageHandler(
                 filters.Document.ALL
+                & ~(filters.Document.AUDIO | filters.Document.MP3)
                 & filters.ChatType.PRIVATE
                 & filters.User(user_id=int(ADMIN_ID)),
                 cookies_document,

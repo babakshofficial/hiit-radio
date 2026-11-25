@@ -40,7 +40,7 @@ If `/creds` or error reports show `bot_check`, try these in order:
 3. From the project directory:
 
 ```bash
-cd /home/babak/Desktop/Projects/hiit-radio-bot
+cd /mnt/data/Projects/hiit-radio-bot
 .venv/bin/yt-dlp --cookies-from-browser chrome --cookies cookies.txt "ytsearch1:test" --skip-download
 ```
 

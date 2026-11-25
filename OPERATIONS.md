@@ -37,6 +37,11 @@
 - `/payments` lists charges and `/refund <number>` refunds one. Refunding a gift returns the money to the buyer and removes the gift from whoever redeemed it.
 - `/terms` and `/paysupport` are always available, even to users who haven't joined the required channel.
 
+## Button colors
+
+- `button_styles.py` colors inline buttons (Bot API 9.4 `style`) by `callback_data` rule: red for cancel/delete, green for pay/confirm, blue for menus; navigation and long pick lists stay gray. Pass `api_kwargs={"style": ...}` on a button to override.
+- Set `BUTTON_STYLES=0` to turn it off. Older Telegram clients ignore `style` and show gray buttons.
+
 ## Song recognition
 
 - It uses `shazamio`, an unofficial client. If Shazam changes its API, users see "not available" and the rest of the bot keeps working.

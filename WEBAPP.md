@@ -72,13 +72,13 @@ One unit starts the Telegram bot, FastAPI (`127.0.0.1:8000`), and Next.js (`127.
 Build the frontend once (or after UI changes):
 
 ```bash
-cd /home/babak/Desktop/Projects/hiit-radio-bot/web && npm run build
+cd /mnt/data/Projects/hiit-radio-bot/web && npm run build
 ```
 
 Install and start:
 
 ```bash
-sudo cp /home/babak/Desktop/Projects/hiit-radio-bot/deploy/hiit-radio.service /etc/systemd/system/hiit-radio.service
+sudo cp /mnt/data/Projects/hiit-radio-bot/deploy/hiit-radio.service /etc/systemd/system/hiit-radio.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now hiit-radio.service
 sudo journalctl -u hiit-radio.service -f
